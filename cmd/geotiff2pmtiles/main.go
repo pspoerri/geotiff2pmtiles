@@ -122,7 +122,8 @@ func main() {
 	}
 
 	// Determine zoom levels.
-	autoMax := coord.MaxZoomForResolution(sources[0].PixelSize(), mergedBounds.CenterLat())
+	pixelSizeMeters := coord.PixelSizeInGroundMeters(sources[0].PixelSize(), sources[0].EPSG(), mergedBounds.CenterLat())
+	autoMax := coord.MaxZoomForResolution(pixelSizeMeters, mergedBounds.CenterLat(), tileSize)
 	if maxZoom < 0 {
 		maxZoom = autoMax
 	}

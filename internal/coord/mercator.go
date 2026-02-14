@@ -96,15 +96,41 @@ func ResolutionAtLat(lat float64, zoom int) float64 {
 	return EarthCircumference * math.Cos(lat*math.Pi/180.0) / math.Pow(2, float64(zoom)) / float64(DefaultTileSize)
 }
 
-// MaxZoomForResolution calculates the maximum zoom level that matches a given ground resolution.
-func MaxZoomForResolution(pixelSize float64, centerLat float64) int {
-	for z := 30; z >= 0; z-- {
-		res := ResolutionAtLat(centerLat, z)
-		if res >= pixelSize {
-			return z
-		}
+// PixelSizeInGroundMeters converts a pixel size from CRS units to ground meters.
+// For geographic CRS (EPSG:4326), the pixel size is in degrees.
+// For Web Mercator (EPSG:3857), it's in projected meters (stretched by 1/cos(lat)).
+// For metric projections (e.g. EPSG:2056), it's already in meters.
+func PixelSizeInGroundMeters(pixelSizeCRS float64, epsg int, lat float64) float64 {
+	switch epsg {
+	case 4326:
+		// Degrees of longitude to ground meters at the given latitude.
+		return pixelSizeCRS * EarthCircumference * math.Cos(lat*math.Pi/180.0) / 360.0
+	case 3857:
+		// Web Mercator meters to ground meters at the given latitude.
+		return pixelSizeCRS * math.Cos(lat*math.Pi/180.0)
+	default:
+		// Assume metric CRS (e.g. EPSG:2056).
+		return pixelSizeCRS
 	}
-	return 0
+}
+
+// MaxZoomForResolution calculates the maximum zoom level whose ground resolution
+// is at least as coarse as the given pixel size (in ground meters).
+// tileSize is the number of pixels per tile edge (e.g. 256 or 512).
+func MaxZoomForResolution(pixelSizeMeters float64, centerLat float64, tileSize int) int {
+	if pixelSizeMeters <= 0 || tileSize <= 0 {
+		return 0
+	}
+	cosLat := math.Cos(centerLat * math.Pi / 180.0)
+	z := math.Log2(EarthCircumference * cosLat / (pixelSizeMeters * float64(tileSize)))
+	iz := int(math.Floor(z))
+	if iz < 0 {
+		return 0
+	}
+	if iz > 28 {
+		return 28
+	}
+	return iz
 }
 
 // TilesInBounds returns all tile coordinates at the given zoom level that intersect the given WGS84 bounds.
