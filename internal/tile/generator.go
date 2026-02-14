@@ -156,6 +156,12 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 			continue
 		}
 
+		// Sort tiles along the Hilbert curve so that workers process spatially
+		// nearby tiles consecutively. This dramatically improves COG tile cache
+		// hit rates because the active working set stays in a compact 2D region
+		// rather than spanning full rows.
+		coord.SortTilesByHilbert(tiles)
+
 		// Create progress bar for this zoom level.
 		pb := newProgressBar(fmt.Sprintf("Zoom %2d", z), int64(len(tiles)))
 
@@ -165,34 +171,50 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		// After processing this level, we'll replace the store contents.
 		nextStore := newTileImageStore(len(tiles))
 
-		// Create job channel and error channel.
-		jobs := make(chan tileJob, cfg.Concurrency*2)
-		var wg sync.WaitGroup
-		errCh := make(chan error, 1)
+		// Partition tiles into contiguous chunks along the Hilbert curve.
+		// Each worker gets its own spatial region so that nearby COG tiles
+		// stay hot in the cache without cross-worker interference.
+		nTiles := len(tiles)
+		nWorkers := cfg.Concurrency
+		if nWorkers > nTiles {
+			nWorkers = nTiles
+		}
 
-		// Start workers.
-		for w := 0; w < cfg.Concurrency; w++ {
+		var wg sync.WaitGroup
+		errCh := make(chan error, nWorkers)
+
+		chunkBase := nTiles / nWorkers
+		chunkRem := nTiles % nWorkers
+		offset := 0
+
+		for w := 0; w < nWorkers; w++ {
+			// Distribute remainder tiles evenly across the first workers.
+			size := chunkBase
+			if w < chunkRem {
+				size++
+			}
+			chunk := tiles[offset : offset+size]
+			offset += size
+
 			wg.Add(1)
-			go func() {
+			go func(chunk [][3]int) {
 				defer wg.Done()
-				for job := range jobs {
+				for _, t := range chunk {
+					z, x, y := t[0], t[1], t[2]
 					var img *image.RGBA
 
 					if isMaxZoom {
 						if cfg.IsTerrarium {
-							// Render float data as Terrarium RGB.
-							img = renderTileTerrarium(job.Z, job.X, job.Y, cfg.TileSize, sources, proj, floatCache, cfg.Resampling)
+							img = renderTileTerrarium(z, x, y, cfg.TileSize, sources, proj, floatCache, cfg.Resampling)
 						} else {
-							// Render from source COG data.
-							img = renderTile(job.Z, job.X, job.Y, cfg.TileSize, sources, proj, cogCache, cfg.Resampling)
+							img = renderTile(z, x, y, cfg.TileSize, sources, proj, cogCache, cfg.Resampling)
 						}
 					} else {
-						// Downsample from 4 child tiles at z+1.
-						childZ := job.Z + 1
-						tl := store.Get(childZ, 2*job.X, 2*job.Y)
-						tr := store.Get(childZ, 2*job.X+1, 2*job.Y)
-						bl := store.Get(childZ, 2*job.X, 2*job.Y+1)
-						br := store.Get(childZ, 2*job.X+1, 2*job.Y+1)
+						childZ := z + 1
+						tl := store.Get(childZ, 2*x, 2*y)
+						tr := store.Get(childZ, 2*x+1, 2*y)
+						bl := store.Get(childZ, 2*x, 2*y+1)
+						br := store.Get(childZ, 2*x+1, 2*y+1)
 						if cfg.IsTerrarium {
 							img = downsampleTileTerrarium(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
 						} else {
@@ -206,24 +228,22 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 						continue
 					}
 
-					// Store for next pyramid level (if not the lowest zoom).
 					if z > cfg.MinZoom {
-						nextStore.Put(job.Z, job.X, job.Y, img)
+						nextStore.Put(z, x, y, img)
 					}
 
-					// Encode and write.
 					data, err := cfg.Encoder.Encode(img)
 					if err != nil {
 						select {
-						case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", job.Z, job.X, job.Y, err):
+						case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
 						default:
 						}
 						return
 					}
 
-					if err := writer.WriteTile(job.Z, job.X, job.Y, data); err != nil {
+					if err := writer.WriteTile(z, x, y, data); err != nil {
 						select {
-						case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", job.Z, job.X, job.Y, err):
+						case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
 						default:
 						}
 						return
@@ -233,14 +253,9 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 					totalBytes.Add(int64(len(data)))
 					pb.Increment()
 				}
-			}()
+			}(chunk)
 		}
 
-		// Feed jobs.
-		for _, t := range tiles {
-			jobs <- tileJob{Z: t[0], X: t[1], Y: t[2]}
-		}
-		close(jobs)
 		wg.Wait()
 		pb.Finish()
 
