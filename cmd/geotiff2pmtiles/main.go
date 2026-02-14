@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -35,6 +36,8 @@ func main() {
 		concurrency int
 		verbose     bool
 		resampling  string
+		cpuProfile  string
+		memProfile  string
 	)
 
 	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium")
@@ -46,6 +49,8 @@ func main() {
 	flag.StringVar(&resampling, "resampling", "bilinear", "Interpolation method: bilinear, nearest")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
+	flag.StringVar(&cpuProfile, "cpuprofile", "", "Write CPU profile to file")
+	flag.StringVar(&memProfile, "memprofile", "", "Write memory profile to file")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -59,6 +64,40 @@ func main() {
 	if showVersion {
 		fmt.Printf("geotiff2pmtiles %s (commit %s, built %s)\n", version, commit, buildDate)
 		os.Exit(0)
+	}
+
+	// CPU profiling.
+	if cpuProfile != "" {
+		f, err := os.Create(cpuProfile)
+		if err != nil {
+			log.Fatalf("Creating CPU profile: %v", err)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatalf("Starting CPU profile: %v", err)
+		}
+		defer pprof.StopCPUProfile()
+		if verbose {
+			log.Printf("CPU profiling enabled → %s", cpuProfile)
+		}
+	}
+
+	// Memory profile (written at exit).
+	if memProfile != "" {
+		defer func() {
+			f, err := os.Create(memProfile)
+			if err != nil {
+				log.Fatalf("Creating memory profile: %v", err)
+			}
+			defer f.Close()
+			runtime.GC() // get up-to-date statistics
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				log.Fatalf("Writing memory profile: %v", err)
+			}
+			if verbose {
+				log.Printf("Memory profile written → %s", memProfile)
+			}
+		}()
 	}
 
 	args := flag.Args()

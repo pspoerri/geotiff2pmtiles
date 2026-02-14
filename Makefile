@@ -19,7 +19,7 @@ OUTPUT     := $(BUILD_DIR)/$(BINARY)
 FORMAT     ?= webp
 QUALITY    ?= 85
 MIN_ZOOM   ?= 14
-MAX_ZOOM   ?= 17
+MAX_ZOOM   ?= 16
 TILE_SIZE  ?= 512
 CONCURRENT ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
@@ -27,7 +27,7 @@ CONCURRENT ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo
         test test-race test-cover bench \
         lint fmt vet tidy check \
         clean clean-all \
-        run demo \
+        run demo demo-profile pprof-cpu pprof-mem \
         cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-windows cross-all \
         help
 
@@ -98,11 +98,38 @@ demo: build
 	./$(OUTPUT) --verbose \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
-		--min-zoom $(MIN_ZOOM) \
-		--max-zoom $(MAX_ZOOM) \
 		--tile-size $(TILE_SIZE) \
+		--max-zoom $(MAX_ZOOM) \
 		--concurrency $(CONCURRENT) \
 		data/ $(BUILD_DIR)/demo.pmtiles
+
+## demo-profile: Run demo with CPU and memory profiling
+demo-profile: build
+	./$(OUTPUT) --verbose \
+		--format $(FORMAT) \
+		--quality $(QUALITY) \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom $(MAX_ZOOM) \
+		--concurrency $(CONCURRENT) \
+		--cpuprofile $(BUILD_DIR)/cpu.prof \
+		--memprofile $(BUILD_DIR)/mem.prof \
+		data/ $(BUILD_DIR)/demo.pmtiles
+	@echo ""
+	@echo "Profile files written:"
+	@echo "  CPU: $(BUILD_DIR)/cpu.prof"
+	@echo "  Mem: $(BUILD_DIR)/mem.prof"
+	@echo ""
+	@echo "Analyze with:"
+	@echo "  go tool pprof -http=:8080 $(BUILD_DIR)/cpu.prof"
+	@echo "  go tool pprof -http=:8081 $(BUILD_DIR)/mem.prof"
+
+## pprof-cpu: Open CPU profile in browser (interactive flame graph)
+pprof-cpu:
+	$(GO) tool pprof -http=:8080 $(BUILD_DIR)/cpu.prof
+
+## pprof-mem: Open memory profile in browser (interactive flame graph)
+pprof-mem:
+	$(GO) tool pprof -http=:8081 $(BUILD_DIR)/mem.prof
 
 ## demo-jpeg: Demo with JPEG encoding (default quality)
 demo-jpeg: FORMAT=jpeg
