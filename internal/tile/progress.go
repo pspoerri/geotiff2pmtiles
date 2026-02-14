@@ -83,8 +83,18 @@ func (pb *progressBar) draw() {
 		rate = float64(processed) / secs
 	}
 
-	fmt.Fprintf(os.Stderr, "\r%s [%s] %3.0f%%  %d/%d tiles  %.0f/s  %s\033[K",
-		pb.label, bar, frac*100, processed, total, rate, formatDuration(elapsed))
+	// Compute ETA from current throughput.
+	etaStr := "—"
+	remaining := total - processed
+	if rate > 0 && remaining > 0 {
+		eta := time.Duration(float64(remaining)/rate) * time.Second
+		etaStr = formatDuration(eta)
+	} else if remaining <= 0 {
+		etaStr = "0s"
+	}
+
+	fmt.Fprintf(os.Stderr, "\r%s [%s] %3.0f%%  %d/%d tiles  %.0f/s  %s  ETA %s\033[K",
+		pb.label, bar, frac*100, processed, total, rate, formatDuration(elapsed), etaStr)
 }
 
 // formatDuration formats a duration concisely (e.g. "1m23s", "45s", "0s").
