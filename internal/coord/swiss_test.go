@@ -12,10 +12,10 @@ import (
 // Zurich (ETH):           E 2_683_474  N 1_247_862  →  lon 8.547970  lat 47.376870
 // Geneva (Jet d'eau):     E 2_500_560  N 1_118_017  →  lon 6.143200  lat 46.207450
 var swissRefPoints = []struct {
-	name                      string
-	easting, northing         float64
-	lon, lat                  float64
-	tolDeg                    float64 // tolerance in degrees
+	name              string
+	easting, northing float64
+	lon, lat          float64
+	tolDeg            float64 // tolerance in degrees
 }{
 	{
 		name:    "Bern (reference origin)",

@@ -22,7 +22,7 @@ func (e *TerrariumEncoder) Encode(img image.Image) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (e *TerrariumEncoder) Format() string       { return "terrarium" }
+func (e *TerrariumEncoder) Format() string        { return "terrarium" }
 func (e *TerrariumEncoder) PMTileType() uint8     { return TileTypePNG }
 func (e *TerrariumEncoder) FileExtension() string { return ".png" }
 

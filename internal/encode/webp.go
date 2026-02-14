@@ -33,6 +33,6 @@ func (e *WebPEncoder) Encode(img image.Image) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (e *WebPEncoder) Format() string       { return "webp" }
+func (e *WebPEncoder) Format() string        { return "webp" }
 func (e *WebPEncoder) PMTileType() uint8     { return TileTypeWebP }
 func (e *WebPEncoder) FileExtension() string { return ".webp" }

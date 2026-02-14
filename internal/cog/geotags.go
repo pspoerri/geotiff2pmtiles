@@ -2,10 +2,10 @@ package cog
 
 // GeoTIFF GeoKey IDs.
 const (
-	gkModelTypeGeoKey         = 1024
-	gkRasterTypeGeoKey        = 1025
-	gkGeographicTypeGeoKey    = 2048
-	gkProjectedCSTypeGeoKey   = 3072
+	gkModelTypeGeoKey       = 1024
+	gkRasterTypeGeoKey      = 1025
+	gkGeographicTypeGeoKey  = 2048
+	gkProjectedCSTypeGeoKey = 3072
 )
 
 // GeoInfo holds parsed GeoTIFF metadata.

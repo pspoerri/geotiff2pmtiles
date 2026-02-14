@@ -19,6 +19,6 @@ func (e *PNGEncoder) Encode(img image.Image) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (e *PNGEncoder) Format() string       { return "png" }
+func (e *PNGEncoder) Format() string        { return "png" }
 func (e *PNGEncoder) PMTileType() uint8     { return TileTypePNG }
 func (e *PNGEncoder) FileExtension() string { return ".png" }

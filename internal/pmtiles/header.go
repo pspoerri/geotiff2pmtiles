@@ -28,30 +28,30 @@ const (
 
 // Header represents the PMTiles v3 header (127 bytes).
 type Header struct {
-	RootDirOffset   uint64
-	RootDirLength   uint64
-	MetadataOffset  uint64
-	MetadataLength  uint64
-	LeafDirOffset   uint64
-	LeafDirLength   uint64
-	TileDataOffset  uint64
-	TileDataLength  uint64
-	NumAddressedTiles uint64
-	NumTileEntries  uint64
-	NumTileContents uint64
-	Clustered       bool
+	RootDirOffset       uint64
+	RootDirLength       uint64
+	MetadataOffset      uint64
+	MetadataLength      uint64
+	LeafDirOffset       uint64
+	LeafDirLength       uint64
+	TileDataOffset      uint64
+	TileDataLength      uint64
+	NumAddressedTiles   uint64
+	NumTileEntries      uint64
+	NumTileContents     uint64
+	Clustered           bool
 	InternalCompression uint8
-	TileCompression uint8
-	TileType        uint8
-	MinZoom         uint8
-	MaxZoom         uint8
-	MinLon          float32
-	MinLat          float32
-	MaxLon          float32
-	MaxLat          float32
-	CenterZoom      uint8
-	CenterLon       float32
-	CenterLat       float32
+	TileCompression     uint8
+	TileType            uint8
+	MinZoom             uint8
+	MaxZoom             uint8
+	MinLon              float32
+	MinLat              float32
+	MaxLon              float32
+	MaxLat              float32
+	CenterZoom          uint8
+	CenterLon           float32
+	CenterLat           float32
 }
 
 // NewHeader creates a header with basic metadata.

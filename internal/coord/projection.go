@@ -30,6 +30,6 @@ func ForEPSG(epsg int) Projection {
 // WGS84Identity is a no-op projection for data already in EPSG:4326.
 type WGS84Identity struct{}
 
-func (w *WGS84Identity) ToWGS84(x, y float64) (lon, lat float64) { return x, y }
+func (w *WGS84Identity) ToWGS84(x, y float64) (lon, lat float64)   { return x, y }
 func (w *WGS84Identity) FromWGS84(lon, lat float64) (x, y float64) { return lon, lat }
-func (w *WGS84Identity) EPSG() int { return 4326 }
+func (w *WGS84Identity) EPSG() int                                 { return 4326 }

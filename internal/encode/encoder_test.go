@@ -27,11 +27,11 @@ func testImage(size int) *image.RGBA {
 
 func TestNewEncoder(t *testing.T) {
 	tests := []struct {
-		format    string
-		wantFmt   string
-		wantType  uint8
-		wantExt   string
-		wantErr   bool
+		format   string
+		wantFmt  string
+		wantType uint8
+		wantExt  string
+		wantErr  bool
 	}{
 		{"jpeg", "jpeg", TileTypeJPEG, ".jpg", false},
 		{"jpg", "jpeg", TileTypeJPEG, ".jpg", false},

@@ -7,11 +7,11 @@ import (
 
 func TestLonLatToTile(t *testing.T) {
 	tests := []struct {
-		name      string
-		lon, lat  float64
-		zoom      int
-		wantX     int
-		wantY     int
+		name     string
+		lon, lat float64
+		zoom     int
+		wantX    int
+		wantY    int
 	}{
 		{"origin z0", 0, 0, 0, 0, 0},
 		{"london z10", -0.1278, 51.5074, 10, 511, 340},
@@ -130,11 +130,11 @@ func TestResolutionAtLat(t *testing.T) {
 
 func TestMaxZoomForResolution(t *testing.T) {
 	tests := []struct {
-		name       string
-		pixelSize  float64
-		lat        float64
-		tileSize   int
-		wantZoom   int
+		name      string
+		pixelSize float64
+		lat       float64
+		tileSize  int
+		wantZoom  int
 	}{
 		{"10m equator", 10, 0, 256, 13},
 		{"1m equator", 1, 0, 256, 17},

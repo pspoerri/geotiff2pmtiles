@@ -23,9 +23,9 @@ const (
 )
 
 type lzwEntry struct {
-	prefix int    // index of prefix entry (-1 for single-byte entries)
-	suffix byte   // the byte added by this entry
-	length int    // total length of the string
+	prefix int  // index of prefix entry (-1 for single-byte entries)
+	suffix byte // the byte added by this entry
+	length int  // total length of the string
 }
 
 // decompressTIFFLZW decompresses TIFF-style LZW data (MSB bit ordering).

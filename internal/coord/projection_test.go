@@ -7,14 +7,14 @@ import (
 
 func TestForEPSG(t *testing.T) {
 	tests := []struct {
-		epsg    int
-		wantNil bool
+		epsg     int
+		wantNil  bool
 		wantEPSG int
 	}{
 		{2056, false, 2056},
 		{4326, false, 4326},
 		{3857, false, 3857},
-		{32632, true, 0},  // UTM 32N — unsupported
+		{32632, true, 0}, // UTM 32N — unsupported
 		{0, true, 0},
 	}
 	for _, tt := range tests {
@@ -58,11 +58,11 @@ func TestWGS84Identity(t *testing.T) {
 func TestProjectionRoundTrip(t *testing.T) {
 	// Points inside Switzerland (valid for LV95) and also valid for other projections.
 	points := [][2]float64{
-		{8.5417, 47.3769},  // Zurich
-		{6.6323, 46.5197},  // Lausanne
-		{7.4474, 46.9480},  // Bern
-		{9.3767, 47.4245},  // St. Gallen
-		{8.9511, 46.0037},  // Lugano
+		{8.5417, 47.3769}, // Zurich
+		{6.6323, 46.5197}, // Lausanne
+		{7.4474, 46.9480}, // Bern
+		{9.3767, 47.4245}, // St. Gallen
+		{8.9511, 46.0037}, // Lugano
 	}
 
 	projections := []Projection{

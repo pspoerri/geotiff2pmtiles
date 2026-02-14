@@ -24,6 +24,6 @@ func (e *JPEGEncoder) Encode(img image.Image) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (e *JPEGEncoder) Format() string       { return "jpeg" }
+func (e *JPEGEncoder) Format() string        { return "jpeg" }
 func (e *JPEGEncoder) PMTileType() uint8     { return TileTypeJPEG }
 func (e *JPEGEncoder) FileExtension() string { return ".jpg" }

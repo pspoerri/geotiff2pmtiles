@@ -19,11 +19,11 @@ type Writer struct {
 	opts       WriterOptions
 	header     Header
 
-	tmpFile    *os.File
-	tmpOffset  uint64
-	entries    []Entry
-	mu         sync.Mutex
-	finalized  bool
+	tmpFile   *os.File
+	tmpOffset uint64
+	entries   []Entry
+	mu        sync.Mutex
+	finalized bool
 }
 
 // NewWriter creates a new PMTiles writer.

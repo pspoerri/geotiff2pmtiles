@@ -198,15 +198,15 @@ func main() {
 
 	// Build tile generation config.
 	cfg := tile.Config{
-		MinZoom:      minZoom,
-		MaxZoom:      maxZoom,
-		TileSize:     tileSize,
-		Concurrency:  concurrency,
-		Verbose:      verbose,
-		Encoder:      enc,
-		Bounds:       mergedBounds,
-		Resampling:   resamplingMode,
-		IsTerrarium:  format == "terrarium",
+		MinZoom:     minZoom,
+		MaxZoom:     maxZoom,
+		TileSize:    tileSize,
+		Concurrency: concurrency,
+		Verbose:     verbose,
+		Encoder:     enc,
+		Bounds:      mergedBounds,
+		Resampling:  resamplingMode,
+		IsTerrarium: format == "terrarium",
 	}
 
 	// Create PMTiles writer.

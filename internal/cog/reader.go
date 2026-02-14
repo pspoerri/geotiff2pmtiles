@@ -29,11 +29,11 @@ func (b Bounds) CenterLat() float64 {
 // Reader provides tile-level access to a COG/GeoTIFF file.
 // The file is memory-mapped for lock-free concurrent access.
 type Reader struct {
-	data     []byte // memory-mapped file contents
-	bo       binary.ByteOrder
-	ifds     []IFD
-	geo      GeoInfo
-	path     string
+	data []byte // memory-mapped file contents
+	bo   binary.ByteOrder
+	ifds []IFD
+	geo  GeoInfo
+	path string
 }
 
 // Open opens a COG/GeoTIFF file by memory-mapping it and parsing its structure.

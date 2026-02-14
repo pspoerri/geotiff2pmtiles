@@ -9,29 +9,29 @@ import (
 
 // TIFF tag IDs.
 const (
-	tagImageWidth                = 256
-	tagImageLength               = 257
-	tagBitsPerSample             = 258
-	tagCompression               = 259
-	tagPhotometric               = 262
-	tagStripOffsets               = 273
-	tagSamplesPerPixel           = 277
-	tagRowsPerStrip              = 278
-	tagStripByteCounts           = 279
-	tagPlanarConfig              = 284
-	tagTileWidth                 = 322
-	tagTileLength                = 323
-	tagTileOffsets               = 324
-	tagTileByteCounts            = 325
-	tagPredictor                 = 317
-	tagSampleFormat              = 339
-	tagJPEGTables                = 347
-	tagModelTiepointTag          = 33922
-	tagModelPixelScaleTag        = 33550
-	tagGeoKeyDirectoryTag        = 34735
-	tagGeoDoubleParamsTag        = 34736
-	tagGeoAsciiParamsTag         = 34737
-	tagGDAL_NODATA               = 42113
+	tagImageWidth         = 256
+	tagImageLength        = 257
+	tagBitsPerSample      = 258
+	tagCompression        = 259
+	tagPhotometric        = 262
+	tagStripOffsets       = 273
+	tagSamplesPerPixel    = 277
+	tagRowsPerStrip       = 278
+	tagStripByteCounts    = 279
+	tagPlanarConfig       = 284
+	tagTileWidth          = 322
+	tagTileLength         = 323
+	tagTileOffsets        = 324
+	tagTileByteCounts     = 325
+	tagPredictor          = 317
+	tagSampleFormat       = 339
+	tagJPEGTables         = 347
+	tagModelTiepointTag   = 33922
+	tagModelPixelScaleTag = 33550
+	tagGeoKeyDirectoryTag = 34735
+	tagGeoDoubleParamsTag = 34736
+	tagGeoAsciiParamsTag  = 34737
+	tagGDAL_NODATA        = 42113
 )
 
 // TIFF data types.
@@ -55,26 +55,26 @@ const (
 
 // IFD represents a parsed TIFF Image File Directory.
 type IFD struct {
-	Width            uint32
-	Height           uint32
-	TileWidth        uint32
-	TileHeight       uint32
-	BitsPerSample    []uint16
-	SamplesPerPixel  uint16
-	SampleFormat     []uint16
-	Compression      uint16
-	Photometric      uint16
-	PlanarConfig     uint16
-	Predictor        uint16
-	TileOffsets      []uint64
-	TileByteCounts   []uint64
-	JPEGTables       []byte
-	ModelTiepoint    []float64
-	ModelPixelScale  []float64
-	GeoKeys          []uint16
-	GeoDoubleParams  []float64
-	GeoAsciiParams   string
-	NoData           string
+	Width           uint32
+	Height          uint32
+	TileWidth       uint32
+	TileHeight      uint32
+	BitsPerSample   []uint16
+	SamplesPerPixel uint16
+	SampleFormat    []uint16
+	Compression     uint16
+	Photometric     uint16
+	PlanarConfig    uint16
+	Predictor       uint16
+	TileOffsets     []uint64
+	TileByteCounts  []uint64
+	JPEGTables      []byte
+	ModelTiepoint   []float64
+	ModelPixelScale []float64
+	GeoKeys         []uint16
+	GeoDoubleParams []float64
+	GeoAsciiParams  string
+	NoData          string
 }
 
 // TilesAcross returns the number of tiles in the horizontal direction.
