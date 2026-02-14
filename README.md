@@ -43,7 +43,7 @@ make build
 
 ### Cross-compilation
 
-Build for all supported platforms (Linux, macOS, Windows):
+Build for all supported platforms (Linux, macOS):
 
 ```bash
 make cross-all
@@ -56,7 +56,6 @@ make cross-linux          # Linux amd64
 make cross-linux-arm64    # Linux arm64
 make cross-darwin         # macOS amd64
 make cross-darwin-arm64   # macOS arm64
-make cross-windows        # Windows amd64
 ```
 
 ## Usage

@@ -28,7 +28,7 @@ CONCURRENT ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo
         lint fmt vet tidy check \
         clean clean-all \
         run demo demo-profile pprof-cpu pprof-mem \
-        cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-windows cross-all \
+        cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-all \
         help
 
 ## all: Build the binary (default target)
@@ -165,13 +165,8 @@ cross-darwin-arm64: $(BUILD_DIR)
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 $(CMD)
 
-## cross-windows: Build for Windows amd64
-cross-windows: $(BUILD_DIR)
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-windows-amd64.exe $(CMD)
-
 ## cross-all: Build for all supported platforms
-cross-all: cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-windows
+cross-all: cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64
 
 # ---------- Cleanup ----------
 
