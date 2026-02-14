@@ -47,9 +47,7 @@ func main() {
 
 	// Try reading a float tile
 	fmt.Println("\n--- Float Tile Read ---")
-	cog.SetLZWDebug(true)
 	data, w, h, err := r.ReadFloatTile(0, 0, 0)
-	cog.SetLZWDebug(false)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 	} else if data == nil {
