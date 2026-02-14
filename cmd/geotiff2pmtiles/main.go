@@ -153,6 +153,15 @@ func main() {
 		log.Printf("Opened %d COG(s) in %v", len(sources), time.Since(start).Round(time.Millisecond))
 	}
 
+	// Check for geographic holes in coverage.
+	if gaps := cog.CheckCoverageGaps(sources); len(gaps) > 0 {
+		log.Printf("WARNING: Detected %d geographic hole(s) in the input coverage:", len(gaps))
+		for i, g := range gaps {
+			log.Printf("  Hole %d: X [%.1f, %.1f], Y [%.1f, %.1f] (source CRS)",
+				i+1, g.MinX, g.MaxX, g.MinY, g.MaxY)
+		}
+	}
+
 	// Auto-detect float GeoTIFFs and suggest terrarium format.
 	isFloat := sources[0].IsFloat()
 	if isFloat {

@@ -648,6 +648,151 @@ func OpenAll(paths []string) ([]*Reader, error) {
 	return readers, nil
 }
 
+// CoverageGap describes a rectangular region within the merged bounding box
+// that is not covered by any input file.
+type CoverageGap struct {
+	MinX, MinY, MaxX, MaxY float64 // in source CRS coordinates
+}
+
+// CheckCoverageGaps analyzes the geographic coverage of the given sources
+// and detects holes (areas within the merged bounding box not covered by any file).
+// Returns nil if coverage is complete or there is only one source.
+func CheckCoverageGaps(sources []*Reader) []CoverageGap {
+	if len(sources) <= 1 {
+		return nil
+	}
+
+	type bbox struct {
+		minX, minY, maxX, maxY float64
+	}
+
+	boxes := make([]bbox, len(sources))
+	mergedMinX, mergedMinY := math.MaxFloat64, math.MaxFloat64
+	mergedMaxX, mergedMaxY := -math.MaxFloat64, -math.MaxFloat64
+	var totalW, totalH float64
+
+	for i, src := range sources {
+		minX, minY, maxX, maxY := src.BoundsInCRS()
+		boxes[i] = bbox{minX, minY, maxX, maxY}
+		if minX < mergedMinX {
+			mergedMinX = minX
+		}
+		if minY < mergedMinY {
+			mergedMinY = minY
+		}
+		if maxX > mergedMaxX {
+			mergedMaxX = maxX
+		}
+		if maxY > mergedMaxY {
+			mergedMaxY = maxY
+		}
+		totalW += maxX - minX
+		totalH += maxY - minY
+	}
+
+	avgW := totalW / float64(len(sources))
+	avgH := totalH / float64(len(sources))
+	if avgW <= 0 || avgH <= 0 {
+		return nil
+	}
+
+	// Grid cell size: half the average file extent so we can detect
+	// single-file-sized holes.
+	cellW := avgW / 2
+	cellH := avgH / 2
+
+	nx := int(math.Ceil((mergedMaxX - mergedMinX) / cellW))
+	ny := int(math.Ceil((mergedMaxY - mergedMinY) / cellH))
+
+	// Cap grid size to keep the check fast.
+	const maxGrid = 2000
+	if nx > maxGrid {
+		cellW = (mergedMaxX - mergedMinX) / maxGrid
+		nx = maxGrid
+	}
+	if ny > maxGrid {
+		cellH = (mergedMaxY - mergedMinY) / maxGrid
+		ny = maxGrid
+	}
+	if nx <= 0 || ny <= 0 {
+		return nil
+	}
+
+	// Build a coverage grid: mark each cell whose center is inside at least one source.
+	covered := make([]bool, nx*ny)
+	for iy := 0; iy < ny; iy++ {
+		cy := mergedMinY + (float64(iy)+0.5)*cellH
+		for ix := 0; ix < nx; ix++ {
+			cx := mergedMinX + (float64(ix)+0.5)*cellW
+			for _, b := range boxes {
+				if cx >= b.minX && cx <= b.maxX && cy >= b.minY && cy <= b.maxY {
+					covered[iy*nx+ix] = true
+					break
+				}
+			}
+		}
+	}
+
+	// Flood-fill uncovered cells into contiguous gap regions.
+	visited := make([]bool, nx*ny)
+	var gaps []CoverageGap
+
+	for iy := 0; iy < ny; iy++ {
+		for ix := 0; ix < nx; ix++ {
+			idx := iy*nx + ix
+			if covered[idx] || visited[idx] {
+				continue
+			}
+			// BFS to find contiguous uncovered region.
+			gapMinX, gapMinY := math.MaxFloat64, math.MaxFloat64
+			gapMaxX, gapMaxY := -math.MaxFloat64, -math.MaxFloat64
+			queue := [][2]int{{ix, iy}}
+			visited[idx] = true
+
+			for len(queue) > 0 {
+				cur := queue[0]
+				queue = queue[1:]
+				cx := cur[0]
+				cy := cur[1]
+
+				// Expand the gap bounding box.
+				cellMinX := mergedMinX + float64(cx)*cellW
+				cellMinY := mergedMinY + float64(cy)*cellH
+				cellMaxX := cellMinX + cellW
+				cellMaxY := cellMinY + cellH
+				if cellMinX < gapMinX {
+					gapMinX = cellMinX
+				}
+				if cellMinY < gapMinY {
+					gapMinY = cellMinY
+				}
+				if cellMaxX > gapMaxX {
+					gapMaxX = cellMaxX
+				}
+				if cellMaxY > gapMaxY {
+					gapMaxY = cellMaxY
+				}
+
+				// Visit neighbors.
+				for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+					nx2 := cx + d[0]
+					ny2 := cy + d[1]
+					if nx2 >= 0 && nx2 < nx && ny2 >= 0 && ny2 < ny {
+						nIdx := ny2*nx + nx2
+						if !covered[nIdx] && !visited[nIdx] {
+							visited[nIdx] = true
+							queue = append(queue, [2]int{nx2, ny2})
+						}
+					}
+				}
+			}
+			gaps = append(gaps, CoverageGap{gapMinX, gapMinY, gapMaxX, gapMaxY})
+		}
+	}
+
+	return gaps
+}
+
 // MergedBoundsWGS84 computes the WGS84 bounding box that covers all sources.
 // Requires that sources have a known projection (currently supports EPSG:2056).
 func MergedBoundsWGS84(sources []*Reader) Bounds {
