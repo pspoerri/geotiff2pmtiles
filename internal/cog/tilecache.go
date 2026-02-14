@@ -13,63 +13,98 @@ type tileKey struct {
 	row   int
 }
 
-// TileCache provides an LRU-like cache for decoded COG tiles.
-// This prevents re-reading and re-decoding the same source tiles
-// when multiple output pixels map to the same source tile.
+// shardCount is the number of independent cache shards.
+// Must be a power of two so we can use a bitmask for fast modulo.
+const shardCount = 64
+
+// tileKeyHash computes a fast hash for shard selection.
+func tileKeyHash(key tileKey) uint64 {
+	// FNV-1a inspired mixing of the key fields.
+	h := uint64(14695981039346656037)
+	h ^= uint64(key.level)
+	h *= 1099511628211
+	h ^= uint64(key.col)
+	h *= 1099511628211
+	h ^= uint64(key.row)
+	h *= 1099511628211
+	for i := 0; i < len(key.path); i++ {
+		h ^= uint64(key.path[i])
+		h *= 1099511628211
+	}
+	return h
+}
+
+// --- TileCache (image.Image tiles) ---
+
+// TileCache provides a sharded LRU-like cache for decoded COG tiles.
+// Sharding distributes lock contention across many independent mutexes,
+// allowing concurrent access with minimal serialization.
 type TileCache struct {
-	mu       sync.Mutex
-	cache    map[tileKey]*cacheEntry
-	order    []tileKey
-	maxSize  int
+	shards [shardCount]tileCacheShard
+}
+
+type tileCacheShard struct {
+	mu      sync.Mutex
+	cache   map[tileKey]*cacheEntry
+	order   []tileKey
+	maxSize int
 }
 
 type cacheEntry struct {
 	img image.Image
 }
 
-// NewTileCache creates a tile cache with the given maximum number of entries.
+// NewTileCache creates a sharded tile cache with the given maximum total entries.
 func NewTileCache(maxEntries int) *TileCache {
 	if maxEntries <= 0 {
 		maxEntries = 256
 	}
-	return &TileCache{
-		cache:   make(map[tileKey]*cacheEntry, maxEntries),
-		order:   make([]tileKey, 0, maxEntries),
-		maxSize: maxEntries,
+	perShard := maxEntries / shardCount
+	if perShard < 4 {
+		perShard = 4
 	}
+	tc := &TileCache{}
+	for i := range tc.shards {
+		tc.shards[i] = tileCacheShard{
+			cache:   make(map[tileKey]*cacheEntry, perShard),
+			order:   make([]tileKey, 0, perShard),
+			maxSize: perShard,
+		}
+	}
+	return tc
 }
 
 // Get retrieves a tile from the cache. Returns nil if not found.
 func (tc *TileCache) Get(path string, level, col, row int) image.Image {
 	key := tileKey{path: path, level: level, col: col, row: row}
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-
-	if entry, ok := tc.cache[key]; ok {
+	s := &tc.shards[tileKeyHash(key)&(shardCount-1)]
+	s.mu.Lock()
+	entry, ok := s.cache[key]
+	s.mu.Unlock()
+	if ok {
 		return entry.img
 	}
 	return nil
 }
 
-// Put stores a tile in the cache, evicting the oldest entry if full.
+// Put stores a tile in the cache, evicting the oldest entry in its shard if full.
 func (tc *TileCache) Put(path string, level, col, row int, img image.Image) {
 	key := tileKey{path: path, level: level, col: col, row: row}
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-
-	if _, ok := tc.cache[key]; ok {
+	s := &tc.shards[tileKeyHash(key)&(shardCount-1)]
+	s.mu.Lock()
+	if _, ok := s.cache[key]; ok {
+		s.mu.Unlock()
 		return // already cached
 	}
-
 	// Evict if full.
-	for len(tc.cache) >= tc.maxSize && len(tc.order) > 0 {
-		oldest := tc.order[0]
-		tc.order = tc.order[1:]
-		delete(tc.cache, oldest)
+	for len(s.cache) >= s.maxSize && len(s.order) > 0 {
+		oldest := s.order[0]
+		s.order = s.order[1:]
+		delete(s.cache, oldest)
 	}
-
-	tc.cache[key] = &cacheEntry{img: img}
-	tc.order = append(tc.order, key)
+	s.cache[key] = &cacheEntry{img: img}
+	s.order = append(s.order, key)
+	s.mu.Unlock()
 }
 
 // CachedReader wraps a Reader with a tile cache.
@@ -98,8 +133,14 @@ func (cr *CachedReader) ReadTileCached(level, col, row int) (image.Image, error)
 	return img, nil
 }
 
-// FloatTileCache provides an LRU-like cache for decoded float32 COG tiles.
+// --- FloatTileCache (float32 tiles) ---
+
+// FloatTileCache provides a sharded LRU-like cache for decoded float32 COG tiles.
 type FloatTileCache struct {
+	shards [shardCount]floatCacheShard
+}
+
+type floatCacheShard struct {
 	mu      sync.Mutex
 	cache   map[tileKey]*floatCacheEntry
 	order   []tileKey
@@ -112,46 +153,54 @@ type floatCacheEntry struct {
 	height int
 }
 
-// NewFloatTileCache creates a float tile cache with the given maximum number of entries.
+// NewFloatTileCache creates a sharded float tile cache with the given maximum total entries.
 func NewFloatTileCache(maxEntries int) *FloatTileCache {
 	if maxEntries <= 0 {
 		maxEntries = 256
 	}
-	return &FloatTileCache{
-		cache:   make(map[tileKey]*floatCacheEntry, maxEntries),
-		order:   make([]tileKey, 0, maxEntries),
-		maxSize: maxEntries,
+	perShard := maxEntries / shardCount
+	if perShard < 4 {
+		perShard = 4
 	}
+	fc := &FloatTileCache{}
+	for i := range fc.shards {
+		fc.shards[i] = floatCacheShard{
+			cache:   make(map[tileKey]*floatCacheEntry, perShard),
+			order:   make([]tileKey, 0, perShard),
+			maxSize: perShard,
+		}
+	}
+	return fc
 }
 
 // Get retrieves a float tile from the cache. Returns nil if not found.
 func (fc *FloatTileCache) Get(path string, level, col, row int) ([]float32, int, int) {
 	key := tileKey{path: path, level: level, col: col, row: row}
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
-	if entry, ok := fc.cache[key]; ok {
+	s := &fc.shards[tileKeyHash(key)&(shardCount-1)]
+	s.mu.Lock()
+	entry, ok := s.cache[key]
+	s.mu.Unlock()
+	if ok {
 		return entry.data, entry.width, entry.height
 	}
 	return nil, 0, 0
 }
 
-// Put stores a float tile in the cache, evicting the oldest entry if full.
+// Put stores a float tile in the cache, evicting the oldest entry in its shard if full.
 func (fc *FloatTileCache) Put(path string, level, col, row int, data []float32, width, height int) {
 	key := tileKey{path: path, level: level, col: col, row: row}
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
-	if _, ok := fc.cache[key]; ok {
+	s := &fc.shards[tileKeyHash(key)&(shardCount-1)]
+	s.mu.Lock()
+	if _, ok := s.cache[key]; ok {
+		s.mu.Unlock()
 		return // already cached
 	}
-
-	for len(fc.cache) >= fc.maxSize && len(fc.order) > 0 {
-		oldest := fc.order[0]
-		fc.order = fc.order[1:]
-		delete(fc.cache, oldest)
+	for len(s.cache) >= s.maxSize && len(s.order) > 0 {
+		oldest := s.order[0]
+		s.order = s.order[1:]
+		delete(s.cache, oldest)
 	}
-
-	fc.cache[key] = &floatCacheEntry{data: data, width: width, height: height}
-	fc.order = append(fc.order, key)
+	s.cache[key] = &floatCacheEntry{data: data, width: width, height: height}
+	s.order = append(s.order, key)
+	s.mu.Unlock()
 }
