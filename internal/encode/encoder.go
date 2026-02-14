@@ -39,7 +39,9 @@ func NewEncoder(format string, quality int) (Encoder, error) {
 		return &PNGEncoder{}, nil
 	case "webp":
 		return newWebPEncoder(quality)
+	case "terrarium":
+		return &TerrariumEncoder{}, nil
 	default:
-		return nil, fmt.Errorf("unsupported tile format: %q (supported: jpeg, png, webp)", format)
+		return nil, fmt.Errorf("unsupported tile format: %q (supported: jpeg, png, webp, terrarium)", format)
 	}
 }

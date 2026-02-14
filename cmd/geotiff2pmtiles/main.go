@@ -37,7 +37,7 @@ func main() {
 		resampling  string
 	)
 
-	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp")
+	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium")
 	flag.IntVar(&quality, "quality", 85, "JPEG/WebP quality 1-100")
 	flag.IntVar(&minZoom, "min-zoom", -1, "Minimum zoom level (default: auto)")
 	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (default: auto from resolution)")
@@ -114,6 +114,26 @@ func main() {
 		log.Printf("Opened %d COG(s) in %v", len(sources), time.Since(start).Round(time.Millisecond))
 	}
 
+	// Auto-detect float GeoTIFFs and suggest terrarium format.
+	isFloat := sources[0].IsFloat()
+	if isFloat {
+		if verbose {
+			log.Printf("Detected float GeoTIFF data (elevation/DEM)")
+		}
+		if format == "jpeg" {
+			// Auto-switch to terrarium for float data when using the default format.
+			format = "terrarium"
+			log.Printf("Auto-selected terrarium encoding for float GeoTIFF data")
+			enc, err = encode.NewEncoder(format, quality)
+			if err != nil {
+				log.Fatalf("Encoder: %v", err)
+			}
+		}
+	}
+	if format == "terrarium" && !isFloat {
+		log.Fatal("Terrarium format requires float GeoTIFF input (elevation data)")
+	}
+
 	// Compute merged bounds in WGS84.
 	mergedBounds := cog.MergedBoundsWGS84(sources)
 	if verbose {
@@ -139,14 +159,15 @@ func main() {
 
 	// Build tile generation config.
 	cfg := tile.Config{
-		MinZoom:     minZoom,
-		MaxZoom:     maxZoom,
-		TileSize:    tileSize,
-		Concurrency: concurrency,
-		Verbose:     verbose,
-		Encoder:     enc,
-		Bounds:      mergedBounds,
-		Resampling:  resamplingMode,
+		MinZoom:      minZoom,
+		MaxZoom:      maxZoom,
+		TileSize:     tileSize,
+		Concurrency:  concurrency,
+		Verbose:      verbose,
+		Encoder:      enc,
+		Bounds:       mergedBounds,
+		Resampling:   resamplingMode,
+		IsTerrarium:  format == "terrarium",
 	}
 
 	// Create PMTiles writer.

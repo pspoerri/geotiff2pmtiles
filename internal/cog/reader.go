@@ -3,7 +3,6 @@ package cog
 import (
 	"bytes"
 	"compress/flate"
-	"compress/lzw"
 	"compress/zlib"
 	"encoding/binary"
 	"fmt"
@@ -160,6 +159,119 @@ func (r *Reader) EPSG() int {
 	return r.geo.EPSG
 }
 
+// readTileRaw reads and decompresses raw tile bytes at the given column and row.
+// Returns the raw (decompressed) bytes and the IFD for that level.
+func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
+	if level < 0 || level >= len(r.ifds) {
+		return nil, nil, fmt.Errorf("invalid IFD level %d (have %d)", level, len(r.ifds))
+	}
+
+	ifd := &r.ifds[level]
+	tilesAcross := ifd.TilesAcross()
+	tilesDown := ifd.TilesDown()
+
+	if col < 0 || col >= tilesAcross || row < 0 || row >= tilesDown {
+		return nil, nil, fmt.Errorf("tile (%d,%d) out of range (%dx%d)", col, row, tilesAcross, tilesDown)
+	}
+
+	tileIdx := row*tilesAcross + col
+	if tileIdx >= len(ifd.TileOffsets) || tileIdx >= len(ifd.TileByteCounts) {
+		return nil, nil, fmt.Errorf("tile index %d out of range", tileIdx)
+	}
+
+	offset := ifd.TileOffsets[tileIdx]
+	size := ifd.TileByteCounts[tileIdx]
+
+	if size == 0 {
+		return nil, ifd, nil // empty tile
+	}
+
+	end := offset + size
+	if end > uint64(len(r.data)) {
+		return nil, nil, fmt.Errorf("tile data [%d:%d] exceeds file size %d", offset, end, len(r.data))
+	}
+
+	data := r.data[offset:end]
+
+	switch ifd.Compression {
+	case 7: // JPEG — not applicable for float tiles
+		return data, ifd, nil
+	case 1: // No compression
+		return data, ifd, nil
+	case 8, 32946: // Deflate / zlib
+		decompressed, err := decompressDeflate(data)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decompressing deflate tile: %w", err)
+		}
+		return decompressed, ifd, nil
+	case 5: // LZW
+		decompressed, err := decompressLZW(data)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decompressing LZW tile: %w", err)
+		}
+		return decompressed, ifd, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
+	}
+}
+
+// ReadFloatTile reads and decodes a single float32 tile.
+// Returns the float32 data and tile dimensions (width, height).
+// For empty tiles, returns nil data.
+func (r *Reader) ReadFloatTile(level, col, row int) ([]float32, int, int, error) {
+	data, ifd, err := r.readTileRaw(level, col, row)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	w := int(ifd.TileWidth)
+	h := int(ifd.TileHeight)
+
+	if data == nil {
+		return nil, w, h, nil // empty tile
+	}
+
+	return r.decodeRawFloat32Tile(ifd, data)
+}
+
+// decodeRawFloat32Tile decodes raw bytes as float32 pixel data.
+func (r *Reader) decodeRawFloat32Tile(ifd *IFD, data []byte) ([]float32, int, int, error) {
+	w := int(ifd.TileWidth)
+	h := int(ifd.TileHeight)
+	spp := int(ifd.SamplesPerPixel)
+	pixelCount := w * h
+
+	bps := 32
+	if len(ifd.BitsPerSample) > 0 {
+		bps = int(ifd.BitsPerSample[0])
+	}
+
+	bytesPerSample := bps / 8
+	expectedSize := pixelCount * spp * bytesPerSample
+
+	if len(data) < expectedSize {
+		return nil, 0, 0, fmt.Errorf("float tile data too short: got %d, need %d", len(data), expectedSize)
+	}
+
+	// We extract just the first band (elevation).
+	result := make([]float32, pixelCount)
+	for i := 0; i < pixelCount; i++ {
+		off := i * spp * bytesPerSample
+		switch bps {
+		case 32:
+			bits := r.bo.Uint32(data[off : off+4])
+			result[i] = math.Float32frombits(bits)
+		case 64:
+			bits := r.bo.Uint64(data[off : off+8])
+			result[i] = float32(math.Float64frombits(bits))
+		default:
+			return nil, 0, 0, fmt.Errorf("unsupported float bits per sample: %d", bps)
+		}
+	}
+
+	return result, w, h, nil
+}
+
 // ReadTile reads and decodes a single tile at the given column and row from the specified IFD level.
 // Level 0 is the full resolution; higher levels are overviews.
 // This is safe for concurrent use — the underlying data is memory-mapped read-only.
@@ -242,11 +354,10 @@ func decompressDeflate(data []byte) ([]byte, error) {
 }
 
 // decompressLZW decompresses TIFF-style LZW compressed data.
+// Uses a TIFF-specific LZW decoder that handles the "deferred increment"
+// code width behavior required by the TIFF 6.0 spec.
 func decompressLZW(data []byte) ([]byte, error) {
-	// TIFF uses MSB-first LZW with 8-bit literals.
-	r := lzw.NewReader(bytes.NewReader(data), lzw.MSB, 8)
-	defer r.Close()
-	return io.ReadAll(r)
+	return decompressTIFFLZW(data)
 }
 
 // decodeJPEGTile decodes a JPEG-compressed tile, optionally prepending JPEG tables.
@@ -484,6 +595,22 @@ func clampFloat(v, lo, hi float64) float64 {
 	return v
 }
 
+// DebugIFD returns the raw IFD for debugging purposes.
+func (r *Reader) DebugIFD(level int) IFD {
+	return r.ifds[level]
+}
+
+// RawBytes returns n bytes from the memory-mapped data starting at offset.
+func (r *Reader) RawBytes(offset uint64, n int) []byte {
+	end := offset + uint64(n)
+	if end > uint64(len(r.data)) {
+		end = uint64(len(r.data))
+	}
+	result := make([]byte, end-offset)
+	copy(result, r.data[offset:end])
+	return result
+}
+
 // OpenAll opens multiple COG files and returns their readers.
 func OpenAll(paths []string) ([]*Reader, error) {
 	readers := make([]*Reader, 0, len(paths))
@@ -629,4 +756,18 @@ func (r *Reader) IFDHeight(level int) int {
 // IFDTileSize returns [tileWidth, tileHeight] for the given IFD level.
 func (r *Reader) IFDTileSize(level int) [2]int {
 	return [2]int{int(r.ifds[level].TileWidth), int(r.ifds[level].TileHeight)}
+}
+
+// IsFloat returns true if the raster data is floating-point (e.g. Float32 elevation data).
+func (r *Reader) IsFloat() bool {
+	ifd := &r.ifds[0]
+	if len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 3 { // 3 = IEEE floating point
+		return true
+	}
+	return false
+}
+
+// NoData returns the GDAL nodata string, or "" if not set.
+func (r *Reader) NoData() string {
+	return r.ifds[0].NoData
 }

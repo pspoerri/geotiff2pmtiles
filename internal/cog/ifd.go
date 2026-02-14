@@ -23,6 +23,7 @@ const (
 	tagTileLength                = 323
 	tagTileOffsets               = 324
 	tagTileByteCounts            = 325
+	tagPredictor                 = 317
 	tagSampleFormat              = 339
 	tagJPEGTables                = 347
 	tagModelTiepointTag          = 33922
@@ -60,9 +61,11 @@ type IFD struct {
 	TileHeight       uint32
 	BitsPerSample    []uint16
 	SamplesPerPixel  uint16
+	SampleFormat     []uint16
 	Compression      uint16
 	Photometric      uint16
 	PlanarConfig     uint16
+	Predictor        uint16
 	TileOffsets      []uint64
 	TileByteCounts   []uint64
 	JPEGTables       []byte
@@ -71,6 +74,7 @@ type IFD struct {
 	GeoKeys          []uint16
 	GeoDoubleParams  []float64
 	GeoAsciiParams   string
+	NoData           string
 }
 
 // TilesAcross returns the number of tiles in the horizontal direction.
@@ -317,6 +321,18 @@ func buildIFD(entries []tiffEntry, bo binary.ByteOrder) IFD {
 			ifd.GeoKeys = getUint16Slice(e, bo)
 		case tagGeoDoubleParamsTag:
 			ifd.GeoDoubleParams = getFloat64Slice(e, bo)
+		case tagPredictor:
+			ifd.Predictor = getUint16Val(e, bo)
+		case tagSampleFormat:
+			ifd.SampleFormat = getUint16Slice(e, bo)
+		case tagGDAL_NODATA:
+			// GDAL_NODATA is stored as an ASCII string.
+			s := string(e.Value[:e.Count])
+			// Trim null bytes.
+			for len(s) > 0 && s[len(s)-1] == 0 {
+				s = s[:len(s)-1]
+			}
+			ifd.NoData = s
 		case tagGeoAsciiParamsTag:
 			ifd.GeoAsciiParams = string(e.Value[:e.Count])
 		}

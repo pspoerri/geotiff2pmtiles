@@ -44,6 +44,7 @@ type Config struct {
 	Encoder     encode.Encoder
 	Bounds      cog.Bounds
 	Resampling  Resampling
+	IsTerrarium bool // true for float GeoTIFF → Terrarium encoding
 }
 
 // Stats holds generation statistics.
@@ -124,12 +125,16 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		return Stats{}, fmt.Errorf("unsupported EPSG code: %d", epsg)
 	}
 
-	// Create a shared COG tile cache for the max-zoom rendering pass.
-	cacheSize := cfg.Concurrency * 64
+	// Create shared COG tile caches for the max-zoom rendering pass.
+	cacheSize := cfg.Concurrency * 128
 	if cacheSize < 256 {
 		cacheSize = 256
 	}
 	cogCache := cog.NewTileCache(cacheSize)
+	var floatCache *cog.FloatTileCache
+	if cfg.IsTerrarium {
+		floatCache = cog.NewFloatTileCache(cacheSize)
+	}
 
 	// Tile image store: holds decoded RGBA tiles for the current zoom level
 	// so the next (lower) zoom level can downsample from them.
@@ -174,8 +179,13 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 					var img *image.RGBA
 
 					if isMaxZoom {
-						// Render from source COG data.
-						img = renderTile(job.Z, job.X, job.Y, cfg.TileSize, sources, proj, cogCache, cfg.Resampling)
+						if cfg.IsTerrarium {
+							// Render float data as Terrarium RGB.
+							img = renderTileTerrarium(job.Z, job.X, job.Y, cfg.TileSize, sources, proj, floatCache, cfg.Resampling)
+						} else {
+							// Render from source COG data.
+							img = renderTile(job.Z, job.X, job.Y, cfg.TileSize, sources, proj, cogCache, cfg.Resampling)
+						}
 					} else {
 						// Downsample from 4 child tiles at z+1.
 						childZ := job.Z + 1
@@ -183,7 +193,11 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 						tr := store.Get(childZ, 2*job.X+1, 2*job.Y)
 						bl := store.Get(childZ, 2*job.X, 2*job.Y+1)
 						br := store.Get(childZ, 2*job.X+1, 2*job.Y+1)
-						img = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+						if cfg.IsTerrarium {
+							img = downsampleTileTerrarium(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+						} else {
+							img = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+						}
 					}
 
 					if img == nil {

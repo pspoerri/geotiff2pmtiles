@@ -4,9 +4,11 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"strconv"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
 	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
+	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
 
 // sourceInfo caches per-source metadata used during rendering.
@@ -223,4 +225,200 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// renderTileTerrarium renders a single web map tile from float GeoTIFF data,
+// converting elevation values to Terrarium RGB encoding.
+func renderTileTerrarium(z, tx, ty, tileSize int, sources []*cog.Reader, proj coord.Projection, cache *cog.FloatTileCache, mode Resampling) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
+
+	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
+	outputResMeters := coord.ResolutionAtLat(midLat, z)
+	outputResCRS := coord.MetersToPixelSizeCRS(outputResMeters, proj.EPSG(), midLat)
+
+	hasData := false
+	srcInfos := buildSourceInfos(sources)
+
+	// Parse nodata values from sources.
+	nodataValues := make([]float64, len(sources))
+	for i, src := range sources {
+		nd := src.NoData()
+		if nd != "" {
+			v, err := strconv.ParseFloat(nd, 64)
+			if err == nil {
+				nodataValues[i] = v
+			} else {
+				nodataValues[i] = math.NaN()
+			}
+		} else {
+			nodataValues[i] = math.NaN()
+		}
+	}
+
+	for py := 0; py < tileSize; py++ {
+		for px := 0; px < tileSize; px++ {
+			lon, lat := coord.PixelToLonLat(z, tx, ty, tileSize, float64(px)+0.5, float64(py)+0.5)
+			srcX, srcY := proj.FromWGS84(lon, lat)
+
+			elevation, found := sampleFromSourcesFloat(srcInfos, nodataValues, srcX, srcY, outputResCRS, cache, mode)
+			if found && !math.IsNaN(elevation) {
+				img.SetRGBA(px, py, encode.ElevationToTerrarium(elevation))
+				hasData = true
+			}
+			// nodata pixels remain transparent (zero RGBA)
+		}
+	}
+
+	if !hasData {
+		return nil
+	}
+	return img
+}
+
+// sampleFromSourcesFloat tries each source to sample a float elevation at the given CRS coordinates.
+func sampleFromSourcesFloat(sources []sourceInfo, nodataValues []float64, srcX, srcY, outputRes float64, cache *cog.FloatTileCache, mode Resampling) (float64, bool) {
+	for i := range sources {
+		src := &sources[i]
+
+		if srcX < src.minCRSX || srcX > src.maxCRSX || srcY < src.minCRSY || srcY > src.maxCRSY {
+			continue
+		}
+
+		level := src.reader.OverviewForZoom(outputRes)
+		levelPixelSize := src.reader.IFDPixelSize(level)
+
+		pixX := (srcX - src.geo.OriginX) / levelPixelSize
+		pixY := (src.geo.OriginY - srcY) / levelPixelSize
+
+		imgW := src.reader.IFDWidth(level)
+		imgH := src.reader.IFDHeight(level)
+		if pixX < 0 || pixX >= float64(imgW) || pixY < 0 || pixY >= float64(imgH) {
+			continue
+		}
+
+		var val float64
+		var err error
+
+		switch mode {
+		case ResamplingNearest:
+			val, err = nearestSampleFloat(src.reader, level, pixX, pixY, cache)
+		default:
+			val, err = bilinearSampleFloat(src.reader, level, pixX, pixY, imgW, imgH, cache)
+		}
+
+		if err != nil {
+			continue
+		}
+
+		// Check nodata.
+		if math.IsNaN(val) {
+			continue
+		}
+		nd := nodataValues[i]
+		if !math.IsNaN(nd) && val == nd {
+			continue
+		}
+
+		return val, true
+	}
+	return math.NaN(), false
+}
+
+// nearestSampleFloat reads the nearest float pixel.
+func nearestSampleFloat(src *cog.Reader, level int, fx, fy float64, cache *cog.FloatTileCache) (float64, error) {
+	px := int(math.Floor(fx + 0.5))
+	py := int(math.Floor(fy + 0.5))
+	return readFloatPixelCached(src, level, px, py, cache)
+}
+
+// bilinearSampleFloat performs bilinear interpolation on float data.
+func bilinearSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.FloatTileCache) (float64, error) {
+	x0 := int(math.Floor(fx))
+	y0 := int(math.Floor(fy))
+	x1 := x0 + 1
+	y1 := y0 + 1
+
+	x0 = clamp(x0, 0, imgW-1)
+	y0 = clamp(y0, 0, imgH-1)
+	x1 = clamp(x1, 0, imgW-1)
+	y1 = clamp(y1, 0, imgH-1)
+
+	dx := fx - math.Floor(fx)
+	dy := fy - math.Floor(fy)
+
+	v00, err := readFloatPixelCached(src, level, x0, y0, cache)
+	if err != nil {
+		return math.NaN(), err
+	}
+	v10, err := readFloatPixelCached(src, level, x1, y0, cache)
+	if err != nil {
+		return math.NaN(), err
+	}
+	v01, err := readFloatPixelCached(src, level, x0, y1, cache)
+	if err != nil {
+		return math.NaN(), err
+	}
+	v11, err := readFloatPixelCached(src, level, x1, y1, cache)
+	if err != nil {
+		return math.NaN(), err
+	}
+
+	// If any neighbor is NaN, fall back to nearest.
+	if math.IsNaN(v00) || math.IsNaN(v10) || math.IsNaN(v01) || math.IsNaN(v11) {
+		// Use the center pixel (nearest).
+		cx := int(math.Floor(fx + 0.5))
+		cy := int(math.Floor(fy + 0.5))
+		cx = clamp(cx, 0, imgW-1)
+		cy = clamp(cy, 0, imgH-1)
+		return readFloatPixelCached(src, level, cx, cy, cache)
+	}
+
+	lerp := func(a, b, t float64) float64 {
+		return a*(1-t) + b*t
+	}
+
+	top := lerp(v00, v10, dx)
+	bot := lerp(v01, v11, dx)
+	return lerp(top, bot, dy), nil
+}
+
+// readFloatPixelCached reads a single float pixel using the tile cache.
+func readFloatPixelCached(src *cog.Reader, level, px, py int, cache *cog.FloatTileCache) (float64, error) {
+	tileSize := src.IFDTileSize(level)
+	tw := tileSize[0]
+	th := tileSize[1]
+
+	col := px / tw
+	row := py / th
+	localX := px % tw
+	localY := py % th
+
+	// Try cache first.
+	var tileData []float32
+	var tileW int
+	if cache != nil {
+		tileData, tileW, _ = cache.Get(src.Path(), level, col, row)
+	}
+	if tileData == nil {
+		var err error
+		var w, h int
+		tileData, w, h, err = src.ReadFloatTile(level, col, row)
+		if err != nil {
+			return math.NaN(), err
+		}
+		if tileData == nil {
+			return math.NaN(), nil // empty tile
+		}
+		tileW = w
+		if cache != nil {
+			cache.Put(src.Path(), level, col, row, tileData, w, h)
+		}
+	}
+
+	idx := localY*tileW + localX
+	if idx < 0 || idx >= len(tileData) {
+		return math.NaN(), nil
+	}
+
+	return float64(tileData[idx]), nil
 }
