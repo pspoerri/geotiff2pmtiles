@@ -37,8 +37,8 @@ func buildSourceInfos(sources []*cog.Reader) []sourceInfo {
 
 // renderTile renders a single web map tile by reprojecting from source COG data.
 // Uses per-pixel inverse projection from the output tile to source CRS coordinates,
-// then bilinear-interpolates from the source raster.
-func renderTile(z, tx, ty, tileSize int, sources []*cog.Reader, proj coord.Projection, cache *cog.TileCache) *image.RGBA {
+// then samples from the source raster using the selected interpolation mode.
+func renderTile(z, tx, ty, tileSize int, sources []*cog.Reader, proj coord.Projection, cache *cog.TileCache, mode Resampling) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
 
 	// Pre-compute the output pixel size in meters for selecting the best overview level.
@@ -57,7 +57,7 @@ func renderTile(z, tx, ty, tileSize int, sources []*cog.Reader, proj coord.Proje
 			srcX, srcY := proj.FromWGS84(lon, lat)
 
 			// Find the best source that covers this point and sample.
-			r, g, b, a, found := sampleFromSources(srcInfos, srcX, srcY, outputRes, cache)
+			r, g, b, a, found := sampleFromSources(srcInfos, srcX, srcY, outputRes, cache, mode)
 			if found {
 				img.SetRGBA(px, py, color.RGBA{R: r, G: g, B: b, A: a})
 				hasData = true
@@ -73,7 +73,7 @@ func renderTile(z, tx, ty, tileSize int, sources []*cog.Reader, proj coord.Proje
 }
 
 // sampleFromSources tries each source to sample a pixel at the given CRS coordinates.
-func sampleFromSources(sources []sourceInfo, srcX, srcY, outputRes float64, cache *cog.TileCache) (r, g, b, a uint8, found bool) {
+func sampleFromSources(sources []sourceInfo, srcX, srcY, outputRes float64, cache *cog.TileCache, mode Resampling) (r, g, b, a uint8, found bool) {
 	for i := range sources {
 		src := &sources[i]
 
@@ -97,14 +97,34 @@ func sampleFromSources(sources []sourceInfo, srcX, srcY, outputRes float64, cach
 			continue
 		}
 
-		// Bilinear interpolation.
-		r, g, b, a, err := bilinearSampleCached(src.reader, level, pixX, pixY, imgW, imgH, cache)
+		var rr, gg, bb, aa uint8
+		var err error
+
+		switch mode {
+		case ResamplingNearest:
+			rr, gg, bb, aa, err = nearestSampleCached(src.reader, level, pixX, pixY, cache)
+		default:
+			rr, gg, bb, aa, err = bilinearSampleCached(src.reader, level, pixX, pixY, imgW, imgH, cache)
+		}
+
 		if err != nil {
 			continue
 		}
-		return r, g, b, a, true
+		return rr, gg, bb, aa, true
 	}
 	return 0, 0, 0, 0, false
+}
+
+// nearestSampleCached reads the nearest (closest) source pixel.
+func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
+	px := int(math.Floor(fx + 0.5))
+	py := int(math.Floor(fy + 0.5))
+
+	p, err := readPixelCached(src, level, px, py, cache)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return p[0], p[1], p[2], p[3], nil
 }
 
 // bilinearSampleCached performs bilinear interpolation using the tile cache.

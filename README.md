@@ -2,6 +2,8 @@
 
 A memory-efficient, pure-Go tool that converts GeoTIFF/COG files into PMTiles v3 archives.
 
+**Note:** This project has been vibe-coded. No support or guarantees.
+
 ## Features
 
 - **Memory-efficient**: Reads COG tiles on-demand via seek-based I/O; never loads entire rasters into memory (~15-20 MB peak for typical workloads vs multi-GB for alternatives)

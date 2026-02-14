@@ -34,6 +34,7 @@ func main() {
 		tileSize    int
 		concurrency int
 		verbose     bool
+		resampling  string
 	)
 
 	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp")
@@ -42,6 +43,7 @@ func main() {
 	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (default: auto from resolution)")
 	flag.IntVar(&tileSize, "tile-size", 256, "Output tile size in pixels")
 	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers")
+	flag.StringVar(&resampling, "resampling", "bilinear", "Interpolation method: bilinear, nearest")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
@@ -76,6 +78,12 @@ func main() {
 	enc, err := encode.NewEncoder(format, quality)
 	if err != nil {
 		log.Fatalf("Encoder: %v", err)
+	}
+
+	// Resolve resampling method.
+	resamplingMode, err := tile.ParseResampling(resampling)
+	if err != nil {
+		log.Fatalf("Resampling: %v", err)
 	}
 
 	// Collect GeoTIFF files.
@@ -137,6 +145,7 @@ func main() {
 		Verbose:     verbose,
 		Encoder:     enc,
 		Bounds:      mergedBounds,
+		Resampling:  resamplingMode,
 	}
 
 	// Create PMTiles writer.
