@@ -41,9 +41,11 @@ func buildSourceInfos(sources []*cog.Reader) []sourceInfo {
 func renderTile(z, tx, ty, tileSize int, sources []*cog.Reader, proj coord.Projection, cache *cog.TileCache, mode Resampling) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
 
-	// Pre-compute the output pixel size in meters for selecting the best overview level.
+	// Pre-compute the output pixel size in CRS units for selecting the best overview level.
+	// ResolutionAtLat returns meters/pixel; convert to CRS units for the source projection.
 	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
-	outputRes := coord.ResolutionAtLat(midLat, z)
+	outputResMeters := coord.ResolutionAtLat(midLat, z)
+	outputResCRS := coord.MetersToPixelSizeCRS(outputResMeters, proj.EPSG(), midLat)
 
 	hasData := false
 	srcInfos := buildSourceInfos(sources)
@@ -57,7 +59,7 @@ func renderTile(z, tx, ty, tileSize int, sources []*cog.Reader, proj coord.Proje
 			srcX, srcY := proj.FromWGS84(lon, lat)
 
 			// Find the best source that covers this point and sample.
-			r, g, b, a, found := sampleFromSources(srcInfos, srcX, srcY, outputRes, cache, mode)
+			r, g, b, a, found := sampleFromSources(srcInfos, srcX, srcY, outputResCRS, cache, mode)
 			if found {
 				img.SetRGBA(px, py, color.RGBA{R: r, G: g, B: b, A: a})
 				hasData = true

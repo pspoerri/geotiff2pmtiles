@@ -16,10 +16,10 @@ LDFLAGS    += -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildD
 OUTPUT     := $(BUILD_DIR)/$(BINARY)
 
 # Default tile format and quality for demo targets
-FORMAT     ?= jpeg
+FORMAT     ?= webp
 QUALITY    ?= 85
 MIN_ZOOM   ?= 14
-MAX_ZOOM   ?= 16
+MAX_ZOOM   ?= 17
 TILE_SIZE  ?= 512
 CONCURRENT ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 

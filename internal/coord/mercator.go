@@ -114,6 +114,22 @@ func PixelSizeInGroundMeters(pixelSizeCRS float64, epsg int, lat float64) float6
 	}
 }
 
+// MetersToPixelSizeCRS converts a ground-meter pixel size to CRS units.
+// This is the inverse of PixelSizeInGroundMeters.
+func MetersToPixelSizeCRS(meters float64, epsg int, lat float64) float64 {
+	switch epsg {
+	case 4326:
+		// Ground meters to degrees of longitude at the given latitude.
+		return meters * 360.0 / (EarthCircumference * math.Cos(lat*math.Pi/180.0))
+	case 3857:
+		// Ground meters to Web Mercator meters at the given latitude.
+		return meters / math.Cos(lat*math.Pi/180.0)
+	default:
+		// Assume metric CRS (e.g. EPSG:2056).
+		return meters
+	}
+}
+
 // MaxZoomForResolution calculates the maximum zoom level whose ground resolution
 // is at least as coarse as the given pixel size (in ground meters).
 // tileSize is the number of pixels per tile edge (e.g. 256 or 512).

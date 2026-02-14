@@ -2,11 +2,15 @@ package cog
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/lzw"
+	"compress/zlib"
 	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"io"
 	"math"
 	"os"
 	"syscall"
@@ -74,6 +78,15 @@ func Open(path string) (*Reader, error) {
 	if first.TileWidth == 0 || first.TileHeight == 0 {
 		syscall.Munmap(data)
 		return nil, fmt.Errorf("%s: not a tiled TIFF (no TileWidth/TileHeight)", path)
+	}
+
+	// Validate that the compression is supported.
+	switch first.Compression {
+	case 1, 5, 7, 8, 32946:
+		// Supported: None, LZW, JPEG, Deflate
+	default:
+		syscall.Munmap(data)
+		return nil, fmt.Errorf("%s: unsupported compression type %d", path, first.Compression)
 	}
 
 	geo := parseGeoInfo(first)
@@ -191,11 +204,49 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 		return r.decodeJPEGTile(ifd, data)
 	case 1: // No compression
 		return r.decodeRawTile(ifd, data)
-	case 8, 32946: // Deflate
-		return nil, fmt.Errorf("deflate compression not yet supported")
+	case 8, 32946: // Deflate / zlib
+		decompressed, err := decompressDeflate(data)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing deflate tile: %w", err)
+		}
+		return r.decodeRawTile(ifd, decompressed)
+	case 5: // LZW
+		decompressed, err := decompressLZW(data)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing LZW tile: %w", err)
+		}
+		return r.decodeRawTile(ifd, decompressed)
 	default:
 		return nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
 	}
+}
+
+// decompressDeflate decompresses deflate/zlib compressed data.
+// TIFF compression 8 uses zlib format (deflate with zlib header).
+// Falls back to raw deflate if zlib fails.
+func decompressDeflate(data []byte) ([]byte, error) {
+	// Try zlib (deflate with 2-byte header) first — this is the TIFF standard.
+	r, err := zlib.NewReader(bytes.NewReader(data))
+	if err == nil {
+		defer r.Close()
+		result, err := io.ReadAll(r)
+		if err == nil {
+			return result, nil
+		}
+	}
+
+	// Fall back to raw deflate (some writers omit the zlib header).
+	fr := flate.NewReader(bytes.NewReader(data))
+	defer fr.Close()
+	return io.ReadAll(fr)
+}
+
+// decompressLZW decompresses TIFF-style LZW compressed data.
+func decompressLZW(data []byte) ([]byte, error) {
+	// TIFF uses MSB-first LZW with 8-bit literals.
+	r := lzw.NewReader(bytes.NewReader(data), lzw.MSB, 8)
+	defer r.Close()
+	return io.ReadAll(r)
 }
 
 // decodeJPEGTile decodes a JPEG-compressed tile, optionally prepending JPEG tables.
@@ -543,16 +594,17 @@ func min(a, b int) int {
 	return b
 }
 
-// OverviewForZoom returns the best IFD level to use for a given output zoom level.
-// It picks the overview whose resolution most closely matches the output resolution.
-func (r *Reader) OverviewForZoom(outputPixelSize float64) int {
+// OverviewForZoom returns the best IFD level to use for the given output pixel size.
+// outputPixelSizeCRS must be in the same units as the source CRS (e.g. meters for
+// metric projections, degrees for EPSG:4326).
+func (r *Reader) OverviewForZoom(outputPixelSizeCRS float64) int {
 	bestLevel := 0
 	bestRatio := math.Inf(1)
 
 	for i, ifd := range r.ifds {
-		// Compute the pixel size at this IFD level.
+		// Compute the pixel size at this IFD level (in CRS units).
 		levelPixelSize := r.geo.PixelSizeX * float64(r.ifds[0].Width) / float64(ifd.Width)
-		ratio := math.Abs(levelPixelSize/outputPixelSize - 1)
+		ratio := math.Abs(levelPixelSize/outputPixelSizeCRS - 1)
 		if ratio < bestRatio {
 			bestRatio = ratio
 			bestLevel = i

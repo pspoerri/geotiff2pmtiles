@@ -85,6 +85,13 @@ func (w *Writer) Finalize() error {
 		return w.entries[i].TileID < w.entries[j].TileID
 	})
 
+	// Rewrite tile data in tile-ID order so the archive is properly clustered.
+	// This ensures tile data on disk follows the same Hilbert order as the directory,
+	// which enables readers to optimize range requests.
+	if err := w.clusterTileData(); err != nil {
+		return fmt.Errorf("clustering tile data: %w", err)
+	}
+
 	// Build the directory.
 	rootDir, leafDirs, err := buildDirectory(w.entries)
 	if err != nil {
@@ -150,7 +157,7 @@ func (w *Writer) Finalize() error {
 		}
 	}
 
-	// Copy tile data from temp file.
+	// Copy tile data from temp file (now in clustered order).
 	if _, err := w.tmpFile.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seeking temp file: %w", err)
 	}
@@ -163,6 +170,52 @@ func (w *Writer) Finalize() error {
 	tmpPath := w.tmpFile.Name()
 	w.tmpFile.Close()
 	os.Remove(tmpPath)
+
+	return nil
+}
+
+// clusterTileData rewrites the temp file so tile data is in the same order
+// as the sorted entries (Hilbert tile-ID order). This makes the archive
+// "clustered" per the PMTiles v3 spec, enabling read-time optimizations.
+func (w *Writer) clusterTileData() error {
+	// Create a new temp file for the reordered data.
+	newTmp, err := os.CreateTemp("", "pmtiles-clustered-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating clustered temp file: %w", err)
+	}
+
+	buf := make([]byte, 256*1024) // 256 KiB read buffer
+	var newOffset uint64
+
+	for i := range w.entries {
+		e := &w.entries[i]
+		tileLen := int64(e.Length)
+
+		// Read tile data from old position.
+		if tileLen > int64(len(buf)) {
+			buf = make([]byte, tileLen)
+		}
+		if _, err := w.tmpFile.ReadAt(buf[:tileLen], int64(e.Offset)); err != nil {
+			return fmt.Errorf("reading tile at offset %d: %w", e.Offset, err)
+		}
+
+		// Write to new position.
+		if _, err := newTmp.Write(buf[:tileLen]); err != nil {
+			return fmt.Errorf("writing tile at new offset %d: %w", newOffset, err)
+		}
+
+		// Update entry offset to the new position.
+		e.Offset = newOffset
+		newOffset += uint64(tileLen)
+	}
+
+	// Replace old temp file with the new clustered one.
+	oldPath := w.tmpFile.Name()
+	w.tmpFile.Close()
+	os.Remove(oldPath)
+
+	w.tmpFile = newTmp
+	w.tmpOffset = newOffset
 
 	return nil
 }
