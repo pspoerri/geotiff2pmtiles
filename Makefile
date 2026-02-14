@@ -101,7 +101,7 @@ demo: build
 		--tile-size $(TILE_SIZE) \
 		--max-zoom $(MAX_ZOOM) \
 		--concurrency $(CONCURRENT) \
-		data/ $(BUILD_DIR)/demo.pmtiles
+		data/ $(BUILD_DIR)/demo-$(FORMAT).pmtiles
 
 ## demo-profile: Run demo with CPU and memory profiling
 demo-profile: build
