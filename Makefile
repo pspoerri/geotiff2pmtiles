@@ -23,7 +23,7 @@ MAX_ZOOM   ?= 16
 TILE_SIZE  ?= 512
 CONCURRENT ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
-.PHONY: all build build-webp install install-webp \
+.PHONY: all build install \
         test test-race test-cover bench \
         lint fmt vet tidy check \
         clean clean-all \
@@ -41,17 +41,9 @@ $(BUILD_DIR):
 build: $(BUILD_DIR)
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
 
-## build-webp: Compile with WebP support (requires libwebp + CGo)
-build-webp: $(BUILD_DIR)
-	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -tags webp -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
-
-## install: Install to $GOPATH/bin (pure Go)
+## install: Install to $GOPATH/bin
 install:
 	CGO_ENABLED=0 $(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
-
-## install-webp: Install to $GOPATH/bin (with WebP)
-install-webp:
-	CGO_ENABLED=1 $(GO) install $(GOFLAGS) -tags webp -ldflags "$(LDFLAGS)" $(CMD)
 
 # ---------- Testing ----------
 
@@ -120,17 +112,9 @@ demo-jpeg: demo
 demo-png: FORMAT=png
 demo-png: demo
 
-## demo-webp: Demo with WebP encoding (requires build-webp)
+## demo-webp: Demo with WebP encoding
 demo-webp: FORMAT=webp
-demo-webp: build-webp
-	./$(OUTPUT) --verbose \
-		--format webp \
-		--quality $(QUALITY) \
-		--min-zoom $(MIN_ZOOM) \
-		--max-zoom $(MAX_ZOOM) \
-		--tile-size $(TILE_SIZE) \
-		--concurrency $(CONCURRENT) \
-		data/ $(BUILD_DIR)/demo-webp.pmtiles
+demo-webp: demo
 
 # ---------- Cross-compilation ----------
 

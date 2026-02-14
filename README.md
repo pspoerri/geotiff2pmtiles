@@ -5,8 +5,8 @@ A memory-efficient, pure-Go tool that converts GeoTIFF/COG files into PMTiles v3
 ## Features
 
 - **Memory-efficient**: Reads COG tiles on-demand via seek-based I/O; never loads entire rasters into memory (~15-20 MB peak for typical workloads vs multi-GB for alternatives)
-- **Pure Go** (core): No CGo or GDAL dependency for JPEG/PNG output
-- **Multiple encodings**: JPEG, PNG, and WebP (WebP requires optional CGo build tag)
+- **Pure Go**: No CGo or GDAL dependency; all encodings including WebP work without system libraries
+- **Multiple encodings**: JPEG, PNG, and WebP
 - **Auto zoom detection**: Calculates maximum zoom level from source resolution
 - **Parallel processing**: Concurrent tile generation with configurable worker pool
 - **PMTiles v3**: Writes spec-compliant archives with Hilbert-curve tile ordering
@@ -25,12 +25,10 @@ A memory-efficient, pure-Go tool that converts GeoTIFF/COG files into PMTiles v3
 go build -o geotiff2pmtiles ./cmd/geotiff2pmtiles/
 ```
 
-### With WebP support
-
-WebP encoding requires libwebp and CGo:
+Or using the Makefile:
 
 ```bash
-go build -tags webp -o geotiff2pmtiles ./cmd/geotiff2pmtiles/
+make build
 ```
 
 ## Usage
