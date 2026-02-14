@@ -612,7 +612,27 @@ func (r *Reader) RawBytes(offset uint64, n int) []byte {
 }
 
 // OpenAll opens multiple COG files and returns their readers.
+// It first validates that all files exist and are readable before opening any,
+// so the user is informed about all missing or inaccessible files upfront.
 func OpenAll(paths []string) ([]*Reader, error) {
+	// Pre-validate: check that every file exists and is accessible before
+	// doing any expensive parsing. This ensures the user learns about all
+	// missing files at once instead of discovering them one at a time.
+	var missing []string
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) > 0 {
+		msg := fmt.Sprintf("%d of %d input file(s) cannot be accessed:\n", len(missing), len(paths))
+		for _, p := range missing {
+			msg += fmt.Sprintf("  - %s\n", p)
+		}
+		msg += "Aborting to avoid holes in the output."
+		return nil, fmt.Errorf("%s", msg)
+	}
+
 	readers := make([]*Reader, 0, len(paths))
 	for _, p := range paths {
 		r, err := Open(p)
@@ -621,7 +641,7 @@ func OpenAll(paths []string) ([]*Reader, error) {
 			for _, rr := range readers {
 				rr.Close()
 			}
-			return nil, err
+			return nil, fmt.Errorf("failed to open %s: %w", p, err)
 		}
 		readers = append(readers, r)
 	}

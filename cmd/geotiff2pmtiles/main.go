@@ -133,15 +133,15 @@ func main() {
 	if len(tiffFiles) == 0 {
 		log.Fatal("No GeoTIFF files found in the specified inputs")
 	}
-	if verbose {
-		log.Printf("Found %d GeoTIFF file(s)", len(tiffFiles))
-	}
+	log.Printf("Found %d GeoTIFF file(s)", len(tiffFiles))
 
 	// Open all COG readers and gather metadata.
+	// OpenAll validates that all files exist before opening any,
+	// so we get a complete error report for missing files.
 	start := time.Now()
 	sources, err := cog.OpenAll(tiffFiles)
 	if err != nil {
-		log.Fatalf("Opening GeoTIFFs: %v", err)
+		log.Fatalf("Opening GeoTIFFs:\n%v", err)
 	}
 	defer func() {
 		for _, s := range sources {
