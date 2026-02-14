@@ -9,7 +9,7 @@ import (
 	"image/jpeg"
 	"math"
 	"os"
-	"sync"
+	"syscall"
 )
 
 // Bounds represents geographic bounds in WGS84.
@@ -24,44 +24,62 @@ func (b Bounds) CenterLat() float64 {
 }
 
 // Reader provides tile-level access to a COG/GeoTIFF file.
+// The file is memory-mapped for lock-free concurrent access.
 type Reader struct {
-	f         *os.File
-	bo        binary.ByteOrder
-	ifds      []IFD
-	geo       GeoInfo
-	mu        sync.Mutex
-	path      string
+	data     []byte // memory-mapped file contents
+	bo       binary.ByteOrder
+	ifds     []IFD
+	geo      GeoInfo
+	path     string
 }
 
-// Open opens a COG/GeoTIFF file and parses its structure.
+// Open opens a COG/GeoTIFF file by memory-mapping it and parsing its structure.
 func Open(path string) (*Reader, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
+	defer f.Close()
 
-	ifds, bo, err := parseTIFF(f)
+	fi, err := f.Stat()
 	if err != nil {
-		f.Close()
+		return nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	size := fi.Size()
+	if size == 0 {
+		return nil, fmt.Errorf("%s: empty file", path)
+	}
+
+	// Memory-map the entire file read-only. The fd can be closed after mmap.
+	data, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_PRIVATE)
+	if err != nil {
+		return nil, fmt.Errorf("mmap %s: %w", path, err)
+	}
+
+	// Parse TIFF structure from the memory-mapped data.
+	ifds, bo, err := parseTIFF(bytes.NewReader(data))
+	if err != nil {
+		syscall.Munmap(data)
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
 
 	if len(ifds) == 0 {
-		f.Close()
+		syscall.Munmap(data)
 		return nil, fmt.Errorf("%s: no IFDs found", path)
 	}
 
 	// Validate that the first IFD has tile layout.
 	first := &ifds[0]
 	if first.TileWidth == 0 || first.TileHeight == 0 {
-		f.Close()
+		syscall.Munmap(data)
 		return nil, fmt.Errorf("%s: not a tiled TIFF (no TileWidth/TileHeight)", path)
 	}
 
 	geo := parseGeoInfo(first)
 
 	return &Reader{
-		f:    f,
+		data: data,
 		bo:   bo,
 		ifds: ifds,
 		geo:  geo,
@@ -69,9 +87,14 @@ func Open(path string) (*Reader, error) {
 	}, nil
 }
 
-// Close closes the underlying file.
+// Close unmaps the memory-mapped file.
 func (r *Reader) Close() error {
-	return r.f.Close()
+	if r.data != nil {
+		err := syscall.Munmap(r.data)
+		r.data = nil
+		return err
+	}
+	return nil
 }
 
 // Path returns the file path.
@@ -126,6 +149,7 @@ func (r *Reader) EPSG() int {
 
 // ReadTile reads and decodes a single tile at the given column and row from the specified IFD level.
 // Level 0 is the full resolution; higher levels are overviews.
+// This is safe for concurrent use — the underlying data is memory-mapped read-only.
 func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 	if level < 0 || level >= len(r.ifds) {
 		return nil, fmt.Errorf("invalid IFD level %d (have %d)", level, len(r.ifds))
@@ -152,14 +176,14 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 		return image.NewRGBA(image.Rect(0, 0, int(ifd.TileWidth), int(ifd.TileHeight))), nil
 	}
 
-	// Read raw tile data.
-	r.mu.Lock()
-	data := make([]byte, size)
-	_, err := r.f.ReadAt(data, int64(offset))
-	r.mu.Unlock()
-	if err != nil {
-		return nil, fmt.Errorf("reading tile data at offset %d: %w", offset, err)
+	// Bounds-check the slice into memory-mapped data.
+	end := offset + size
+	if end > uint64(len(r.data)) {
+		return nil, fmt.Errorf("tile data [%d:%d] exceeds file size %d", offset, end, len(r.data))
 	}
+
+	// Direct slice from memory-mapped region — no syscall, no lock.
+	data := r.data[offset:end]
 
 	// Decode based on compression.
 	switch ifd.Compression {
