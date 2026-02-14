@@ -1,0 +1,222 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
+	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
+	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
+	"github.com/pspoerri/geotiff2pmtiles/internal/pmtiles"
+	"github.com/pspoerri/geotiff2pmtiles/internal/tile"
+)
+
+// Set via -ldflags at build time.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
+func main() {
+	var (
+		format      string
+		quality     int
+		minZoom     int
+		maxZoom     int
+		showVersion bool
+		tileSize    int
+		concurrency int
+		verbose     bool
+	)
+
+	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp")
+	flag.IntVar(&quality, "quality", 85, "JPEG/WebP quality 1-100")
+	flag.IntVar(&minZoom, "min-zoom", -1, "Minimum zoom level (default: auto)")
+	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (default: auto from resolution)")
+	flag.IntVar(&tileSize, "tile-size", 256, "Output tile size in pixels")
+	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers")
+	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
+	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
+		fmt.Fprintf(os.Stderr, "Convert GeoTIFF/COG files to a PMTiles v3 archive.\n\n")
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		flag.PrintDefaults()
+	}
+
+	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("geotiff2pmtiles %s (commit %s, built %s)\n", version, commit, buildDate)
+		os.Exit(0)
+	}
+
+	args := flag.Args()
+	if len(args) < 2 {
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	outputPath := args[len(args)-1]
+	inputPaths := args[:len(args)-1]
+
+	if !strings.HasSuffix(outputPath, ".pmtiles") {
+		log.Fatal("Output file must have .pmtiles extension")
+	}
+
+	// Resolve tile encoder.
+	enc, err := encode.NewEncoder(format, quality)
+	if err != nil {
+		log.Fatalf("Encoder: %v", err)
+	}
+
+	// Collect GeoTIFF files.
+	tiffFiles, err := collectTIFFs(inputPaths)
+	if err != nil {
+		log.Fatalf("Collecting input files: %v", err)
+	}
+	if len(tiffFiles) == 0 {
+		log.Fatal("No GeoTIFF files found in the specified inputs")
+	}
+	if verbose {
+		log.Printf("Found %d GeoTIFF file(s)", len(tiffFiles))
+	}
+
+	// Open all COG readers and gather metadata.
+	start := time.Now()
+	sources, err := cog.OpenAll(tiffFiles)
+	if err != nil {
+		log.Fatalf("Opening GeoTIFFs: %v", err)
+	}
+	defer func() {
+		for _, s := range sources {
+			s.Close()
+		}
+	}()
+
+	if verbose {
+		log.Printf("Opened %d COG(s) in %v", len(sources), time.Since(start).Round(time.Millisecond))
+	}
+
+	// Compute merged bounds in WGS84.
+	mergedBounds := cog.MergedBoundsWGS84(sources)
+	if verbose {
+		log.Printf("Merged bounds (WGS84): lon [%.6f, %.6f], lat [%.6f, %.6f]",
+			mergedBounds.MinLon, mergedBounds.MaxLon, mergedBounds.MinLat, mergedBounds.MaxLat)
+	}
+
+	// Determine zoom levels.
+	autoMax := coord.MaxZoomForResolution(sources[0].PixelSize(), mergedBounds.CenterLat())
+	if maxZoom < 0 {
+		maxZoom = autoMax
+	}
+	if minZoom < 0 {
+		minZoom = maxZoom - 6
+		if minZoom < 0 {
+			minZoom = 0
+		}
+	}
+	if verbose {
+		log.Printf("Zoom range: %d - %d (auto-detected max: %d)", minZoom, maxZoom, autoMax)
+	}
+
+	// Build tile generation config.
+	cfg := tile.Config{
+		MinZoom:     minZoom,
+		MaxZoom:     maxZoom,
+		TileSize:    tileSize,
+		Concurrency: concurrency,
+		Verbose:     verbose,
+		Encoder:     enc,
+		Bounds:      mergedBounds,
+	}
+
+	// Create PMTiles writer.
+	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
+		MinZoom:    minZoom,
+		MaxZoom:    maxZoom,
+		Bounds:     mergedBounds,
+		TileFormat: enc.PMTileType(),
+		TileSize:   tileSize,
+	})
+	if err != nil {
+		log.Fatalf("Creating PMTiles writer: %v", err)
+	}
+
+	// Generate tiles.
+	genStart := time.Now()
+	stats, err := tile.Generate(cfg, sources, writer)
+	if err != nil {
+		writer.Abort()
+		log.Fatalf("Tile generation: %v", err)
+	}
+
+	if verbose {
+		log.Printf("Generated %d tiles in %v", stats.TileCount, time.Since(genStart).Round(time.Millisecond))
+	}
+
+	// Finalize PMTiles file.
+	if err := writer.Finalize(); err != nil {
+		log.Fatalf("Finalizing PMTiles: %v", err)
+	}
+
+	elapsed := time.Since(start).Round(time.Millisecond)
+	fi, _ := os.Stat(outputPath)
+	fmt.Printf("Done: %d tiles, %s, %v\n", stats.TileCount, humanSize(fi.Size()), elapsed)
+}
+
+// collectTIFFs resolves input paths to a list of .tif files.
+func collectTIFFs(paths []string) ([]string, error) {
+	var result []string
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, fmt.Errorf("stat %s: %w", p, err)
+		}
+		if info.IsDir() {
+			entries, err := os.ReadDir(p)
+			if err != nil {
+				return nil, fmt.Errorf("readdir %s: %w", p, err)
+			}
+			for _, e := range entries {
+				if !e.IsDir() && isTIFF(e.Name()) {
+					result = append(result, filepath.Join(p, e.Name()))
+				}
+			}
+		} else if isTIFF(p) {
+			result = append(result, p)
+		}
+	}
+	return result, nil
+}
+
+func isTIFF(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".tif") || strings.HasSuffix(lower, ".tiff")
+}
+
+func humanSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(MB))
+	case bytes >= KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
