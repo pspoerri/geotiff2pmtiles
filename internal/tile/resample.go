@@ -198,6 +198,9 @@ func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, cache *cog.
 }
 
 // bilinearSampleCached performs bilinear interpolation using the tile cache.
+// Pixels with alpha == 0 are treated as nodata and excluded from RGB
+// interpolation so they don't bleed dark colors into the result.  Alpha is
+// interpolated with the standard bilinear weights so edges fade smoothly.
 func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
 	x0 := int(math.Floor(fx))
 	y0 := int(math.Floor(fy))
@@ -212,44 +215,72 @@ func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH
 	dx := fx - math.Floor(fx)
 	dy := fy - math.Floor(fy)
 
-	// Read pixels using cached tile reads.
-	p00, err := readPixelCached(src, level, x0, y0, cache)
-	if err != nil {
-		return 0, 0, 0, 0, err
+	// Read the four neighboring pixels.  If a tile does not exist (read
+	// error), treat the pixel as fully transparent (alpha=0 / nodata).
+	var nodata [4]uint8
+	p00, err00 := readPixelCached(src, level, x0, y0, cache)
+	if err00 != nil {
+		p00 = nodata
 	}
-	p10, err := readPixelCached(src, level, x1, y0, cache)
-	if err != nil {
-		return 0, 0, 0, 0, err
+	p10, err10 := readPixelCached(src, level, x1, y0, cache)
+	if err10 != nil {
+		p10 = nodata
 	}
-	p01, err := readPixelCached(src, level, x0, y1, cache)
-	if err != nil {
-		return 0, 0, 0, 0, err
+	p01, err01 := readPixelCached(src, level, x0, y1, cache)
+	if err01 != nil {
+		p01 = nodata
 	}
-	p11, err := readPixelCached(src, level, x1, y1, cache)
-	if err != nil {
-		return 0, 0, 0, 0, err
+	p11, err11 := readPixelCached(src, level, x1, y1, cache)
+	if err11 != nil {
+		p11 = nodata
 	}
 
-	lerp := func(a, b float64, t float64) float64 {
-		return a*(1-t) + b*t
+	// Standard bilinear weights.
+	w00 := (1 - dx) * (1 - dy)
+	w10 := dx * (1 - dy)
+	w01 := (1 - dx) * dy
+	w11 := dx * dy
+
+	// Alpha: standard bilinear interpolation (nodata pixels naturally
+	// contribute 0, giving a smooth fade at data edges).
+	aVal := w00*float64(p00[3]) + w10*float64(p10[3]) + w01*float64(p01[3]) + w11*float64(p11[3])
+
+	// For RGB, zero out weights for alpha == 0 (nodata) neighbors so they
+	// don't bleed black/garbage color values into the result.
+	if p00[3] == 0 {
+		w00 = 0
 	}
-	bilerp := func(v00, v10, v01, v11 uint8) uint8 {
-		top := lerp(float64(v00), float64(v10), dx)
-		bot := lerp(float64(v01), float64(v11), dx)
-		v := lerp(top, bot, dy)
+	if p10[3] == 0 {
+		w10 = 0
+	}
+	if p01[3] == 0 {
+		w01 = 0
+	}
+	if p11[3] == 0 {
+		w11 = 0
+	}
+
+	wSum := w00 + w10 + w01 + w11
+	if wSum == 0 {
+		// All four neighbors are nodata.
+		return 0, 0, 0, 0, nil
+	}
+
+	clampByte := func(v float64) uint8 {
 		if v < 0 {
-			v = 0
+			return 0
 		}
 		if v > 255 {
-			v = 255
+			return 255
 		}
-		return uint8(v)
+		return uint8(v + 0.5)
 	}
 
-	return bilerp(p00[0], p10[0], p01[0], p11[0]),
-		bilerp(p00[1], p10[1], p01[1], p11[1]),
-		bilerp(p00[2], p10[2], p01[2], p11[2]),
-		bilerp(p00[3], p10[3], p01[3], p11[3]), nil
+	rVal := (w00*float64(p00[0]) + w10*float64(p10[0]) + w01*float64(p01[0]) + w11*float64(p11[0])) / wSum
+	gVal := (w00*float64(p00[1]) + w10*float64(p10[1]) + w01*float64(p01[1]) + w11*float64(p11[1])) / wSum
+	bVal := (w00*float64(p00[2]) + w10*float64(p10[2]) + w01*float64(p01[2]) + w11*float64(p11[2])) / wSum
+
+	return clampByte(rVal), clampByte(gVal), clampByte(bVal), clampByte(aVal), nil
 }
 
 // readPixelCached reads a single pixel using the tile cache.
