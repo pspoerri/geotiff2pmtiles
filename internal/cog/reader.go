@@ -12,7 +12,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"syscall"
 )
 
 // Bounds represents geographic bounds in WGS84.
@@ -34,6 +33,7 @@ type Reader struct {
 	ifds []IFD
 	geo  GeoInfo
 	path string
+	id   int // unique numeric ID for fast cache keying (set by OpenAll)
 }
 
 // Open opens a COG/GeoTIFF file by memory-mapping it and parsing its structure.
@@ -55,7 +55,7 @@ func Open(path string) (*Reader, error) {
 	}
 
 	// Memory-map the entire file read-only. The fd can be closed after mmap.
-	data, err := syscall.Mmap(int(f.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_PRIVATE)
+	data, err := mmapFile(f.Fd(), int(size))
 	if err != nil {
 		return nil, fmt.Errorf("mmap %s: %w", path, err)
 	}
@@ -63,19 +63,19 @@ func Open(path string) (*Reader, error) {
 	// Parse TIFF structure from the memory-mapped data.
 	ifds, bo, err := parseTIFF(bytes.NewReader(data))
 	if err != nil {
-		syscall.Munmap(data)
+		munmapFile(data)
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
 
 	if len(ifds) == 0 {
-		syscall.Munmap(data)
+		munmapFile(data)
 		return nil, fmt.Errorf("%s: no IFDs found", path)
 	}
 
 	// Validate that the first IFD has tile layout.
 	first := &ifds[0]
 	if first.TileWidth == 0 || first.TileHeight == 0 {
-		syscall.Munmap(data)
+		munmapFile(data)
 		return nil, fmt.Errorf("%s: not a tiled TIFF (no TileWidth/TileHeight)", path)
 	}
 
@@ -84,7 +84,7 @@ func Open(path string) (*Reader, error) {
 	case 1, 5, 7, 8, 32946:
 		// Supported: None, LZW, JPEG, Deflate
 	default:
-		syscall.Munmap(data)
+		munmapFile(data)
 		return nil, fmt.Errorf("%s: unsupported compression type %d", path, first.Compression)
 	}
 
@@ -102,7 +102,7 @@ func Open(path string) (*Reader, error) {
 // Close unmaps the memory-mapped file.
 func (r *Reader) Close() error {
 	if r.data != nil {
-		err := syscall.Munmap(r.data)
+		err := munmapFile(r.data)
 		r.data = nil
 		return err
 	}
@@ -112,6 +112,12 @@ func (r *Reader) Close() error {
 // Path returns the file path.
 func (r *Reader) Path() string {
 	return r.path
+}
+
+// ID returns the unique numeric identifier for this reader.
+// Used as a fast cache key instead of the file path string.
+func (r *Reader) ID() int {
+	return r.id
 }
 
 // GeoInfo returns the parsed geographic metadata.
@@ -649,7 +655,7 @@ func OpenAll(paths []string) ([]*Reader, error) {
 	}
 
 	readers := make([]*Reader, 0, len(paths))
-	for _, p := range paths {
+	for i, p := range paths {
 		r, err := Open(p)
 		if err != nil {
 			// Close any already-opened readers.
@@ -658,6 +664,7 @@ func OpenAll(paths []string) ([]*Reader, error) {
 			}
 			return nil, fmt.Errorf("failed to open %s: %w", p, err)
 		}
+		r.id = i
 		readers = append(readers, r)
 	}
 	return readers, nil

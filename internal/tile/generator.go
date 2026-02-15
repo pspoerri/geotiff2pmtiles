@@ -12,6 +12,15 @@ import (
 	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
 
+// scheduleBatchSize is the number of Hilbert-contiguous tiles handed to a
+// worker at a time. Smaller values give better load balance (workers that
+// finish a batch of easy/empty tiles immediately pull the next batch instead
+// of sitting idle). Larger values give better spatial locality for the COG
+// tile cache. 32 is a sweet spot: with typical tile counts (thousands) and
+// worker counts (8-16), each worker processes many batches, so the tail
+// imbalance is at most one batch (~1.6 s at z18), which is negligible.
+const scheduleBatchSize = 32
+
 // Resampling selects the interpolation method.
 type Resampling int
 
@@ -171,89 +180,110 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		// After processing this level, we'll replace the store contents.
 		nextStore := newTileImageStore(len(tiles))
 
-		// Partition tiles into contiguous chunks along the Hilbert curve.
-		// Each worker gets its own spatial region so that nearby COG tiles
-		// stay hot in the cache without cross-worker interference.
+		// Partition tiles into small Hilbert-contiguous batches and distribute
+		// them via a channel. This gives much better load balance than static
+		// partitioning (where edge workers with many empty tiles finish early)
+		// while preserving spatial locality within each batch for cache reuse
+		// and efficient prefetching.
 		nTiles := len(tiles)
 		nWorkers := cfg.Concurrency
 		if nWorkers > nTiles {
 			nWorkers = nTiles
 		}
 
+		// Batch size balances spatial locality (larger = better cache reuse)
+		// against load balance (smaller = less idle time at the end).
+		// Each worker should get many batches so that the tail imbalance
+		// (at most one batch) is a small fraction of total work.
+		batchSize := scheduleBatchSize
+		if batchSize > nTiles {
+			batchSize = nTiles
+		}
+
 		var wg sync.WaitGroup
 		errCh := make(chan error, nWorkers)
 
-		chunkBase := nTiles / nWorkers
-		chunkRem := nTiles % nWorkers
-		offset := 0
+		// Feed batches into a channel; workers pull batches on demand.
+		batchCh := make(chan [][3]int, nWorkers*2)
+		go func() {
+			for i := 0; i < nTiles; i += batchSize {
+				end := i + batchSize
+				if end > nTiles {
+					end = nTiles
+				}
+				batchCh <- tiles[i:end]
+			}
+			close(batchCh)
+		}()
 
 		for w := 0; w < nWorkers; w++ {
-			// Distribute remainder tiles evenly across the first workers.
-			size := chunkBase
-			if w < chunkRem {
-				size++
-			}
-			chunk := tiles[offset : offset+size]
-			offset += size
-
 			wg.Add(1)
-			go func(chunk [][3]int) {
+			go func() {
 				defer wg.Done()
-				for _, t := range chunk {
-					z, x, y := t[0], t[1], t[2]
-					var img *image.RGBA
 
-					if isMaxZoom {
-						if cfg.IsTerrarium {
-							img = renderTileTerrarium(z, x, y, cfg.TileSize, sources, proj, floatCache, cfg.Resampling)
-						} else {
-							img = renderTile(z, x, y, cfg.TileSize, sources, proj, cogCache, cfg.Resampling)
-						}
-					} else {
-						childZ := z + 1
-						tl := store.Get(childZ, 2*x, 2*y)
-						tr := store.Get(childZ, 2*x+1, 2*y)
-						bl := store.Get(childZ, 2*x, 2*y+1)
-						br := store.Get(childZ, 2*x+1, 2*y+1)
-						if cfg.IsTerrarium {
-							img = downsampleTileTerrarium(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
-						} else {
-							img = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
-						}
-					}
-
-					if img == nil {
-						emptyCount.Add(1)
-						pb.Increment()
-						continue
-					}
-
-					if z > cfg.MinZoom {
-						nextStore.Put(z, x, y, img)
-					}
-
-					data, err := cfg.Encoder.Encode(img)
-					if err != nil {
-						select {
-						case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
-						return
-					}
-
-					if err := writer.WriteTile(z, x, y, data); err != nil {
-						select {
-						case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
-						return
-					}
-
-					tileCount.Add(1)
-					totalBytes.Add(int64(len(data)))
-					pb.Increment()
+				// Build source info once per worker (read-only after init).
+				var srcInfos []sourceInfo
+				if isMaxZoom {
+					srcInfos = buildSourceInfos(sources)
 				}
-			}(chunk)
+
+				for batch := range batchCh {
+					for _, t := range batch {
+						z, x, y := t[0], t[1], t[2]
+						var img *image.RGBA
+
+						if isMaxZoom {
+							if cfg.IsTerrarium {
+								img = renderTileTerrarium(z, x, y, cfg.TileSize, srcInfos, proj, floatCache, cfg.Resampling)
+							} else {
+								img = renderTile(z, x, y, cfg.TileSize, srcInfos, proj, cogCache, cfg.Resampling)
+							}
+						} else {
+							childZ := z + 1
+							tl := store.Get(childZ, 2*x, 2*y)
+							tr := store.Get(childZ, 2*x+1, 2*y)
+							bl := store.Get(childZ, 2*x, 2*y+1)
+							br := store.Get(childZ, 2*x+1, 2*y+1)
+							if cfg.IsTerrarium {
+								img = downsampleTileTerrarium(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+							} else {
+								img = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+							}
+						}
+
+						if img == nil {
+							emptyCount.Add(1)
+							pb.Increment()
+							continue
+						}
+
+						if z > cfg.MinZoom {
+							nextStore.Put(z, x, y, img)
+						}
+
+						data, err := cfg.Encoder.Encode(img)
+						if err != nil {
+							select {
+							case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
+							default:
+							}
+							return
+						}
+
+						if err := writer.WriteTile(z, x, y, data); err != nil {
+							select {
+							case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
+							default:
+							}
+							return
+						}
+
+						tileCount.Add(1)
+						totalBytes.Add(int64(len(data)))
+						pb.Increment()
+					}
+				}
+			}()
 		}
 
 		wg.Wait()
