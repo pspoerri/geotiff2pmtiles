@@ -119,6 +119,8 @@ func downsampleQuadrantTerrariumNearest(dst *image.RGBA, src *image.RGBA, dstOff
 
 // downsampleQuadrantBilinear uses box-filter (average of 2x2 source pixels) to
 // produce each output pixel. This is equivalent to bilinear downsampling.
+// Pixels with alpha == 0 are treated as nodata and excluded from RGB averaging
+// so they don't bleed dark colors into the result.
 func downsampleQuadrantBilinear(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
 	for dy := 0; dy < half; dy++ {
 		for dx := 0; dx < half; dx++ {
@@ -132,11 +134,32 @@ func downsampleQuadrantBilinear(dst *image.RGBA, src *image.RGBA, dstOffX, dstOf
 			p01 := srcPixel(src, sx, sy+1, tileSize)
 			p11 := srcPixel(src, sx+1, sy+1, tileSize)
 
-			// Average.
-			r := (uint16(p00.R) + uint16(p10.R) + uint16(p01.R) + uint16(p11.R) + 2) / 4
-			g := (uint16(p00.G) + uint16(p10.G) + uint16(p01.G) + uint16(p11.G) + 2) / 4
-			b := (uint16(p00.B) + uint16(p10.B) + uint16(p01.B) + uint16(p11.B) + 2) / 4
-			a := (uint16(p00.A) + uint16(p10.A) + uint16(p01.A) + uint16(p11.A) + 2) / 4
+			pixels := [4]color.RGBA{p00, p10, p01, p11}
+
+			// Alpha: straight average of all 4 (nodata contributes 0).
+			aSum := uint16(p00.A) + uint16(p10.A) + uint16(p01.A) + uint16(p11.A)
+			a := (aSum + 2) / 4
+
+			// RGB: average only pixels with non-zero alpha.
+			var rSum, gSum, bSum uint16
+			var count uint16
+			for _, p := range pixels {
+				if p.A == 0 {
+					continue
+				}
+				rSum += uint16(p.R)
+				gSum += uint16(p.G)
+				bSum += uint16(p.B)
+				count++
+			}
+
+			if count == 0 {
+				continue // all nodata — leave transparent
+			}
+
+			r := (rSum + count/2) / count
+			g := (gSum + count/2) / count
+			b := (bSum + count/2) / count
 
 			dst.SetRGBA(dstOffX+dx, dstOffY+dy, color.RGBA{
 				R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a),
