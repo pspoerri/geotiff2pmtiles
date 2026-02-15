@@ -404,17 +404,32 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 				break
 			}
 			var c color.RGBA
-			c.R = data[idx]
-			if spp > 1 {
-				c.G = data[idx+1]
-			}
-			if spp > 2 {
-				c.B = data[idx+2]
-			}
-			if spp > 3 {
-				c.A = data[idx+3]
-			} else {
+			switch spp {
+			case 1:
+				// Single-band: replicate to all RGB channels (grayscale).
+				c.R = data[idx]
+				c.G = data[idx]
+				c.B = data[idx]
 				c.A = 255
+			case 2:
+				// Gray + Alpha.
+				c.R = data[idx]
+				c.G = data[idx]
+				c.B = data[idx]
+				c.A = data[idx+1]
+			default:
+				c.R = data[idx]
+				if spp > 1 {
+					c.G = data[idx+1]
+				}
+				if spp > 2 {
+					c.B = data[idx+2]
+				}
+				if spp > 3 {
+					c.A = data[idx+3]
+				} else {
+					c.A = 255
+				}
 			}
 			img.SetRGBA(x, y, c)
 		}
