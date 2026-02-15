@@ -19,7 +19,7 @@ OUTPUT     := $(BUILD_DIR)/$(BINARY)
 FORMAT     ?= webp
 QUALITY    ?= 85
 MIN_ZOOM   ?= 14
-MAX_ZOOM   ?= 16
+MAX_ZOOM   ?= 18
 TILE_SIZE  ?= 512
 CONCURRENT ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
