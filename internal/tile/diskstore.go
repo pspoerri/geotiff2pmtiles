@@ -29,22 +29,23 @@ type ioRequest struct {
 }
 
 // DiskTileStore is a concurrent-safe tile store that keeps tiles in memory
-// and continuously spills them to disk via a dedicated I/O goroutine.
+// in their encoded form and continuously spills them to disk via a dedicated
+// I/O goroutine.
+//
+// Tiles are stored in memory as encoded bytes (PNG/WebP/JPEG) rather than
+// raw pixels. This reduces the in-memory footprint by 5-25× (e.g., 10-50 KB
+// encoded vs 64-256 KB raw), at the cost of a decode step on Get().
 //
 // When disk spilling is enabled, tiles are handled as follows:
-//   - Put() stores the tile in an in-memory map (fast access for recently
-//     stored tiles) and sends the pre-encoded bytes to a buffered channel.
-//   - A dedicated background I/O goroutine reads from the channel, writes
-//     encoded bytes to a temporary file, adds an index entry, and evicts
-//     the tile from memory — all without blocking compute workers.
-//   - Uniform tiles (single-color, 4 bytes each) are kept in memory and
-//     never spilled, since they're already extremely compact.
-//   - Get() checks in-memory tiles first, then falls back to reading from
-//     disk and decoding the encoded bytes back to pixel data.
-//
-// Storing tiles in their encoded format (PNG/WebP/JPEG) instead of raw
-// pixels reduces disk usage by 5-50× (e.g., 10 KB encoded vs 64-256 KB raw),
-// at the cost of a decode step during the downsampling read-back pass.
+//   - Put() stores encoded bytes in an in-memory map and sends them to a
+//     buffered channel for the I/O goroutine.
+//   - The I/O goroutine writes encoded bytes to a temporary file, adds an
+//     index entry, and evicts the tile from memory — all without blocking
+//     compute workers.
+//   - Uniform tiles (single-color, 4 bytes each) are kept in memory as
+//     compact TileData and never spilled.
+//   - Get() checks uniform tiles first, then decodes in-memory encoded
+//     bytes, then falls back to reading from disk.
 //
 // The continuous I/O design means disk writes are spread evenly over the
 // processing time rather than occurring in large blocking flushes.
@@ -54,7 +55,8 @@ type ioRequest struct {
 // never contends with the map mutex.
 type DiskTileStore struct {
 	mu       sync.RWMutex
-	tiles    map[[3]int]*TileData // in-memory tiles (evicted once on disk)
+	uniforms map[[3]int]*TileData // uniform tiles (tiny, never spilled)
+	encoded  map[[3]int][]byte    // encoded non-uniform tiles in memory
 	index    map[[3]int]diskEntry // disk index (populated by I/O goroutine)
 	tileSize int
 	format   string // encoder format for decode path ("png", "jpeg", "webp", "terrarium")
@@ -112,7 +114,8 @@ func NewDiskTileStore(cfg DiskTileStoreConfig) *DiskTileStore {
 	}
 
 	s := &DiskTileStore{
-		tiles:    make(map[[3]int]*TileData, cap),
+		uniforms: make(map[[3]int]*TileData, cap/4),
+		encoded:  make(map[[3]int][]byte, cap),
 		index:    make(map[[3]int]diskEntry),
 		tileSize: cfg.TileSize,
 		format:   cfg.Format,
@@ -130,47 +133,64 @@ func NewDiskTileStore(cfg DiskTileStoreConfig) *DiskTileStore {
 	return s
 }
 
-// Put stores tile data. If disk spilling is enabled, non-uniform tiles are
-// sent to the dedicated I/O goroutine for asynchronous disk storage; uniform
-// tiles (single-color, 4 bytes) stay in memory permanently.
+// Put stores tile data. Non-uniform tiles are stored in their encoded form
+// (PNG/WebP/JPEG) to reduce memory footprint. Uniform tiles (single-color,
+// 4 bytes) are stored as compact TileData.
 //
-// The encoded parameter should contain the pre-encoded tile bytes (e.g., from
-// the output encoder). When disk spilling is disabled, encoded is ignored and
-// may be nil.
+// The encoded parameter must contain the pre-encoded tile bytes for
+// non-uniform tiles (e.g., from the output encoder).
+// If disk spilling is enabled, non-uniform tiles are also sent to the
+// dedicated I/O goroutine for eventual eviction from memory.
 func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) {
 	key := [3]int{z, x, y}
-	mem := td.MemoryBytes()
 
+	// Uniform tiles are tiny (4 bytes) — keep as TileData, never spill.
+	if td.IsUniform() {
+		s.mu.Lock()
+		s.uniforms[key] = td
+		s.mu.Unlock()
+		s.memBytes.Add(4)
+		return
+	}
+
+	// Store encoded bytes in memory (much smaller than raw pixels:
+	// ~10-50 KB encoded vs 64-256 KB raw for a 256×256 tile).
+	mem := int64(len(encoded))
 	s.mu.Lock()
-	s.tiles[key] = td
+	s.encoded[key] = encoded
 	s.mu.Unlock()
-
 	s.memBytes.Add(mem)
 
-	// Send to I/O goroutine for disk storage (skip uniform tiles — they're tiny).
-	if s.ioCh != nil && !td.IsUniform() && len(encoded) > 0 {
+	// Send to I/O goroutine for eventual disk eviction (when enabled).
+	if s.ioCh != nil && len(encoded) > 0 {
 		s.ioCh <- ioRequest{key: key, encoded: encoded, memBytes: mem}
 	}
 }
 
-// Get retrieves tile data. Checks the in-memory store first, then falls back
-// to reading encoded bytes from disk and decoding them.
+// Get retrieves tile data. Checks uniform tiles first, then decodes in-memory
+// encoded bytes, then falls back to reading from disk.
 // Returns nil if the tile is not present anywhere.
 func (s *DiskTileStore) Get(z, x, y int) *TileData {
 	key := [3]int{z, x, y}
 
-	// Fast path: in-memory.
+	// Single lock acquisition for all in-memory lookups.
 	s.mu.RLock()
-	td := s.tiles[key]
+	td := s.uniforms[key]
+	enc := s.encoded[key]
+	de, onDisk := s.index[key]
 	s.mu.RUnlock()
+
+	// Fast path: uniform tile (no decode needed).
 	if td != nil {
 		return td
 	}
 
-	// Slow path: check disk index.
-	s.mu.RLock()
-	de, onDisk := s.index[key]
-	s.mu.RUnlock()
+	// In-memory encoded tile: decode back to pixel data.
+	if enc != nil {
+		return s.decodeEncoded(enc)
+	}
+
+	// Slow path: read encoded bytes from disk.
 	if !onDisk {
 		return nil
 	}
@@ -182,19 +202,17 @@ func (s *DiskTileStore) Get(z, x, y int) *TileData {
 		return nil
 	}
 
-	// Read encoded bytes from disk.
 	buf := make([]byte, de.length)
 	_, err := f.ReadAt(buf, de.offset)
 	if err != nil {
 		return nil
 	}
 
-	// Decode encoded tile back to pixel data.
-	return s.decodeFromDisk(buf)
+	return s.decodeEncoded(buf)
 }
 
-// decodeFromDisk decodes encoded image bytes back to a TileData.
-func (s *DiskTileStore) decodeFromDisk(data []byte) *TileData {
+// decodeEncoded decodes encoded image bytes (from memory or disk) back to a TileData.
+func (s *DiskTileStore) decodeEncoded(data []byte) *TileData {
 	img, err := encode.DecodeImage(data, s.format)
 	if err != nil {
 		return nil
@@ -224,8 +242,9 @@ func (s *DiskTileStore) decodeFromDisk(data []byte) *TileData {
 // The file handle is published once via s.readFile so that concurrent Get()
 // callers can issue ReadAt (pread) without any mutex involvement.
 //
-// Invariant: the tile is always in either s.tiles or s.index (or both during
-// the brief window inside the critical section). A Get() will always find it.
+// Invariant: a non-uniform tile is always in either s.encoded or s.index
+// (or both during the brief window inside the critical section).
+// A Get() will always find it.
 func (s *DiskTileStore) ioLoop() {
 	defer s.ioWg.Done()
 
@@ -253,14 +272,14 @@ func (s *DiskTileStore) ioLoop() {
 			continue
 		}
 
-		// Add to disk index and evict from memory atomically.
+		// Add to disk index and evict from in-memory encoded map atomically.
 		// This ensures Get() always finds the tile in one place or the other.
 		s.mu.Lock()
 		s.index[req.key] = diskEntry{
 			offset: fileOff,
 			length: int32(n),
 		}
-		delete(s.tiles, req.key)
+		delete(s.encoded, req.key)
 		s.mu.Unlock()
 
 		fileOff += int64(n)
@@ -288,11 +307,11 @@ func (s *DiskTileStore) Drain() {
 	})
 }
 
-// Len returns the total number of stored tiles (memory + disk).
+// Len returns the total number of stored tiles (uniform + encoded in-memory + disk).
 func (s *DiskTileStore) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return len(s.tiles) + len(s.index)
+	return len(s.uniforms) + len(s.encoded) + len(s.index)
 }
 
 // MemoryBytes returns the estimated in-memory tile data size.
@@ -317,8 +336,9 @@ func (s *DiskTileStore) Close() {
 func (s *DiskTileStore) Stats() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return fmt.Sprintf("in-memory: %d tiles (%.1f MB), on-disk: %d tiles (%.1f MB encoded)",
-		len(s.tiles), float64(s.memBytes.Load())/(1024*1024),
+	return fmt.Sprintf("in-memory: %d tiles (%d uniform, %d encoded, %.1f MB), on-disk: %d tiles (%.1f MB)",
+		len(s.uniforms)+len(s.encoded), len(s.uniforms), len(s.encoded),
+		float64(s.memBytes.Load())/(1024*1024),
 		len(s.index), float64(s.totalDiskBytes)/(1024*1024))
 }
 
