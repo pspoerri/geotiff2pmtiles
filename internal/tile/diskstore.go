@@ -3,54 +3,74 @@ package tile
 import (
 	"encoding/binary"
 	"fmt"
+	"image"
+	"image/draw"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
 
-// diskEntry records the location and format of a tile spilled to disk.
+// diskEntry records the location of an encoded tile on disk.
 type diskEntry struct {
 	offset int64
 	length int32
-	typ    tileDataType
+}
+
+// ioRequest is sent from Put() to the I/O goroutine for async disk writes.
+type ioRequest struct {
+	key      [3]int
+	encoded  []byte // pre-encoded tile bytes (PNG/WebP/JPEG)
+	memBytes int64  // memory to reclaim when evicted from in-memory store
 }
 
 // DiskTileStore is a concurrent-safe tile store that keeps tiles in memory
-// and spills them to disk when memory pressure exceeds a threshold.
+// and continuously spills them to disk via a dedicated I/O goroutine.
 //
-// Tiles are primarily stored in an in-memory map (fast path). When the
-// estimated memory usage crosses a configurable limit, all in-memory tiles
-// are flushed to a temporary file. Future reads check memory first, then
-// fall back to disk. The disk file stores raw pixel data sequentially;
-// a small in-memory index maps each tile key to its (offset, length, type).
+// When disk spilling is enabled, tiles are handled as follows:
+//   - Put() stores the tile in an in-memory map (fast access for recently
+//     stored tiles) and sends the pre-encoded bytes to a buffered channel.
+//   - A dedicated background I/O goroutine reads from the channel, writes
+//     encoded bytes to a temporary file, adds an index entry, and evicts
+//     the tile from memory — all without blocking compute workers.
+//   - Uniform tiles (single-color, 4 bytes each) are kept in memory and
+//     never spilled, since they're already extremely compact.
+//   - Get() checks in-memory tiles first, then falls back to reading from
+//     disk and decoding the encoded bytes back to pixel data.
 //
-// This design means:
-//   - At most one zoom level's tiles are on disk (the store is swapped per level).
-//   - Tiles arrive roughly in Hilbert order (from the generator), so the disk
-//     file has good spatial locality for the downsampling read-back pass.
-//   - The per-tile index entry is ~30 bytes, far smaller than the tile data
-//     (64–256 KB), so even millions of tiles have a manageable index.
+// Storing tiles in their encoded format (PNG/WebP/JPEG) instead of raw
+// pixels reduces disk usage by 5-50× (e.g., 10 KB encoded vs 64-256 KB raw),
+// at the cost of a decode step during the downsampling read-back pass.
+//
+// The continuous I/O design means disk writes are spread evenly over the
+// processing time rather than occurring in large blocking flushes.
 type DiskTileStore struct {
 	mu       sync.RWMutex
-	tiles    map[[3]int]*TileData // in-memory tiles
-	index    map[[3]int]diskEntry // disk index (populated after flush)
+	tiles    map[[3]int]*TileData // in-memory tiles (evicted once on disk)
+	index    map[[3]int]diskEntry // disk index (populated by I/O goroutine)
 	tileSize int
+	format   string // encoder format for decode path ("png", "jpeg", "webp", "terrarium")
 
-	// Disk backing.
-	file    *os.File // temp file for spilled tiles
+	// Disk backing (written only by the I/O goroutine).
+	file    *os.File // temp file for encoded tiles
 	fileOff int64    // current write offset in the temp file
 	dir     string   // directory for temp files
 
 	// Memory tracking.
-	memBytes       atomic.Int64 // estimated bytes of in-memory tile data
-	memLimit       int64        // flush threshold in bytes (0 = never flush)
-	flushCount     int          // number of flushes performed
-	totalFlushed   int64        // total tiles flushed to disk
-	checkInterval  int64        // check memory every N puts
-	putsSinceCheck atomic.Int64
+	memBytes atomic.Int64 // estimated bytes of in-memory tile data
+
+	// Dedicated I/O goroutine.
+	ioCh      chan ioRequest  // tiles to write to disk
+	ioWg      sync.WaitGroup // for Drain()
+	drainOnce sync.Once      // ensures Drain() is idempotent
+
+	// Stats (updated by I/O goroutine only, read after Drain).
+	totalDiskTiles int64 // tiles written to disk
+	totalDiskBytes int64 // total encoded bytes on disk
 
 	verbose bool
 }
@@ -63,14 +83,20 @@ type DiskTileStoreConfig struct {
 	TileSize int
 	// TempDir is the directory for spill files. Defaults to the OS temp dir.
 	TempDir string
-	// MemoryLimitBytes is the threshold at which in-memory tiles are flushed
-	// to disk. Set to 0 to disable disk spilling (pure in-memory mode).
+	// MemoryLimitBytes enables continuous disk spilling when > 0. Tiles are
+	// written to disk by a dedicated I/O goroutine, encoded in the target
+	// format for reduced disk usage. Set to 0 to disable (pure in-memory mode).
 	MemoryLimitBytes int64
-	// Verbose enables logging of flush events.
+	// Format is the encoder format name (e.g. "png", "jpeg", "webp", "terrarium").
+	// Required when MemoryLimitBytes > 0 so that tiles can be decoded on read-back.
+	Format string
+	// Verbose enables logging of I/O events.
 	Verbose bool
 }
 
 // NewDiskTileStore creates a new disk-backed tile store.
+// When MemoryLimitBytes > 0, a dedicated I/O goroutine is started that
+// continuously writes encoded tiles to disk.
 func NewDiskTileStore(cfg DiskTileStoreConfig) *DiskTileStore {
 	cap := cfg.InitialCapacity
 	if cap < 64 {
@@ -80,19 +106,51 @@ func NewDiskTileStore(cfg DiskTileStoreConfig) *DiskTileStore {
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	checkInterval := int64(1024) // check memory pressure every 1024 puts
-	return &DiskTileStore{
-		tiles:         make(map[[3]int]*TileData, cap),
-		index:         make(map[[3]int]diskEntry),
-		tileSize:      cfg.TileSize,
-		dir:           dir,
-		memLimit:      cfg.MemoryLimitBytes,
-		checkInterval: checkInterval,
-		verbose:       cfg.Verbose,
+
+	s := &DiskTileStore{
+		tiles:    make(map[[3]int]*TileData, cap),
+		index:    make(map[[3]int]diskEntry),
+		tileSize: cfg.TileSize,
+		format:   cfg.Format,
+		dir:      dir,
+		verbose:  cfg.Verbose,
+	}
+
+	// Start the dedicated I/O goroutine when disk spilling is enabled.
+	if cfg.MemoryLimitBytes > 0 && cfg.Format != "" {
+		s.ioCh = make(chan ioRequest, 256)
+		s.ioWg.Add(1)
+		go s.ioLoop()
+	}
+
+	return s
+}
+
+// Put stores tile data. If disk spilling is enabled, non-uniform tiles are
+// sent to the dedicated I/O goroutine for asynchronous disk storage; uniform
+// tiles (single-color, 4 bytes) stay in memory permanently.
+//
+// The encoded parameter should contain the pre-encoded tile bytes (e.g., from
+// the output encoder). When disk spilling is disabled, encoded is ignored and
+// may be nil.
+func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) {
+	key := [3]int{z, x, y}
+	mem := td.MemoryBytes()
+
+	s.mu.Lock()
+	s.tiles[key] = td
+	s.mu.Unlock()
+
+	s.memBytes.Add(mem)
+
+	// Send to I/O goroutine for disk storage (skip uniform tiles — they're tiny).
+	if s.ioCh != nil && !td.IsUniform() && len(encoded) > 0 {
+		s.ioCh <- ioRequest{key: key, encoded: encoded, memBytes: mem}
 	}
 }
 
-// Get retrieves tile data. Checks in-memory store first, then disk.
+// Get retrieves tile data. Checks the in-memory store first, then falls back
+// to reading encoded bytes from disk and decoding them.
 // Returns nil if the tile is not present anywhere.
 func (s *DiskTileStore) Get(z, x, y int) *TileData {
 	key := [3]int{z, x, y}
@@ -114,36 +172,104 @@ func (s *DiskTileStore) Get(z, x, y int) *TileData {
 		return nil
 	}
 
-	// Read from disk.
+	// Read encoded bytes from disk.
 	buf := make([]byte, de.length)
 	_, err := f.ReadAt(buf, de.offset)
 	if err != nil {
 		return nil
 	}
-	return DeserializeTileData(buf, de.typ, s.tileSize)
+
+	// Decode encoded tile back to pixel data.
+	return s.decodeFromDisk(buf)
 }
 
-// Put stores tile data. May trigger a flush to disk if memory is over the limit.
-func (s *DiskTileStore) Put(z, x, y int, td *TileData) {
-	key := [3]int{z, x, y}
-	mem := td.MemoryBytes()
+// decodeFromDisk decodes encoded image bytes back to a TileData.
+func (s *DiskTileStore) decodeFromDisk(data []byte) *TileData {
+	img, err := encode.DecodeImage(data, s.format)
+	if err != nil {
+		return nil
+	}
 
-	s.mu.Lock()
-	s.tiles[key] = td
-	s.mu.Unlock()
+	// Fast path: already RGBA.
+	if rgba, ok := img.(*image.RGBA); ok {
+		return newTileData(rgba, s.tileSize)
+	}
 
-	s.memBytes.Add(mem)
+	// Fast path: grayscale image.
+	if g, ok := img.(*image.Gray); ok {
+		return &TileData{gray: g, tileSize: s.tileSize}
+	}
 
-	// Periodically check if we should flush.
-	if s.memLimit > 0 {
-		n := s.putsSinceCheck.Add(1)
-		if n >= s.checkInterval {
-			s.putsSinceCheck.Store(0)
-			if s.memBytes.Load() > s.memLimit {
-				s.flush()
+	// General case: convert to RGBA (handles NRGBA from PNG, YCbCr from JPEG, etc.).
+	bounds := img.Bounds()
+	rgba := image.NewRGBA(bounds)
+	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
+	return newTileData(rgba, s.tileSize)
+}
+
+// ioLoop is the dedicated I/O goroutine that continuously writes encoded
+// tiles to the temp file and evicts them from memory.
+//
+// Invariant: the tile is always in either s.tiles or s.index (or both during
+// the brief window inside the critical section). A Get() will always find it.
+func (s *DiskTileStore) ioLoop() {
+	defer s.ioWg.Done()
+
+	for req := range s.ioCh {
+		// Lazily create the temp file on first write.
+		if s.file == nil {
+			f, err := os.CreateTemp(s.dir, "pmtiles-tilestore-*.tmp")
+			if err != nil {
+				log.Printf("WARNING: disk tile store: failed to create temp file: %v (tile stays in memory)", err)
+				continue
+			}
+			s.mu.Lock()
+			s.file = f
+			s.mu.Unlock()
+			if s.verbose {
+				log.Printf("Disk tile store: created temp file %s", f.Name())
 			}
 		}
+
+		n, err := s.file.Write(req.encoded)
+		if err != nil {
+			log.Printf("WARNING: disk tile store: write error: %v (tile stays in memory)", err)
+			continue
+		}
+
+		// Add to disk index and evict from memory atomically.
+		// This ensures Get() always finds the tile in one place or the other.
+		s.mu.Lock()
+		s.index[req.key] = diskEntry{
+			offset: s.fileOff,
+			length: int32(n),
+		}
+		delete(s.tiles, req.key)
+		s.mu.Unlock()
+
+		s.fileOff += int64(n)
+		s.memBytes.Add(-req.memBytes)
+		s.totalDiskTiles++
+		s.totalDiskBytes += int64(n)
 	}
+}
+
+// Drain blocks until all pending I/O operations are complete.
+// Must be called after all Put() calls are done and before any subsequent
+// Get() calls on tiles that may have been spilled to disk (typically between
+// zoom levels in the generator).
+func (s *DiskTileStore) Drain() {
+	if s.ioCh == nil {
+		return
+	}
+	s.drainOnce.Do(func() {
+		close(s.ioCh)
+		s.ioWg.Wait()
+		if s.verbose {
+			log.Printf("Disk tile store: drained (%d tiles, %.1f MB encoded on disk)",
+				s.totalDiskTiles, float64(s.totalDiskBytes)/(1024*1024))
+		}
+	})
 }
 
 // Len returns the total number of stored tiles (memory + disk).
@@ -158,66 +284,10 @@ func (s *DiskTileStore) MemoryBytes() int64 {
 	return s.memBytes.Load()
 }
 
-// flush writes all in-memory tiles to the disk file and clears the in-memory map.
-func (s *DiskTileStore) flush() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if len(s.tiles) == 0 {
-		return
-	}
-
-	// Lazily create the temp file on first flush.
-	if s.file == nil {
-		f, err := os.CreateTemp(s.dir, "pmtiles-tilestore-*.tmp")
-		if err != nil {
-			log.Printf("WARNING: disk tile store: failed to create temp file: %v", err)
-			return
-		}
-		s.file = f
-	}
-
-	tileCount := len(s.tiles)
-	var flushedBytes int64
-
-	// Use a write buffer to reduce syscalls. Pre-allocate for the common case
-	// of gray tiles (64 KB each).
-	writeBuf := make([]byte, 0, 128*1024)
-
-	for key, td := range s.tiles {
-		writeBuf = writeBuf[:0]
-		writeBuf, typ := td.SerializeAppend(writeBuf)
-
-		n, err := s.file.Write(writeBuf)
-		if err != nil {
-			log.Printf("WARNING: disk tile store: write error: %v", err)
-			return
-		}
-
-		s.index[key] = diskEntry{
-			offset: s.fileOff,
-			length: int32(n),
-			typ:    typ,
-		}
-		s.fileOff += int64(n)
-		flushedBytes += td.MemoryBytes()
-	}
-
-	// Clear the in-memory map.
-	s.tiles = make(map[[3]int]*TileData, 1024)
-	s.memBytes.Store(0)
-	s.flushCount++
-	s.totalFlushed += int64(tileCount)
-
-	if s.verbose {
-		log.Printf("Disk tile store: flushed %d tiles (%.1f MB) to disk (total on disk: %d tiles, %.1f MB file)",
-			tileCount, float64(flushedBytes)/(1024*1024),
-			len(s.index), float64(s.fileOff)/(1024*1024))
-	}
-}
-
-// Close removes the temporary file. Call when the store is no longer needed.
+// Close drains pending I/O and removes the temporary file.
+// Call when the store is no longer needed.
 func (s *DiskTileStore) Close() {
+	s.Drain()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file != nil {
@@ -232,14 +302,13 @@ func (s *DiskTileStore) Close() {
 func (s *DiskTileStore) Stats() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return fmt.Sprintf("in-memory: %d tiles (%.1f MB), on-disk: %d tiles (%.1f MB file), flushes: %d",
+	return fmt.Sprintf("in-memory: %d tiles (%.1f MB), on-disk: %d tiles (%.1f MB encoded)",
 		len(s.tiles), float64(s.memBytes.Load())/(1024*1024),
-		len(s.index), float64(s.fileOff)/(1024*1024),
-		s.flushCount)
+		len(s.index), float64(s.totalDiskBytes)/(1024*1024))
 }
 
-// WriteTo writes the disk index to a writer for debugging/checkpointing.
-// Format: count(uint32) + [key_z(int32) key_x(int32) key_y(int32) offset(int64) length(int32) type(uint8)] × count.
+// WriteIndexTo writes the disk index to a writer for debugging/checkpointing.
+// Format: count(uint32) + [key_z(int32) key_x(int32) key_y(int32) offset(int64) length(int32)] × count.
 func (s *DiskTileStore) WriteIndexTo(w io.Writer) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -250,14 +319,13 @@ func (s *DiskTileStore) WriteIndexTo(w io.Writer) error {
 		return err
 	}
 
-	entry := make([]byte, 4+4+4+8+4+1) // 25 bytes per entry
+	entry := make([]byte, 4+4+4+8+4) // 24 bytes per entry
 	for key, de := range s.index {
 		binary.LittleEndian.PutUint32(entry[0:4], uint32(key[0]))   // z
 		binary.LittleEndian.PutUint32(entry[4:8], uint32(key[1]))   // x
 		binary.LittleEndian.PutUint32(entry[8:12], uint32(key[2]))  // y
 		binary.LittleEndian.PutUint64(entry[12:20], uint64(de.offset))
 		binary.LittleEndian.PutUint32(entry[20:24], uint32(de.length))
-		entry[24] = uint8(de.typ)
 		if _, err := w.Write(entry); err != nil {
 			return err
 		}

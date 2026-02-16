@@ -5,6 +5,8 @@ import (
 	"image/color"
 	"os"
 	"testing"
+
+	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
 
 // --- Helper constructors ---
@@ -337,7 +339,7 @@ func BenchmarkDiskTileStore_PutGet_InMemory(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		store.Put(13, i%8192, i/8192, td)
+		store.Put(13, i%8192, i/8192, td, nil)
 	}
 	b.StopTimer()
 
@@ -355,18 +357,29 @@ func BenchmarkDiskTileStore_PutFlushGet(b *testing.B) {
 		InitialCapacity:  1024,
 		TileSize:         256,
 		TempDir:          dir,
-		MemoryLimitBytes: 1024 * 64, // very low: force frequent flushes
+		MemoryLimitBytes: 1, // >0 enables continuous disk I/O
+		Format:           "png",
 	})
 	defer store.Close()
 
 	img := grayCheckerImage(256, 100, 200)
 	td := newTileData(img, 256)
 
-	// Put enough tiles to trigger multiple flushes.
+	// Pre-encode the tile for disk storage.
+	enc := &encode.PNGEncoder{}
+	encoded, err := enc.Encode(td.AsImage())
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// Put tiles (I/O goroutine writes them to disk continuously).
 	nTiles := 1000
 	for i := 0; i < nTiles; i++ {
-		store.Put(13, i%100, i/100, td)
+		store.Put(13, i%100, i/100, td, encoded)
 	}
+
+	// Drain I/O before reading back.
+	store.Drain()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

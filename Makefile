@@ -22,12 +22,15 @@ MIN_ZOOM   ?= 14
 MAX_ZOOM   ?= 18
 TILE_SIZE  ?= 512
 CONCURRENT ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+MEM_LIMIT  ?= 0
 
 .PHONY: all build install \
         test test-race test-cover bench \
         lint fmt vet tidy check \
         clean clean-all \
-        run demo demo-profile pprof-cpu pprof-mem \
+        run demo demo-full-disk demo-profile pprof-cpu pprof-mem \
+        demo-jpeg demo-png demo-webp \
+        demo-full-disk-jpeg demo-full-disk-png demo-full-disk-webp \
         cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-all \
         help
 
@@ -131,6 +134,17 @@ pprof-cpu:
 pprof-mem:
 	$(GO) tool pprof -http=:8081 $(BUILD_DIR)/mem.prof
 
+## demo-full-disk: Demo with aggressive disk spilling (1 MB memory limit)
+demo-full-disk: build
+	./$(OUTPUT) --verbose \
+		--format $(FORMAT) \
+		--quality $(QUALITY) \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom $(MAX_ZOOM) \
+		--concurrency $(CONCURRENT) \
+		--mem-limit 1 \
+		data/ $(BUILD_DIR)/demo-full-disk-$(FORMAT).pmtiles
+
 ## demo-jpeg: Demo with JPEG encoding (default quality)
 demo-jpeg: FORMAT=jpeg
 demo-jpeg: demo
@@ -142,6 +156,18 @@ demo-png: demo
 ## demo-webp: Demo with WebP encoding
 demo-webp: FORMAT=webp
 demo-webp: demo
+
+## demo-full-disk-jpeg: Full-disk mode with JPEG
+demo-full-disk-jpeg: FORMAT=jpeg
+demo-full-disk-jpeg: demo-full-disk
+
+## demo-full-disk-png: Full-disk mode with PNG
+demo-full-disk-png: FORMAT=png
+demo-full-disk-png: demo-full-disk
+
+## demo-full-disk-webp: Full-disk mode with WebP
+demo-full-disk-webp: FORMAT=webp
+demo-full-disk-webp: demo-full-disk
 
 # ---------- Cross-compilation ----------
 
@@ -188,16 +214,19 @@ help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/^## /  /' | column -t -s ':'
 	@echo ""
 	@echo "Variables (override with VAR=value):"
-	@echo "  FORMAT      Tile encoding: jpeg, png, webp     (default: jpeg)"
+	@echo "  FORMAT      Tile encoding: jpeg, png, webp     (default: webp)"
 	@echo "  QUALITY     JPEG/WebP quality 1-100             (default: 85)"
 	@echo "  MIN_ZOOM    Minimum zoom level                  (default: 14)"
-	@echo "  MAX_ZOOM    Maximum zoom level                  (default: 20)"
-	@echo "  TILE_SIZE   Output tile size in pixels           (default: 256)"
+	@echo "  MAX_ZOOM    Maximum zoom level                  (default: 18)"
+	@echo "  TILE_SIZE   Output tile size in pixels           (default: 512)"
 	@echo "  CONCURRENT  Number of parallel workers           (default: NumCPU)"
+	@echo "  MEM_LIMIT   Memory limit in MB for disk spill    (default: 0 = auto)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make build                           Build the binary"
 	@echo "  make demo MIN_ZOOM=16 MAX_ZOOM=18    Run demo at zoom 16-18"
 	@echo "  make demo-png QUALITY=100             Run demo with PNG"
+	@echo "  make demo-full-disk                   Demo with full disk spilling (1 MB limit)"
+	@echo "  make demo-full-disk-webp              Full disk + WebP encoding"
 	@echo "  make cross-all                        Cross-compile all platforms"
 	@echo "  make run ARGS=\"--verbose data/ o.pmtiles\""
