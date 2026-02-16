@@ -67,7 +67,10 @@ type DiskTileStore struct {
 	dir      string // directory for temp files
 
 	// Memory tracking.
-	memBytes atomic.Int64 // estimated bytes of in-memory tile data
+	memBytes    atomic.Int64  // estimated bytes of in-memory tile data
+	memoryLimit int64         // max in-memory tile bytes before blocking Put(); 0 = no limit
+	spillMu     sync.Mutex   // protects memCond waits (separate from mu to avoid contention)
+	memCond     *sync.Cond   // signaled by ioLoop when memBytes decreases; nil when spilling is off
 
 	// Dedicated I/O goroutine.
 	ioCh      chan ioRequest // tiles to write to disk
@@ -124,7 +127,9 @@ func NewDiskTileStore(cfg DiskTileStoreConfig) *DiskTileStore {
 	}
 
 	// Start the dedicated I/O goroutine when disk spilling is enabled.
-	if cfg.MemoryLimitBytes >= 0 && cfg.Format != "" {
+	if cfg.MemoryLimitBytes > 0 && cfg.Format != "" {
+		s.memoryLimit = cfg.MemoryLimitBytes
+		s.memCond = sync.NewCond(&s.spillMu)
 		s.ioCh = make(chan ioRequest, 256)
 		s.ioWg.Add(1)
 		go s.ioLoop()
@@ -164,6 +169,19 @@ func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) {
 	// Send to I/O goroutine for eventual disk eviction (when enabled).
 	if s.ioCh != nil && len(encoded) > 0 {
 		s.ioCh <- ioRequest{key: key, encoded: encoded, memBytes: mem}
+	}
+
+	// Block if the memory limit is exceeded, providing backpressure to
+	// workers so the I/O goroutine can catch up with disk eviction.
+	// This must happen AFTER the ioCh send so the ioLoop always has work
+	// to process — otherwise a single blocked worker with no pending I/O
+	// would deadlock.
+	if s.memCond != nil {
+		s.spillMu.Lock()
+		for s.memBytes.Load() > s.memoryLimit {
+			s.memCond.Wait()
+		}
+		s.spillMu.Unlock()
 	}
 }
 
@@ -286,6 +304,11 @@ func (s *DiskTileStore) ioLoop() {
 		s.memBytes.Add(-req.memBytes)
 		s.totalDiskTiles++
 		s.totalDiskBytes += int64(n)
+
+		// Wake blocked Put() calls now that memory has been freed.
+		if s.memCond != nil {
+			s.memCond.Broadcast()
+		}
 	}
 }
 
