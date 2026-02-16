@@ -239,7 +239,9 @@ func main() {
 	}
 
 	if verbose {
-		log.Printf("Generated %d tiles in %v", stats.TileCount, time.Since(genStart).Round(time.Millisecond))
+		log.Printf("Generated %d tiles (%d uniform, %d empty) in %v",
+			stats.TileCount, stats.UniformTiles, stats.EmptyTiles,
+			time.Since(genStart).Round(time.Millisecond))
 	}
 
 	// Finalize PMTiles file.

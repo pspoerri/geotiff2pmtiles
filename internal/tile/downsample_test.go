@@ -17,6 +17,16 @@ func solidImage(tileSize int, c color.RGBA) *image.RGBA {
 	return img
 }
 
+// solidTile creates a uniform TileData filled with a single color.
+func solidTile(tileSize int, c color.RGBA) *TileData {
+	return newTileDataUniform(c, tileSize)
+}
+
+// fullTile wraps an image in TileData (auto-detects uniformity).
+func fullTile(img *image.RGBA, tileSize int) *TileData {
+	return newTileData(img, tileSize)
+}
+
 // checkerImage creates a tileSize x tileSize image with alternating 2x2 blocks of two colors.
 func checkerImage(tileSize int, c1, c2 color.RGBA) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
@@ -44,7 +54,7 @@ func TestDownsampleTile_SingleChild(t *testing.T) {
 	tileSize := 256
 
 	// Only top-left child.
-	tl := solidImage(tileSize, red)
+	tl := solidTile(tileSize, red)
 	result := downsampleTile(tl, nil, nil, nil, tileSize, ResamplingNearest)
 	if result == nil {
 		t.Fatal("expected non-nil result with one child")
@@ -67,10 +77,18 @@ func TestDownsampleTile_Nearest_SolidColor(t *testing.T) {
 	blue := color.RGBA{0, 0, 255, 255}
 	tileSize := 256
 
-	child := solidImage(tileSize, blue)
+	child := solidTile(tileSize, blue)
 	result := downsampleTile(child, child, child, child, tileSize, ResamplingNearest)
 	if result == nil {
 		t.Fatal("expected non-nil result")
+	}
+
+	// Fast path should return a uniform tile.
+	if !result.IsUniform() {
+		t.Error("expected uniform result for 4 identical solid children")
+	}
+	if result.Color() != blue {
+		t.Errorf("uniform color = %v, want %v", result.Color(), blue)
 	}
 
 	// Every pixel should be blue.
@@ -88,13 +106,17 @@ func TestDownsampleTile_Bilinear_SolidColor(t *testing.T) {
 	green := color.RGBA{0, 200, 0, 255}
 	tileSize := 256
 
-	child := solidImage(tileSize, green)
+	child := solidTile(tileSize, green)
 	result := downsampleTile(child, child, child, child, tileSize, ResamplingBilinear)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
 
-	// Bilinear average of identical pixels should be the same color.
+	// Fast path should return a uniform tile.
+	if !result.IsUniform() {
+		t.Error("expected uniform result for 4 identical solid children")
+	}
+
 	c := result.RGBAAt(64, 64)
 	if abs(int(c.R)-int(green.R)) > 1 || abs(int(c.G)-int(green.G)) > 1 || abs(int(c.B)-int(green.B)) > 1 {
 		t.Errorf("bilinear solid: got %v, want ~%v", c, green)
@@ -105,8 +127,8 @@ func TestDownsampleTile_Bilinear_Average(t *testing.T) {
 	tileSize := 256
 
 	// Create children with specific colors.
-	white := solidImage(tileSize, color.RGBA{255, 255, 255, 255})
-	black := solidImage(tileSize, color.RGBA{0, 0, 0, 255})
+	white := solidTile(tileSize, color.RGBA{255, 255, 255, 255})
+	black := solidTile(tileSize, color.RGBA{0, 0, 0, 255})
 
 	// Top-left and top-right: white; bottom-left and bottom-right: black.
 	result := downsampleTile(white, white, black, black, tileSize, ResamplingBilinear)
@@ -130,10 +152,10 @@ func TestDownsampleTile_Bilinear_Average(t *testing.T) {
 func TestDownsampleTile_FourDistinctColors(t *testing.T) {
 	tileSize := 4 // Use small tile for easy verification.
 
-	red := solidImage(tileSize, color.RGBA{200, 0, 0, 255})
-	green := solidImage(tileSize, color.RGBA{0, 200, 0, 255})
-	blue := solidImage(tileSize, color.RGBA{0, 0, 200, 255})
-	yellow := solidImage(tileSize, color.RGBA{200, 200, 0, 255})
+	red := solidTile(tileSize, color.RGBA{200, 0, 0, 255})
+	green := solidTile(tileSize, color.RGBA{0, 200, 0, 255})
+	blue := solidTile(tileSize, color.RGBA{0, 0, 200, 255})
+	yellow := solidTile(tileSize, color.RGBA{200, 200, 0, 255})
 
 	result := downsampleTile(red, green, blue, yellow, tileSize, ResamplingNearest)
 	if result == nil {
@@ -182,6 +204,175 @@ func TestSrcPixel_Clamping(t *testing.T) {
 	c = srcPixel(img, 0, 0, tileSize)
 	if c.R != 100 {
 		t.Errorf("srcPixel(0,0) = %v, want grey (100)", c)
+	}
+}
+
+// --- TileData-specific tests ---
+
+func TestDetectUniform_Solid(t *testing.T) {
+	tileSize := 64
+	blue := color.RGBA{0, 100, 200, 255}
+	img := solidImage(tileSize, blue)
+
+	c, ok := detectUniform(img)
+	if !ok {
+		t.Fatal("expected solid image to be detected as uniform")
+	}
+	if c != blue {
+		t.Errorf("detected color = %v, want %v", c, blue)
+	}
+}
+
+func TestDetectUniform_NonUniform(t *testing.T) {
+	tileSize := 64
+	img := checkerImage(tileSize, color.RGBA{255, 0, 0, 255}, color.RGBA{0, 0, 255, 255})
+
+	_, ok := detectUniform(img)
+	if ok {
+		t.Error("expected checker image to NOT be detected as uniform")
+	}
+}
+
+func TestDetectUniform_Transparent(t *testing.T) {
+	tileSize := 64
+	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
+
+	c, ok := detectUniform(img)
+	if !ok {
+		t.Fatal("expected blank (transparent) image to be detected as uniform")
+	}
+	if c != (color.RGBA{}) {
+		t.Errorf("detected color = %v, want transparent zero", c)
+	}
+}
+
+func TestTileData_UniformRGBAAt(t *testing.T) {
+	tileSize := 256
+	red := color.RGBA{255, 0, 0, 255}
+	td := newTileDataUniform(red, tileSize)
+
+	for _, pt := range [][2]int{{0, 0}, {128, 128}, {255, 255}} {
+		c := td.RGBAAt(pt[0], pt[1])
+		if c != red {
+			t.Errorf("RGBAAt(%d,%d) = %v, want %v", pt[0], pt[1], c, red)
+		}
+	}
+}
+
+func TestTileData_ToRGBA(t *testing.T) {
+	tileSize := 16
+	green := color.RGBA{0, 200, 0, 255}
+	td := newTileDataUniform(green, tileSize)
+
+	img := td.ToRGBA()
+	if img.Bounds().Dx() != tileSize || img.Bounds().Dy() != tileSize {
+		t.Fatalf("ToRGBA size = %v, want %dx%d", img.Bounds(), tileSize, tileSize)
+	}
+
+	for y := 0; y < tileSize; y++ {
+		for x := 0; x < tileSize; x++ {
+			c := img.RGBAAt(x, y)
+			if c != green {
+				t.Fatalf("ToRGBA pixel (%d,%d) = %v, want %v", x, y, c, green)
+			}
+		}
+	}
+}
+
+func TestTileData_AsImage_FullTile(t *testing.T) {
+	tileSize := 16
+	img := checkerImage(tileSize, color.RGBA{255, 0, 0, 255}, color.RGBA{0, 255, 0, 255})
+	td := newTileData(img, tileSize)
+
+	if td.IsUniform() {
+		t.Error("checker tile should not be uniform")
+	}
+
+	// AsImage should return the underlying *image.RGBA.
+	asImg := td.AsImage()
+	if _, ok := asImg.(*image.RGBA); !ok {
+		t.Errorf("AsImage() for full tile should be *image.RGBA, got %T", asImg)
+	}
+}
+
+func TestTileData_AsImage_UniformTile(t *testing.T) {
+	tileSize := 16
+	blue := color.RGBA{0, 0, 255, 255}
+	td := newTileDataUniform(blue, tileSize)
+
+	asImg := td.AsImage()
+	// Should implement image.Image (it's *TileData itself).
+	bounds := asImg.Bounds()
+	if bounds.Dx() != tileSize || bounds.Dy() != tileSize {
+		t.Errorf("AsImage bounds = %v, want %dx%d", bounds, tileSize, tileSize)
+	}
+
+	rr, g, b, a := asImg.At(5, 5).RGBA()
+	if uint8(rr>>8) != 0 || uint8(g>>8) != 0 || uint8(b>>8) != 255 || uint8(a>>8) != 255 {
+		t.Errorf("AsImage.At(5,5) = (%d,%d,%d,%d), want blue", rr>>8, g>>8, b>>8, a>>8)
+	}
+}
+
+func TestDownsampleTile_UniformFastPath(t *testing.T) {
+	tileSize := 256
+	ocean := color.RGBA{0, 50, 150, 255}
+
+	child := solidTile(tileSize, ocean)
+	result := downsampleTile(child, child, child, child, tileSize, ResamplingBilinear)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.IsUniform() {
+		t.Error("expected uniform result from 4 identical uniform children")
+	}
+	if result.Color() != ocean {
+		t.Errorf("color = %v, want %v", result.Color(), ocean)
+	}
+}
+
+func TestDownsampleTile_MixedUniformChildren(t *testing.T) {
+	tileSize := 4
+
+	red := solidTile(tileSize, color.RGBA{200, 0, 0, 255})
+	blue := solidTile(tileSize, color.RGBA{0, 0, 200, 255})
+
+	// Different uniform colors: must not use the fast path.
+	result := downsampleTile(red, red, blue, blue, tileSize, ResamplingNearest)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Top-left quadrant should be red, bottom-left should be blue.
+	cTop := result.RGBAAt(0, 0)
+	if cTop.R < 190 || cTop.B > 10 {
+		t.Errorf("top-left = %v, want red", cTop)
+	}
+	cBot := result.RGBAAt(0, tileSize/2)
+	if cBot.R > 10 || cBot.B < 190 {
+		t.Errorf("bottom-left = %v, want blue", cBot)
+	}
+}
+
+func TestDownsampleTile_NilAndUniform(t *testing.T) {
+	tileSize := 256
+	green := color.RGBA{0, 200, 0, 255}
+
+	child := solidTile(tileSize, green)
+	// Only top-left is present; the rest are nil.
+	result := downsampleTile(child, nil, nil, nil, tileSize, ResamplingNearest)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Should NOT be uniform (has transparent gaps from nil children).
+	// (It could be non-uniform due to the transparent quadrants.)
+	cTopLeft := result.RGBAAt(0, 0)
+	if cTopLeft != green {
+		t.Errorf("top-left = %v, want %v", cTopLeft, green)
+	}
+	cBotRight := result.RGBAAt(200, 200)
+	if cBotRight.A != 0 {
+		t.Errorf("bottom-right alpha = %d, want 0", cBotRight.A)
 	}
 }
 
