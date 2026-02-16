@@ -27,19 +27,19 @@ var (
 
 func main() {
 	var (
-		format       string
-		quality      int
-		minZoom      int
-		maxZoom      int
-		showVersion  bool
-		tileSize     int
-		concurrency  int
-		verbose      bool
-		resampling   string
-		cpuProfile   string
-		memProfile   string
-		memLimitMB   int
-		noSpill      bool
+		format      string
+		quality     int
+		minZoom     int
+		maxZoom     int
+		showVersion bool
+		tileSize    int
+		concurrency int
+		verbose     bool
+		resampling  string
+		cpuProfile  string
+		memProfile  string
+		memLimitMB  int
+		noSpill     bool
 	)
 
 	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium")

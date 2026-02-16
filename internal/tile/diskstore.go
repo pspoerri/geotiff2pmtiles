@@ -64,7 +64,7 @@ type DiskTileStore struct {
 	memBytes atomic.Int64 // estimated bytes of in-memory tile data
 
 	// Dedicated I/O goroutine.
-	ioCh      chan ioRequest  // tiles to write to disk
+	ioCh      chan ioRequest // tiles to write to disk
 	ioWg      sync.WaitGroup // for Drain()
 	drainOnce sync.Once      // ensures Drain() is idempotent
 
@@ -321,9 +321,9 @@ func (s *DiskTileStore) WriteIndexTo(w io.Writer) error {
 
 	entry := make([]byte, 4+4+4+8+4) // 24 bytes per entry
 	for key, de := range s.index {
-		binary.LittleEndian.PutUint32(entry[0:4], uint32(key[0]))   // z
-		binary.LittleEndian.PutUint32(entry[4:8], uint32(key[1]))   // x
-		binary.LittleEndian.PutUint32(entry[8:12], uint32(key[2]))  // y
+		binary.LittleEndian.PutUint32(entry[0:4], uint32(key[0]))  // z
+		binary.LittleEndian.PutUint32(entry[4:8], uint32(key[1]))  // x
+		binary.LittleEndian.PutUint32(entry[8:12], uint32(key[2])) // y
 		binary.LittleEndian.PutUint64(entry[12:20], uint64(de.offset))
 		binary.LittleEndian.PutUint32(entry[20:24], uint32(de.length))
 		if _, err := w.Write(entry); err != nil {

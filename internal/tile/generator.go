@@ -243,46 +243,46 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							}
 						}
 
-					if td == nil {
-						emptyCount.Add(1)
+						if td == nil {
+							emptyCount.Add(1)
+							pb.Increment()
+							continue
+						}
+
+						if td.IsUniform() {
+							uniformCount.Add(1)
+						} else if td.IsGray() {
+							grayCount.Add(1)
+						}
+
+						// Encode first so we can reuse the encoded bytes for
+						// both the output and the disk tile store.
+						data, err := cfg.Encoder.Encode(td.AsImage())
+						if err != nil {
+							select {
+							case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
+							default:
+							}
+							return
+						}
+
+						if err := writer.WriteTile(z, x, y, data); err != nil {
+							select {
+							case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
+							default:
+							}
+							return
+						}
+
+						// Store for next zoom level's downsampling, reusing the
+						// already-encoded bytes for efficient disk storage.
+						if z > cfg.MinZoom {
+							nextStore.Put(z, x, y, td, data)
+						}
+
+						tileCount.Add(1)
+						totalBytes.Add(int64(len(data)))
 						pb.Increment()
-						continue
-					}
-
-					if td.IsUniform() {
-						uniformCount.Add(1)
-					} else if td.IsGray() {
-						grayCount.Add(1)
-					}
-
-					// Encode first so we can reuse the encoded bytes for
-					// both the output and the disk tile store.
-					data, err := cfg.Encoder.Encode(td.AsImage())
-					if err != nil {
-						select {
-						case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
-						return
-					}
-
-					if err := writer.WriteTile(z, x, y, data); err != nil {
-						select {
-						case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
-						return
-					}
-
-					// Store for next zoom level's downsampling, reusing the
-					// already-encoded bytes for efficient disk storage.
-					if z > cfg.MinZoom {
-						nextStore.Put(z, x, y, td, data)
-					}
-
-					tileCount.Add(1)
-					totalBytes.Add(int64(len(data)))
-					pb.Increment()
 					}
 				}
 			}()
