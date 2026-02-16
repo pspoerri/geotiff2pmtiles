@@ -57,6 +57,16 @@ func (t *TileData) Color() color.RGBA {
 	return t.color
 }
 
+// isUniformGray returns true if the tile is uniform with R=G=B and A=255.
+// Used internally to detect gray-compatible tiles for the downsample fast path.
+func (t *TileData) isUniformGray() bool {
+	if !t.IsUniform() {
+		return false
+	}
+	c := t.color
+	return c.R == c.G && c.R == c.B && c.A == 255
+}
+
 // RGBAAt returns the pixel at (x, y).
 func (t *TileData) RGBAAt(x, y int) color.RGBA {
 	if t.img != nil {
