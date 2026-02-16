@@ -116,12 +116,15 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 
 	// Tile image store: holds decoded tiles for the current zoom level
 	// so the next (lower) zoom level can downsample from them.
-	// When memory pressure exceeds the limit, tiles spill to disk.
+	// When memory pressure is configured, tiles are continuously spilled
+	// to disk by a dedicated I/O goroutine, stored in encoded format
+	// (PNG/WebP/JPEG) for reduced disk usage.
 	storeCfg := DiskTileStoreConfig{
 		InitialCapacity:  4096,
 		TileSize:         cfg.TileSize,
 		TempDir:          cfg.OutputDir,
 		MemoryLimitBytes: memLimit,
+		Format:           cfg.Encoder.Format(),
 		Verbose:          cfg.Verbose,
 	}
 	store := NewDiskTileStore(storeCfg)
@@ -161,6 +164,7 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 			TileSize:         cfg.TileSize,
 			TempDir:          cfg.OutputDir,
 			MemoryLimitBytes: memLimit,
+			Format:           cfg.Encoder.Format(),
 			Verbose:          cfg.Verbose,
 		})
 
@@ -239,42 +243,46 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							}
 						}
 
-						if td == nil {
-							emptyCount.Add(1)
-							pb.Increment()
-							continue
-						}
-
-						if z > cfg.MinZoom {
-							nextStore.Put(z, x, y, td)
-						}
-
-						if td.IsUniform() {
-							uniformCount.Add(1)
-						} else if td.IsGray() {
-							grayCount.Add(1)
-						}
-
-						data, err := cfg.Encoder.Encode(td.AsImage())
-						if err != nil {
-							select {
-							case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
-							default:
-							}
-							return
-						}
-
-						if err := writer.WriteTile(z, x, y, data); err != nil {
-							select {
-							case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
-							default:
-							}
-							return
-						}
-
-						tileCount.Add(1)
-						totalBytes.Add(int64(len(data)))
+					if td == nil {
+						emptyCount.Add(1)
 						pb.Increment()
+						continue
+					}
+
+					if td.IsUniform() {
+						uniformCount.Add(1)
+					} else if td.IsGray() {
+						grayCount.Add(1)
+					}
+
+					// Encode first so we can reuse the encoded bytes for
+					// both the output and the disk tile store.
+					data, err := cfg.Encoder.Encode(td.AsImage())
+					if err != nil {
+						select {
+						case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
+						default:
+						}
+						return
+					}
+
+					if err := writer.WriteTile(z, x, y, data); err != nil {
+						select {
+						case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
+						default:
+						}
+						return
+					}
+
+					// Store for next zoom level's downsampling, reusing the
+					// already-encoded bytes for efficient disk storage.
+					if z > cfg.MinZoom {
+						nextStore.Put(z, x, y, td, data)
+					}
+
+					tileCount.Add(1)
+					totalBytes.Add(int64(len(data)))
+					pb.Increment()
 					}
 				}
 			}()
@@ -282,6 +290,10 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 
 		wg.Wait()
 		pb.Finish()
+
+		// Drain the I/O goroutine so all tiles are on disk before the
+		// next zoom level starts reading from this store.
+		nextStore.Drain()
 
 		// Check for errors.
 		select {
