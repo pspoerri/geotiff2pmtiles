@@ -18,35 +18,67 @@ import (
 //
 // Any child may be nil (edge tiles / partial coverage). Nil children
 // contribute transparent black pixels.
-func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *image.RGBA, tileSize int, mode Resampling) *image.RGBA {
+//
+// When all four children are uniform with the same color, the result is
+// returned as a compact uniform TileData without allocating a full image.
+func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSize int, mode Resampling) *TileData {
+	children := [4]*TileData{topLeft, topRight, bottomLeft, bottomRight}
+
+	// Count non-nil children and check for uniform fast path.
+	nonNilCount := 0
+	allUniform := true
+	for _, c := range children {
+		if c == nil {
+			continue
+		}
+		nonNilCount++
+		if !c.IsUniform() {
+			allUniform = false
+		}
+	}
+
+	if nonNilCount == 0 {
+		return nil
+	}
+
+	// Fast path: all 4 children present and uniform with the same color.
+	if nonNilCount == 4 && allUniform {
+		c0 := children[0].Color()
+		if children[1].Color() == c0 && children[2].Color() == c0 && children[3].Color() == c0 {
+			return newTileDataUniform(c0, tileSize)
+		}
+	}
+
+	// Expand children to *image.RGBA for the quadrant functions.
+	imgs := [4]*image.RGBA{
+		tileDataToRGBA(topLeft),
+		tileDataToRGBA(topRight),
+		tileDataToRGBA(bottomLeft),
+		tileDataToRGBA(bottomRight),
+	}
+
 	dst := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
 	half := tileSize / 2
-	hasData := false
 
-	// Each quadrant of the parent tile is a half-size version of one child.
 	quadrants := [4]struct {
 		src  *image.RGBA
 		dstX int
 		dstY int
 	}{
-		{topLeft, 0, 0},
-		{topRight, half, 0},
-		{bottomLeft, 0, half},
-		{bottomRight, half, half},
+		{imgs[0], 0, 0},
+		{imgs[1], half, 0},
+		{imgs[2], 0, half},
+		{imgs[3], half, half},
 	}
 
 	for _, q := range quadrants {
 		if q.src == nil {
 			continue
 		}
-		hasData = true
 		downsampleQuadrant(dst, q.src, q.dstX, q.dstY, half, tileSize, mode)
 	}
 
-	if !hasData {
-		return nil
-	}
-	return dst
+	return newTileData(dst, tileSize)
 }
 
 // downsampleQuadrant scales a tileSize x tileSize source into a half x half
@@ -182,34 +214,66 @@ func downsampleQuadrantNearest(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 
 // downsampleTileTerrarium creates a parent tile by combining up to 4 child tiles
 // using Terrarium-aware averaging (decode RGB→elevation, average, re-encode).
-func downsampleTileTerrarium(topLeft, topRight, bottomLeft, bottomRight *image.RGBA, tileSize int, mode Resampling) *image.RGBA {
+//
+// When all four children are uniform with the same color (same elevation),
+// the result is returned as a compact uniform TileData.
+func downsampleTileTerrarium(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSize int, mode Resampling) *TileData {
+	children := [4]*TileData{topLeft, topRight, bottomLeft, bottomRight}
+
+	nonNilCount := 0
+	allUniform := true
+	for _, c := range children {
+		if c == nil {
+			continue
+		}
+		nonNilCount++
+		if !c.IsUniform() {
+			allUniform = false
+		}
+	}
+
+	if nonNilCount == 0 {
+		return nil
+	}
+
+	// Fast path: all 4 children present and uniform with the same color.
+	if nonNilCount == 4 && allUniform {
+		c0 := children[0].Color()
+		if children[1].Color() == c0 && children[2].Color() == c0 && children[3].Color() == c0 {
+			return newTileDataUniform(c0, tileSize)
+		}
+	}
+
+	// Expand children to *image.RGBA for the quadrant functions.
+	imgs := [4]*image.RGBA{
+		tileDataToRGBA(topLeft),
+		tileDataToRGBA(topRight),
+		tileDataToRGBA(bottomLeft),
+		tileDataToRGBA(bottomRight),
+	}
+
 	dst := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
 	half := tileSize / 2
-	hasData := false
 
 	quadrants := [4]struct {
 		src  *image.RGBA
 		dstX int
 		dstY int
 	}{
-		{topLeft, 0, 0},
-		{topRight, half, 0},
-		{bottomLeft, 0, half},
-		{bottomRight, half, half},
+		{imgs[0], 0, 0},
+		{imgs[1], half, 0},
+		{imgs[2], 0, half},
+		{imgs[3], half, half},
 	}
 
 	for _, q := range quadrants {
 		if q.src == nil {
 			continue
 		}
-		hasData = true
 		downsampleQuadrantTerrarium(dst, q.src, q.dstX, q.dstY, half, tileSize, mode)
 	}
 
-	if !hasData {
-		return nil
-	}
-	return dst
+	return newTileData(dst, tileSize)
 }
 
 // srcPixel reads a pixel from src, clamping coordinates to bounds.

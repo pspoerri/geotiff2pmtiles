@@ -58,9 +58,10 @@ type Config struct {
 
 // Stats holds generation statistics.
 type Stats struct {
-	TileCount  int64
-	EmptyTiles int64
-	TotalBytes int64
+	TileCount    int64
+	EmptyTiles   int64
+	UniformTiles int64
+	TotalBytes   int64
 }
 
 // TileWriter is the interface for writing tiles (implemented by pmtiles.Writer).
@@ -73,38 +74,39 @@ type tileJob struct {
 	Z, X, Y int
 }
 
-// TileImageStore is a concurrent-safe store for decoded tile images.
+// TileImageStore is a concurrent-safe store for tile data.
 // Used to hold tiles from the current zoom level so the next (lower)
-// zoom level can downsample from them.
+// zoom level can downsample from them. Tiles may be stored compactly
+// as a single color when all pixels are uniform (e.g. ocean, gaps).
 type TileImageStore struct {
 	mu    sync.RWMutex
-	tiles map[[3]int]*image.RGBA
+	tiles map[[3]int]*TileData
 }
 
 func newTileImageStore(capacity int) *TileImageStore {
 	return &TileImageStore{
-		tiles: make(map[[3]int]*image.RGBA, capacity),
+		tiles: make(map[[3]int]*TileData, capacity),
 	}
 }
 
-// Get retrieves a tile image. Returns nil if not present.
-func (s *TileImageStore) Get(z, x, y int) *image.RGBA {
+// Get retrieves tile data. Returns nil if not present.
+func (s *TileImageStore) Get(z, x, y int) *TileData {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.tiles[[3]int{z, x, y}]
 }
 
-// Put stores a tile image.
-func (s *TileImageStore) Put(z, x, y int, img *image.RGBA) {
+// Put stores tile data.
+func (s *TileImageStore) Put(z, x, y int, td *TileData) {
 	s.mu.Lock()
-	s.tiles[[3]int{z, x, y}] = img
+	s.tiles[[3]int{z, x, y}] = td
 	s.mu.Unlock()
 }
 
 // Clear removes all entries.
 func (s *TileImageStore) Clear() {
 	s.mu.Lock()
-	s.tiles = make(map[[3]int]*image.RGBA)
+	s.tiles = make(map[[3]int]*TileData)
 	s.mu.Unlock()
 }
 
@@ -149,7 +151,7 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 	// so the next (lower) zoom level can downsample from them.
 	store := newTileImageStore(4096)
 
-	var tileCount, emptyCount, totalBytes atomic.Int64
+	var tileCount, emptyCount, uniformCount, totalBytes atomic.Int64
 
 	// Process zoom levels from highest to lowest (pyramid approach).
 	for z := cfg.MaxZoom; z >= cfg.MinZoom; z-- {
@@ -230,13 +232,17 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 				for batch := range batchCh {
 					for _, t := range batch {
 						z, x, y := t[0], t[1], t[2]
-						var img *image.RGBA
+						var td *TileData
 
 						if isMaxZoom {
+							var img *image.RGBA
 							if cfg.IsTerrarium {
 								img = renderTileTerrarium(z, x, y, cfg.TileSize, srcInfos, proj, floatCache, cfg.Resampling)
 							} else {
 								img = renderTile(z, x, y, cfg.TileSize, srcInfos, proj, cogCache, cfg.Resampling)
+							}
+							if img != nil {
+								td = newTileData(img, cfg.TileSize)
 							}
 						} else {
 							childZ := z + 1
@@ -245,23 +251,27 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							bl := store.Get(childZ, 2*x, 2*y+1)
 							br := store.Get(childZ, 2*x+1, 2*y+1)
 							if cfg.IsTerrarium {
-								img = downsampleTileTerrarium(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+								td = downsampleTileTerrarium(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
 							} else {
-								img = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+								td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
 							}
 						}
 
-						if img == nil {
+						if td == nil {
 							emptyCount.Add(1)
 							pb.Increment()
 							continue
 						}
 
 						if z > cfg.MinZoom {
-							nextStore.Put(z, x, y, img)
+							nextStore.Put(z, x, y, td)
 						}
 
-						data, err := cfg.Encoder.Encode(img)
+						if td.IsUniform() {
+							uniformCount.Add(1)
+						}
+
+						data, err := cfg.Encoder.Encode(td.AsImage())
 						if err != nil {
 							select {
 							case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
@@ -305,8 +315,9 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 	}
 
 	return Stats{
-		TileCount:  tileCount.Load(),
-		EmptyTiles: emptyCount.Load(),
-		TotalBytes: totalBytes.Load(),
+		TileCount:    tileCount.Load(),
+		EmptyTiles:   emptyCount.Load(),
+		UniformTiles: uniformCount.Load(),
+		TotalBytes:   totalBytes.Load(),
 	}, nil
 }
