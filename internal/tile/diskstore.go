@@ -48,6 +48,10 @@ type ioRequest struct {
 //
 // The continuous I/O design means disk writes are spread evenly over the
 // processing time rather than occurring in large blocking flushes.
+//
+// The temp file is owned exclusively by the I/O goroutine for writing.
+// Readers access it via an atomic pointer (lock-free ReadAt), so file I/O
+// never contends with the map mutex.
 type DiskTileStore struct {
 	mu       sync.RWMutex
 	tiles    map[[3]int]*TileData // in-memory tiles (evicted once on disk)
@@ -55,10 +59,10 @@ type DiskTileStore struct {
 	tileSize int
 	format   string // encoder format for decode path ("png", "jpeg", "webp", "terrarium")
 
-	// Disk backing (written only by the I/O goroutine).
-	file    *os.File // temp file for encoded tiles
-	fileOff int64    // current write offset in the temp file
-	dir     string   // directory for temp files
+	// Read-only file handle for Get(). Set once by ioLoop on first write,
+	// never reassigned. Readers use atomic load + ReadAt (pread, no locking).
+	readFile atomic.Pointer[os.File]
+	dir      string // directory for temp files
 
 	// Memory tracking.
 	memBytes atomic.Int64 // estimated bytes of in-memory tile data
@@ -117,7 +121,7 @@ func NewDiskTileStore(cfg DiskTileStoreConfig) *DiskTileStore {
 	}
 
 	// Start the dedicated I/O goroutine when disk spilling is enabled.
-	if cfg.MemoryLimitBytes > 0 && cfg.Format != "" {
+	if cfg.MemoryLimitBytes >= 0 && cfg.Format != "" {
 		s.ioCh = make(chan ioRequest, 256)
 		s.ioWg.Add(1)
 		go s.ioLoop()
@@ -166,9 +170,15 @@ func (s *DiskTileStore) Get(z, x, y int) *TileData {
 	// Slow path: check disk index.
 	s.mu.RLock()
 	de, onDisk := s.index[key]
-	f := s.file
 	s.mu.RUnlock()
-	if !onDisk || f == nil {
+	if !onDisk {
+		return nil
+	}
+
+	// Load the file handle (lock-free). ReadAt uses pread under the hood,
+	// so concurrent reads are safe without any mutex.
+	f := s.readFile.Load()
+	if f == nil {
 		return nil
 	}
 
@@ -210,28 +220,34 @@ func (s *DiskTileStore) decodeFromDisk(data []byte) *TileData {
 // ioLoop is the dedicated I/O goroutine that continuously writes encoded
 // tiles to the temp file and evicts them from memory.
 //
+// The file and write offset are local variables — only this goroutine writes.
+// The file handle is published once via s.readFile so that concurrent Get()
+// callers can issue ReadAt (pread) without any mutex involvement.
+//
 // Invariant: the tile is always in either s.tiles or s.index (or both during
 // the brief window inside the critical section). A Get() will always find it.
 func (s *DiskTileStore) ioLoop() {
 	defer s.ioWg.Done()
 
+	var file *os.File // owned by this goroutine for sequential writes
+	var fileOff int64 // current write position (local, no sharing)
+
 	for req := range s.ioCh {
 		// Lazily create the temp file on first write.
-		if s.file == nil {
+		if file == nil {
 			f, err := os.CreateTemp(s.dir, "pmtiles-tilestore-*.tmp")
 			if err != nil {
 				log.Printf("WARNING: disk tile store: failed to create temp file: %v (tile stays in memory)", err)
 				continue
 			}
-			s.mu.Lock()
-			s.file = f
-			s.mu.Unlock()
+			file = f
+			s.readFile.Store(f) // publish for concurrent readers (lock-free)
 			if s.verbose {
 				log.Printf("Disk tile store: created temp file %s", f.Name())
 			}
 		}
 
-		n, err := s.file.Write(req.encoded)
+		n, err := file.Write(req.encoded)
 		if err != nil {
 			log.Printf("WARNING: disk tile store: write error: %v (tile stays in memory)", err)
 			continue
@@ -241,13 +257,13 @@ func (s *DiskTileStore) ioLoop() {
 		// This ensures Get() always finds the tile in one place or the other.
 		s.mu.Lock()
 		s.index[req.key] = diskEntry{
-			offset: s.fileOff,
+			offset: fileOff,
 			length: int32(n),
 		}
 		delete(s.tiles, req.key)
 		s.mu.Unlock()
 
-		s.fileOff += int64(n)
+		fileOff += int64(n)
 		s.memBytes.Add(-req.memBytes)
 		s.totalDiskTiles++
 		s.totalDiskBytes += int64(n)
@@ -286,15 +302,14 @@ func (s *DiskTileStore) MemoryBytes() int64 {
 
 // Close drains pending I/O and removes the temporary file.
 // Call when the store is no longer needed.
+// Safe to call after Drain() — the I/O goroutine has exited so the file
+// is no longer being written to.
 func (s *DiskTileStore) Close() {
 	s.Drain()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.file != nil {
-		name := s.file.Name()
-		s.file.Close()
+	if f := s.readFile.Swap(nil); f != nil {
+		name := f.Name()
+		f.Close()
 		os.Remove(name)
-		s.file = nil
 	}
 }
 
@@ -335,10 +350,8 @@ func (s *DiskTileStore) WriteIndexTo(w io.Writer) error {
 
 // TempFilePath returns the path to the temporary spill file, or "" if none exists.
 func (s *DiskTileStore) TempFilePath() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.file != nil {
-		return s.file.Name()
+	if f := s.readFile.Load(); f != nil {
+		return f.Name()
 	}
 	return ""
 }
