@@ -45,15 +45,17 @@ func ParseResampling(s string) (Resampling, error) {
 
 // Config holds tile generation configuration.
 type Config struct {
-	MinZoom     int
-	MaxZoom     int
-	TileSize    int
-	Concurrency int
-	Verbose     bool
-	Encoder     encode.Encoder
-	Bounds      cog.Bounds
-	Resampling  Resampling
-	IsTerrarium bool // true for float GeoTIFF → Terrarium encoding
+	MinZoom          int
+	MaxZoom          int
+	TileSize         int
+	Concurrency      int
+	Verbose          bool
+	Encoder          encode.Encoder
+	Bounds           cog.Bounds
+	Resampling       Resampling
+	IsTerrarium      bool   // true for float GeoTIFF → Terrarium encoding
+	MemoryLimitBytes int64  // max tile store memory before disk spilling (0 = auto)
+	OutputDir        string // directory for spill files (defaults to OS temp dir)
 }
 
 // Stats holds generation statistics.
@@ -69,54 +71,6 @@ type TileWriter interface {
 	WriteTile(z, x, y int, data []byte) error
 }
 
-// tileJob represents a single tile to generate.
-type tileJob struct {
-	Z, X, Y int
-}
-
-// TileImageStore is a concurrent-safe store for tile data.
-// Used to hold tiles from the current zoom level so the next (lower)
-// zoom level can downsample from them. Tiles may be stored compactly
-// as a single color when all pixels are uniform (e.g. ocean, gaps).
-type TileImageStore struct {
-	mu    sync.RWMutex
-	tiles map[[3]int]*TileData
-}
-
-func newTileImageStore(capacity int) *TileImageStore {
-	return &TileImageStore{
-		tiles: make(map[[3]int]*TileData, capacity),
-	}
-}
-
-// Get retrieves tile data. Returns nil if not present.
-func (s *TileImageStore) Get(z, x, y int) *TileData {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.tiles[[3]int{z, x, y}]
-}
-
-// Put stores tile data.
-func (s *TileImageStore) Put(z, x, y int, td *TileData) {
-	s.mu.Lock()
-	s.tiles[[3]int{z, x, y}] = td
-	s.mu.Unlock()
-}
-
-// Clear removes all entries.
-func (s *TileImageStore) Clear() {
-	s.mu.Lock()
-	s.tiles = make(map[[3]int]*TileData)
-	s.mu.Unlock()
-}
-
-// Len returns the number of stored tiles.
-func (s *TileImageStore) Len() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.tiles)
-}
-
 // Generate produces tiles for all zoom levels and writes them via the TileWriter.
 //
 // The pipeline uses a pyramid approach:
@@ -124,6 +78,10 @@ func (s *TileImageStore) Len() int {
 //  2. Each lower zoom level is built by downsampling 2x2 groups of child tiles.
 //
 // This avoids redundant COG reads and coordinate transforms for lower zoom levels.
+//
+// When memory pressure is high (configurable via Config.MemoryLimitBytes), the
+// tile store spills to a temporary file on disk. Tiles are stored along the
+// Hilbert curve for spatial locality during the downsampling read-back pass.
 func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, error) {
 	if len(sources) == 0 {
 		return Stats{}, fmt.Errorf("no source files")
@@ -147,11 +105,29 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		floatCache = cog.NewFloatTileCache(cacheSize)
 	}
 
-	// Tile image store: holds decoded RGBA tiles for the current zoom level
-	// so the next (lower) zoom level can downsample from them.
-	store := newTileImageStore(4096)
+	// Compute memory limit for disk spilling.
+	// -1 = disabled, 0 = auto-detect, >0 = explicit limit.
+	memLimit := cfg.MemoryLimitBytes
+	if memLimit < 0 {
+		memLimit = 0 // disable: 0 in DiskTileStore means "never flush"
+	} else if memLimit == 0 {
+		memLimit = ComputeMemoryLimit(DefaultMemoryPressurePercent, cfg.Verbose)
+	}
 
-	var tileCount, emptyCount, uniformCount, totalBytes atomic.Int64
+	// Tile image store: holds decoded tiles for the current zoom level
+	// so the next (lower) zoom level can downsample from them.
+	// When memory pressure exceeds the limit, tiles spill to disk.
+	storeCfg := DiskTileStoreConfig{
+		InitialCapacity:  4096,
+		TileSize:         cfg.TileSize,
+		TempDir:          cfg.OutputDir,
+		MemoryLimitBytes: memLimit,
+		Verbose:          cfg.Verbose,
+	}
+	store := NewDiskTileStore(storeCfg)
+	defer store.Close()
+
+	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64
 
 	// Process zoom levels from highest to lowest (pyramid approach).
 	for z := cfg.MaxZoom; z >= cfg.MinZoom; z-- {
@@ -180,7 +156,13 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 
 		// For non-max zoom levels we need the store from the previous (higher) zoom.
 		// After processing this level, we'll replace the store contents.
-		nextStore := newTileImageStore(len(tiles))
+		nextStore := NewDiskTileStore(DiskTileStoreConfig{
+			InitialCapacity:  len(tiles),
+			TileSize:         cfg.TileSize,
+			TempDir:          cfg.OutputDir,
+			MemoryLimitBytes: memLimit,
+			Verbose:          cfg.Verbose,
+		})
 
 		// Partition tiles into small Hilbert-contiguous batches and distribute
 		// them via a channel. This gives much better load balance than static
@@ -269,6 +251,8 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 
 						if td.IsUniform() {
 							uniformCount.Add(1)
+						} else if td.IsGray() {
+							grayCount.Add(1)
 						}
 
 						data, err := cfg.Encoder.Encode(td.AsImage())
@@ -302,17 +286,23 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		// Check for errors.
 		select {
 		case err := <-errCh:
+			nextStore.Close()
 			return Stats{}, err
 		default:
 		}
 
 		if cfg.Verbose {
-			log.Printf("Zoom %d: completed (%d tiles so far)", z, tileCount.Load())
+			log.Printf("Zoom %d: completed (%d tiles so far, %d gray, %d uniform, %d empty)",
+				z, tileCount.Load(), grayCount.Load(), uniformCount.Load(), emptyCount.Load())
+			log.Printf("  Store: %s", nextStore.Stats())
 		}
 
 		// Swap stores: the tiles we just generated become the source for the next level.
+		store.Close() // release old store's temp file
 		store = nextStore
 	}
+
+	store.Close()
 
 	return Stats{
 		TileCount:    tileCount.Load(),

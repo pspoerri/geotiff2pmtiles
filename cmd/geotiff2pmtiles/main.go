@@ -27,17 +27,19 @@ var (
 
 func main() {
 	var (
-		format      string
-		quality     int
-		minZoom     int
-		maxZoom     int
-		showVersion bool
-		tileSize    int
-		concurrency int
-		verbose     bool
-		resampling  string
-		cpuProfile  string
-		memProfile  string
+		format       string
+		quality      int
+		minZoom      int
+		maxZoom      int
+		showVersion  bool
+		tileSize     int
+		concurrency  int
+		verbose      bool
+		resampling   string
+		cpuProfile   string
+		memProfile   string
+		memLimitMB   int
+		noSpill      bool
 	)
 
 	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium")
@@ -51,6 +53,8 @@ func main() {
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "Write CPU profile to file")
 	flag.StringVar(&memProfile, "memprofile", "", "Write memory profile to file")
+	flag.IntVar(&memLimitMB, "mem-limit", 0, "Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM)")
+	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -205,17 +209,29 @@ func main() {
 		log.Printf("Zoom range: %d - %d (auto-detected max: %d)", minZoom, maxZoom, autoMax)
 	}
 
+	// Compute memory limit for disk spilling.
+	var memoryLimitBytes int64
+	if noSpill {
+		memoryLimitBytes = -1 // sentinel: disable spilling
+	} else if memLimitMB > 0 {
+		memoryLimitBytes = int64(memLimitMB) * 1024 * 1024
+	}
+	// 0 = auto-detect from system RAM (handled inside Generate).
+
 	// Build tile generation config.
+	outputDir := filepath.Dir(outputPath)
 	cfg := tile.Config{
-		MinZoom:     minZoom,
-		MaxZoom:     maxZoom,
-		TileSize:    tileSize,
-		Concurrency: concurrency,
-		Verbose:     verbose,
-		Encoder:     enc,
-		Bounds:      mergedBounds,
-		Resampling:  resamplingMode,
-		IsTerrarium: format == "terrarium",
+		MinZoom:          minZoom,
+		MaxZoom:          maxZoom,
+		TileSize:         tileSize,
+		Concurrency:      concurrency,
+		Verbose:          verbose,
+		Encoder:          enc,
+		Bounds:           mergedBounds,
+		Resampling:       resamplingMode,
+		IsTerrarium:      format == "terrarium",
+		MemoryLimitBytes: memoryLimitBytes,
+		OutputDir:        outputDir,
 	}
 
 	// Create PMTiles writer.
