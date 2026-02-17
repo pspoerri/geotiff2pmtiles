@@ -46,7 +46,7 @@ type TileCache struct {
 }
 
 type tileCacheShard struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	cache   map[tileKey]*cacheEntry
 	order   []tileKey
 	maxSize int
@@ -77,12 +77,13 @@ func NewTileCache(maxEntries int) *TileCache {
 }
 
 // Get retrieves a tile from the cache. Returns nil if not found.
+// Uses a read lock so multiple concurrent readers don't block each other.
 func (tc *TileCache) Get(id int, level, col, row int) image.Image {
 	key := tileKey{id: id, level: level, col: col, row: row}
 	s := &tc.shards[tileKeyHash(key)&(shardCount-1)]
-	s.mu.Lock()
+	s.mu.RLock()
 	entry, ok := s.cache[key]
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if ok {
 		return entry.img
 	}
@@ -143,7 +144,7 @@ type FloatTileCache struct {
 }
 
 type floatCacheShard struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	cache   map[tileKey]*floatCacheEntry
 	order   []tileKey
 	maxSize int
@@ -176,12 +177,13 @@ func NewFloatTileCache(maxEntries int) *FloatTileCache {
 }
 
 // Get retrieves a float tile from the cache. Returns nil if not found.
+// Uses a read lock so multiple concurrent readers don't block each other.
 func (fc *FloatTileCache) Get(id int, level, col, row int) ([]float32, int, int) {
 	key := tileKey{id: id, level: level, col: col, row: row}
 	s := &fc.shards[tileKeyHash(key)&(shardCount-1)]
-	s.mu.Lock()
+	s.mu.RLock()
 	entry, ok := s.cache[key]
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if ok {
 		return entry.data, entry.width, entry.height
 	}

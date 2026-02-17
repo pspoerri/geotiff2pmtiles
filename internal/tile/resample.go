@@ -2,7 +2,6 @@ package tile
 
 import (
 	"image"
-	"image/color"
 	"math"
 	"strconv"
 
@@ -100,40 +99,57 @@ func tileCRSBounds(z, tx, ty int, proj coord.Projection) (minX, minY, maxX, maxY
 }
 
 // renderTile renders a single web map tile by reprojecting from source COG data.
-// Uses per-pixel inverse projection from the output tile to source CRS coordinates,
-// then samples from the source raster using the selected interpolation mode.
+//
+// Instead of calling PixelToLonLat for every output pixel (which involves
+// expensive trig: Atan, Sinh — 6% of CPU), we precompute longitude per column
+// and latitude per row. In web Mercator tiles, longitude is perfectly linear
+// with pixel X and latitude depends only on pixel Y, so we reduce trig calls
+// from O(tileSize²) to O(tileSize).
 func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.TileCache, mode Resampling) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
 
 	// Pre-compute the output pixel size in CRS units for selecting the best overview level.
-	// ResolutionAtLat returns meters/pixel; convert to CRS units for the source projection.
 	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
 	outputResMeters := coord.ResolutionAtLat(midLat, z)
 	outputResCRS := coord.MetersToPixelSizeCRS(outputResMeters, proj.EPSG(), midLat)
 
-	// Pre-filter sources to only those overlapping this tile and pre-compute
-	// their overview levels. This avoids calling OverviewForZoom (which loops
-	// over all IFD levels) for every pixel — a major hot-spot in the profile.
+	// Pre-filter sources to only those overlapping this tile.
 	tileMinX, tileMinY, tileMaxX, tileMaxY := tileCRSBounds(z, tx, ty, proj)
 	tileSrcs := prepareTileSources(srcInfos, outputResCRS, tileMinX, tileMinY, tileMaxX, tileMaxY)
 	if len(tileSrcs) == 0 {
 		return nil
 	}
 
+	// Precompute lon per column (linear with pixel X) and lat per row
+	// (non-linear in Mercator, but independent of X). This reduces
+	// expensive PixelToLonLat trig from tileSize² to 2×tileSize calls.
+	lons := make([]float64, tileSize)
+	lats := make([]float64, tileSize)
+	for px := 0; px < tileSize; px++ {
+		lons[px], _ = coord.PixelToLonLat(z, tx, ty, tileSize, float64(px)+0.5, 0)
+	}
+	for py := 0; py < tileSize; py++ {
+		_, lats[py] = coord.PixelToLonLat(z, tx, ty, tileSize, 0, float64(py)+0.5)
+	}
+
 	hasData := false
+	stride := img.Stride
 
 	for py := 0; py < tileSize; py++ {
+		lat := lats[py]
+		rowOff := py * stride
+
 		for px := 0; px < tileSize; px++ {
-			// Convert output pixel center to WGS84.
-			lon, lat := coord.PixelToLonLat(z, tx, ty, tileSize, float64(px)+0.5, float64(py)+0.5)
+			// Convert precomputed WGS84 to source CRS.
+			srcX, srcY := proj.FromWGS84(lons[px], lat)
 
-			// Convert WGS84 to source CRS.
-			srcX, srcY := proj.FromWGS84(lon, lat)
-
-			// Find the best source that covers this point and sample.
 			r, g, b, a, found := sampleFromTileSources(tileSrcs, srcX, srcY, cache, mode)
 			if found {
-				img.SetRGBA(px, py, color.RGBA{R: r, G: g, B: b, A: a})
+				off := rowOff + px*4
+				img.Pix[off+0] = r
+				img.Pix[off+1] = g
+				img.Pix[off+2] = b
+				img.Pix[off+3] = a
 				hasData = true
 			}
 		}
@@ -201,6 +217,9 @@ func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, cache *cog.
 // Pixels with alpha == 0 are treated as nodata and excluded from RGB
 // interpolation so they don't bleed dark colors into the result.  Alpha is
 // interpolated with the standard bilinear weights so edges fade smoothly.
+//
+// Optimized to do at most 2 cache lookups (instead of 4): pixels in the same
+// source tile are extracted directly from the already-fetched image.
 func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
 	x0 := int(math.Floor(fx))
 	y0 := int(math.Floor(fy))
@@ -215,24 +234,76 @@ func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH
 	dx := fx - math.Floor(fx)
 	dy := fy - math.Floor(fy)
 
-	// Read the four neighboring pixels.  If a tile does not exist (read
-	// error), treat the pixel as fully transparent (alpha=0 / nodata).
+	// Pre-compute tile coordinates for all four corners.
+	ifd := src.IFDTileSize(level)
+	tw := ifd[0]
+	th := ifd[1]
+
+	col0, row0 := x0/tw, y0/th
+	col1, row1 := x1/tw, y1/th
+
+	// Fetch the primary tile (top-left corner) — covers most/all 4 pixels.
+	tile00, err := fetchTileCached(src, level, col0, row0, cache)
 	var nodata [4]uint8
-	p00, err00 := readPixelCached(src, level, x0, y0, cache)
-	if err00 != nil {
+
+	// Read p00 and p10 from the primary tile (same row).
+	var p00, p10, p01, p11 [4]uint8
+	if err != nil {
 		p00 = nodata
-	}
-	p10, err10 := readPixelCached(src, level, x1, y0, cache)
-	if err10 != nil {
 		p10 = nodata
+	} else {
+		p00 = pixelFromImage(tile00, x0%tw, y0%th)
+		if col1 == col0 {
+			// x1 is in the same tile column — no extra lookup.
+			p10 = pixelFromImage(tile00, x1%tw, y0%th)
+		} else {
+			t, e := fetchTileCached(src, level, col1, row0, cache)
+			if e != nil {
+				p10 = nodata
+			} else {
+				p10 = pixelFromImage(t, x1%tw, y0%th)
+			}
+		}
 	}
-	p01, err01 := readPixelCached(src, level, x0, y1, cache)
-	if err01 != nil {
-		p01 = nodata
-	}
-	p11, err11 := readPixelCached(src, level, x1, y1, cache)
-	if err11 != nil {
-		p11 = nodata
+
+	// Read p01 and p11 from the bottom row.
+	if row1 == row0 {
+		// Same tile row — reuse tile00 (or the already-fetched secondary tile).
+		if err != nil {
+			p01 = nodata
+			p11 = nodata
+		} else {
+			p01 = pixelFromImage(tile00, x0%tw, y1%th)
+			if col1 == col0 {
+				p11 = pixelFromImage(tile00, x1%tw, y1%th)
+			} else {
+				t, e := fetchTileCached(src, level, col1, row0, cache)
+				if e != nil {
+					p11 = nodata
+				} else {
+					p11 = pixelFromImage(t, x1%tw, y1%th)
+				}
+			}
+		}
+	} else {
+		// Different tile row — need to fetch the bottom-left tile.
+		tileBL, errBL := fetchTileCached(src, level, col0, row1, cache)
+		if errBL != nil {
+			p01 = nodata
+			p11 = nodata
+		} else {
+			p01 = pixelFromImage(tileBL, x0%tw, y1%th)
+			if col1 == col0 {
+				p11 = pixelFromImage(tileBL, x1%tw, y1%th)
+			} else {
+				t, e := fetchTileCached(src, level, col1, row1, cache)
+				if e != nil {
+					p11 = nodata
+				} else {
+					p11 = pixelFromImage(t, x1%tw, y1%th)
+				}
+			}
+		}
 	}
 
 	// Standard bilinear weights.
@@ -266,16 +337,6 @@ func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH
 		return 0, 0, 0, 0, nil
 	}
 
-	clampByte := func(v float64) uint8 {
-		if v < 0 {
-			return 0
-		}
-		if v > 255 {
-			return 255
-		}
-		return uint8(v + 0.5)
-	}
-
 	rVal := (w00*float64(p00[0]) + w10*float64(p10[0]) + w01*float64(p01[0]) + w11*float64(p11[0])) / wSum
 	gVal := (w00*float64(p00[1]) + w10*float64(p10[1]) + w01*float64(p01[1]) + w11*float64(p11[1])) / wSum
 	bVal := (w00*float64(p00[2]) + w10*float64(p10[2]) + w01*float64(p01[2]) + w11*float64(p11[2])) / wSum
@@ -283,9 +344,102 @@ func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH
 	return clampByte(rVal), clampByte(gVal), clampByte(bVal), clampByte(aVal), nil
 }
 
+// fetchTileCached retrieves a decoded tile image using the cache.
+// Callers extract pixels directly from the returned image to avoid per-pixel
+// cache lookups (the bilinear case needs 4 pixels from potentially the same tile).
+func fetchTileCached(src *cog.Reader, level, col, row int, cache *cog.TileCache) (image.Image, error) {
+	if cache != nil {
+		if tile := cache.Get(src.ID(), level, col, row); tile != nil {
+			return tile, nil
+		}
+	}
+	tile, err := src.ReadTile(level, col, row)
+	if err != nil {
+		return nil, err
+	}
+	if cache != nil {
+		cache.Put(src.ID(), level, col, row, tile)
+	}
+	return tile, nil
+}
+
+// pixelFromImage extracts an RGBA pixel from a decoded tile without bounds
+// checks (the caller must guarantee valid coordinates). Avoids the interface
+// boxing overhead of image.At() → color.Color and the redundant bounds check
+// inside YCbCrAt, which together consumed ~12% of CPU time.
+func pixelFromImage(tile image.Image, x, y int) [4]uint8 {
+	switch img := tile.(type) {
+	case *image.YCbCr:
+		// Direct slice access: skip the bounds check in YCbCrAt.
+		yi := img.YOffset(x, y)
+		ci := img.COffset(x, y)
+		yy := img.Y[yi]
+		cb := img.Cb[ci]
+		cr := img.Cr[ci]
+		// Inline YCbCr→RGB conversion matching image/color.YCbCr.RGBA(),
+		// but returning uint8 directly without the 16-bit intermediate.
+		yy1 := int32(yy) * 0x10101
+		cb1 := int32(cb) - 128
+		cr1 := int32(cr) - 128
+		r := yy1 + 91881*cr1
+		g := yy1 - 22554*cb1 - 46802*cr1
+		b := yy1 + 116130*cb1
+		if r < 0 {
+			r = 0
+		} else if r > 0xFF0000 {
+			r = 0xFF0000
+		}
+		if g < 0 {
+			g = 0
+		} else if g > 0xFF0000 {
+			g = 0xFF0000
+		}
+		if b < 0 {
+			b = 0
+		} else if b > 0xFF0000 {
+			b = 0xFF0000
+		}
+		return [4]uint8{uint8(r >> 16), uint8(g >> 16), uint8(b >> 16), 255}
+	case *image.NYCbCrA:
+		yi := img.YOffset(x, y)
+		ci := img.COffset(x, y)
+		ai := img.AOffset(x, y)
+		yy := img.Y[yi]
+		cb := img.Cb[ci]
+		cr := img.Cr[ci]
+		a := img.A[ai]
+		yy1 := int32(yy) * 0x10101
+		cb1 := int32(cb) - 128
+		cr1 := int32(cr) - 128
+		r := yy1 + 91881*cr1
+		g := yy1 - 22554*cb1 - 46802*cr1
+		b := yy1 + 116130*cb1
+		if r < 0 {
+			r = 0
+		} else if r > 0xFF0000 {
+			r = 0xFF0000
+		}
+		if g < 0 {
+			g = 0
+		} else if g > 0xFF0000 {
+			g = 0xFF0000
+		}
+		if b < 0 {
+			b = 0
+		} else if b > 0xFF0000 {
+			b = 0xFF0000
+		}
+		return [4]uint8{uint8(r >> 16), uint8(g >> 16), uint8(b >> 16), a}
+	case *image.RGBA:
+		i := img.PixOffset(x, y)
+		return [4]uint8{img.Pix[i], img.Pix[i+1], img.Pix[i+2], img.Pix[i+3]}
+	default:
+		rr, gg, bb, aa := tile.At(x, y).RGBA()
+		return [4]uint8{uint8(rr >> 8), uint8(gg >> 8), uint8(bb >> 8), uint8(aa >> 8)}
+	}
+}
+
 // readPixelCached reads a single pixel using the tile cache.
-// Uses type-specific pixel reads to avoid the interface boxing overhead from
-// image.At() returning color.Color (which was 10% of total CPU time).
 func readPixelCached(src *cog.Reader, level, px, py int, cache *cog.TileCache) ([4]uint8, error) {
 	ifd := src.IFDTileSize(level)
 	tw := ifd[0]
@@ -296,37 +450,11 @@ func readPixelCached(src *cog.Reader, level, px, py int, cache *cog.TileCache) (
 	localX := px % tw
 	localY := py % th
 
-	// Try cache first.
-	var tile image.Image
-	if cache != nil {
-		tile = cache.Get(src.ID(), level, col, row)
+	tile, err := fetchTileCached(src, level, col, row, cache)
+	if err != nil {
+		return [4]uint8{}, err
 	}
-	if tile == nil {
-		var err error
-		tile, err = src.ReadTile(level, col, row)
-		if err != nil {
-			return [4]uint8{}, err
-		}
-		if cache != nil {
-			cache.Put(src.ID(), level, col, row, tile)
-		}
-	}
-
-	// Type-switch to avoid interface boxing: image.At() returns color.Color
-	// which heap-allocates the concrete color value. Using the type-specific
-	// methods (YCbCrAt, RGBAAt) returns by value with no allocation.
-	switch img := tile.(type) {
-	case *image.YCbCr:
-		c := img.YCbCrAt(localX, localY)
-		rr, g, b, _ := c.RGBA()
-		return [4]uint8{uint8(rr >> 8), uint8(g >> 8), uint8(b >> 8), 255}, nil
-	case *image.RGBA:
-		c := img.RGBAAt(localX, localY)
-		return [4]uint8{c.R, c.G, c.B, c.A}, nil
-	default:
-		rr, g, b, a := tile.At(localX, localY).RGBA()
-		return [4]uint8{uint8(rr >> 8), uint8(g >> 8), uint8(b >> 8), uint8(a >> 8)}, nil
-	}
+	return pixelFromImage(tile, localX, localY), nil
 }
 
 func clamp(v, lo, hi int) int {
@@ -337,6 +465,18 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// clampByte rounds a float64 to the nearest uint8, clamping to [0, 255].
+// Defined at package level so the compiler can inline it (closures are not inlined).
+func clampByte(v float64) uint8 {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return uint8(v + 0.5)
 }
 
 // renderTileTerrarium renders a single web map tile from float GeoTIFF data,
@@ -373,11 +513,20 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj co
 		}
 	}
 
+	// Precompute lon per column and lat per row to avoid per-pixel trig.
+	lons := make([]float64, tileSize)
+	lats := make([]float64, tileSize)
+	for px := 0; px < tileSize; px++ {
+		lons[px], _ = coord.PixelToLonLat(z, tx, ty, tileSize, float64(px)+0.5, 0)
+	}
 	for py := 0; py < tileSize; py++ {
-		for px := 0; px < tileSize; px++ {
-			lon, lat := coord.PixelToLonLat(z, tx, ty, tileSize, float64(px)+0.5, float64(py)+0.5)
-			srcX, srcY := proj.FromWGS84(lon, lat)
+		_, lats[py] = coord.PixelToLonLat(z, tx, ty, tileSize, 0, float64(py)+0.5)
+	}
 
+	for py := 0; py < tileSize; py++ {
+		lat := lats[py]
+		for px := 0; px < tileSize; px++ {
+			srcX, srcY := proj.FromWGS84(lons[px], lat)
 			elevation, found := sampleFromTileSourcesFloat(tileSrcs, nodataValues, srcX, srcY, cache, mode)
 			if found && !math.IsNaN(elevation) {
 				img.SetRGBA(px, py, encode.ElevationToTerrarium(elevation))
