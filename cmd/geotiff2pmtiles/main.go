@@ -48,7 +48,7 @@ func main() {
 	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (default: auto from resolution)")
 	flag.IntVar(&tileSize, "tile-size", 256, "Output tile size in pixels")
 	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers")
-	flag.StringVar(&resampling, "resampling", "bilinear", "Interpolation method: bilinear, nearest")
+	flag.StringVar(&resampling, "resampling", "lanczos", "Interpolation method: lanczos, bilinear, nearest")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "Write CPU profile to file")

@@ -29,17 +29,23 @@ const (
 	ResamplingBilinear Resampling = iota
 	// ResamplingNearest picks the closest pixel (sharp, fast).
 	ResamplingNearest
+	// ResamplingLanczos uses a Lanczos-3 (sinc-windowed sinc) kernel for
+	// high-quality interpolation with a 6×6 pixel neighborhood. Produces
+	// sharper results than bilinear at the cost of more computation.
+	ResamplingLanczos
 )
 
 // ParseResampling converts a string to a Resampling constant.
 func ParseResampling(s string) (Resampling, error) {
 	switch s {
+	case "lanczos":
+		return ResamplingLanczos, nil
 	case "bilinear":
 		return ResamplingBilinear, nil
 	case "nearest":
 		return ResamplingNearest, nil
 	default:
-		return 0, fmt.Errorf("unknown resampling method %q (supported: bilinear, nearest)", s)
+		return 0, fmt.Errorf("unknown resampling method %q (supported: lanczos, bilinear, nearest)", s)
 	}
 }
 

@@ -189,6 +189,8 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 		switch mode {
 		case ResamplingNearest:
 			rr, gg, bb, aa, err = nearestSampleCached(src.reader, src.level, pixX, pixY, cache)
+		case ResamplingLanczos:
+			rr, gg, bb, aa, err = lanczosSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
 		default:
 			rr, gg, bb, aa, err = bilinearSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
 		}
@@ -344,6 +346,64 @@ func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH
 	return clampByte(rVal), clampByte(gVal), clampByte(bVal), clampByte(aVal), nil
 }
 
+// lanczosSampleCached performs Lanczos-3 interpolation using the tile cache.
+// Uses a 6×6 pixel neighborhood for high-quality resampling with sharp detail
+// preservation. Pixels with alpha == 0 are excluded from RGB interpolation
+// so they don't bleed dark colors into the result. Alpha is interpolated
+// with the full kernel weights for smooth edge transitions.
+func lanczosSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
+	const a = 3
+	const n = 2 * a
+
+	ix0 := int(math.Floor(fx)) - a + 1
+	iy0 := int(math.Floor(fy)) - a + 1
+
+	// Precompute 1D weights and clamped pixel coordinates.
+	var wxArr, wyArr [n]float64
+	var pxArr, pyArr [n]int
+	for k := 0; k < n; k++ {
+		pxArr[k] = clamp(ix0+k, 0, imgW-1)
+		pyArr[k] = clamp(iy0+k, 0, imgH-1)
+		wxArr[k] = lanczos3(fx - float64(ix0+k))
+		wyArr[k] = lanczos3(fy - float64(iy0+k))
+	}
+
+	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+
+	for ky := 0; ky < n; ky++ {
+		wyVal := wyArr[ky]
+		if wyVal == 0 {
+			continue
+		}
+		for kx := 0; kx < n; kx++ {
+			wt := wxArr[kx] * wyVal
+			if wt == 0 {
+				continue
+			}
+
+			p, err := readPixelCached(src, level, pxArr[kx], pyArr[ky], cache)
+			if err != nil {
+				continue
+			}
+
+			aSum += float64(p[3]) * wt
+			wTotal += wt
+			if p[3] > 0 {
+				rSum += float64(p[0]) * wt
+				gSum += float64(p[1]) * wt
+				bSum += float64(p[2]) * wt
+				wRGB += wt
+			}
+		}
+	}
+
+	if wRGB == 0 {
+		return 0, 0, 0, 0, nil
+	}
+
+	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+}
+
 // fetchTileCached retrieves a decoded tile image using the cache.
 // Callers extract pixels directly from the returned image to avoid per-pixel
 // cache lookups (the bilinear case needs 4 pixels from potentially the same tile).
@@ -479,6 +539,24 @@ func clampByte(v float64) uint8 {
 	return uint8(v + 0.5)
 }
 
+// lanczos3 computes the Lanczos-3 kernel value. The kernel is a windowed sinc:
+//
+//	L₃(x) = sinc(x) · sinc(x/3)   for |x| < 3
+//	       = 0                      for |x| ≥ 3
+//
+// where sinc(x) = sin(πx)/(πx). At x = 0 the limit is 1.
+// Simplified: L₃(x) = 3·sin(πx)·sin(πx/3) / (π²x²).
+func lanczos3(x float64) float64 {
+	if x == 0 {
+		return 1
+	}
+	if x < -3 || x > 3 {
+		return 0
+	}
+	xPi := x * math.Pi
+	return 3 * math.Sin(xPi) * math.Sin(xPi/3) / (xPi * xPi)
+}
+
 // renderTileTerrarium renders a single web map tile from float GeoTIFF data,
 // converting elevation values to Terrarium RGB encoding.
 func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.FloatTileCache, mode Resampling) *image.RGBA {
@@ -565,6 +643,8 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, sr
 		switch mode {
 		case ResamplingNearest:
 			val, err = nearestSampleFloat(src.reader, src.level, pixX, pixY, cache)
+		case ResamplingLanczos:
+			val, err = lanczosSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
 		default:
 			val, err = bilinearSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
 		}
@@ -643,6 +723,66 @@ func bilinearSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH 
 	top := lerp(v00, v10, dx)
 	bot := lerp(v01, v11, dx)
 	return lerp(top, bot, dy), nil
+}
+
+// lanczosSampleFloat performs Lanczos-3 interpolation on float data.
+// NaN pixels are excluded from the weighted sum; if all neighbors are NaN,
+// falls back to nearest-neighbor.
+func lanczosSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.FloatTileCache) (float64, error) {
+	const a = 3
+	const n = 2 * a
+
+	ix0 := int(math.Floor(fx)) - a + 1
+	iy0 := int(math.Floor(fy)) - a + 1
+
+	var pxArr, pyArr [n]int
+	var wxArr, wyArr [n]float64
+	for k := 0; k < n; k++ {
+		pxArr[k] = clamp(ix0+k, 0, imgW-1)
+		pyArr[k] = clamp(iy0+k, 0, imgH-1)
+		wxArr[k] = lanczos3(fx - float64(ix0+k))
+		wyArr[k] = lanczos3(fy - float64(iy0+k))
+	}
+
+	var sum, wTotal float64
+	hasNaN := false
+
+	for ky := 0; ky < n; ky++ {
+		wyVal := wyArr[ky]
+		if wyVal == 0 {
+			continue
+		}
+		for kx := 0; kx < n; kx++ {
+			wt := wxArr[kx] * wyVal
+			if wt == 0 {
+				continue
+			}
+
+			val, err := readFloatPixelCached(src, level, pxArr[kx], pyArr[ky], cache)
+			if err != nil {
+				continue
+			}
+			if math.IsNaN(val) {
+				hasNaN = true
+				continue
+			}
+
+			sum += val * wt
+			wTotal += wt
+		}
+	}
+
+	if wTotal == 0 {
+		if hasNaN {
+			// Fall back to nearest.
+			cx := clamp(int(math.Floor(fx+0.5)), 0, imgW-1)
+			cy := clamp(int(math.Floor(fy+0.5)), 0, imgH-1)
+			return readFloatPixelCached(src, level, cx, cy, cache)
+		}
+		return math.NaN(), nil
+	}
+
+	return sum / wTotal, nil
 }
 
 // readFloatPixelCached reads a single float pixel using the tile cache.
