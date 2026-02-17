@@ -200,6 +200,70 @@ func TestWriter_Abort(t *testing.T) {
 	}
 }
 
+func TestWriter_Deduplication(t *testing.T) {
+	tmpDir := t.TempDir()
+	outPath := filepath.Join(tmpDir, "dedup.pmtiles")
+
+	w, err := NewWriter(outPath, WriterOptions{
+		MinZoom:    0,
+		MaxZoom:    2,
+		Bounds:     cog.Bounds{MinLon: -10, MaxLon: 10, MinLat: -10, MaxLat: 10},
+		TileFormat: TileTypePNG,
+		TileSize:   256,
+		TempDir:    tmpDir,
+	})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	// Write several tiles with the same data (simulates uniform tiles).
+	uniformData := []byte("uniform-tile-data-same-everywhere")
+	uniqueData := []byte("unique-tile-data-different")
+	tiles := [][3]int{
+		{0, 0, 0}, // uniform
+		{1, 0, 0}, // uniform
+		{1, 1, 0}, // unique
+		{1, 0, 1}, // uniform
+		{1, 1, 1}, // uniform
+	}
+
+	for _, tile := range tiles {
+		data := uniformData
+		if tile[1] == 1 && tile[2] == 0 {
+			data = uniqueData
+		}
+		if err := w.WriteTile(tile[0], tile[1], tile[2], data); err != nil {
+			t.Fatalf("WriteTile(%d,%d,%d): %v", tile[0], tile[1], tile[2], err)
+		}
+	}
+
+	// Verify dedup hits: 4 uniform tiles, first is original, 3 are deduped.
+	if w.dedupHits != 3 {
+		t.Errorf("dedupHits = %d, want 3", w.dedupHits)
+	}
+
+	if err := w.Finalize(); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading output: %v", err)
+	}
+
+	// All 5 tiles should be addressed.
+	numAddressed := binary.LittleEndian.Uint64(data[72:80])
+	if numAddressed != 5 {
+		t.Errorf("NumAddressedTiles = %d, want 5", numAddressed)
+	}
+
+	// Only 2 unique tile contents (uniform + unique).
+	numContents := binary.LittleEndian.Uint64(data[88:96])
+	if numContents != 2 {
+		t.Errorf("NumTileContents = %d, want 2", numContents)
+	}
+}
+
 func TestWriter_ConcurrentWrites(t *testing.T) {
 	tmpDir := t.TempDir()
 	outPath := filepath.Join(tmpDir, "concurrent.pmtiles")

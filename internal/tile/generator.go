@@ -116,18 +116,14 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 
 	// Tile image store: holds decoded tiles for the current zoom level
 	// so the next (lower) zoom level can downsample from them.
-	// When memory pressure is configured, tiles are continuously spilled
-	// to disk by a dedicated I/O goroutine, stored in encoded format
-	// (PNG/WebP/JPEG) for reduced disk usage.
-	storeCfg := DiskTileStoreConfig{
-		InitialCapacity:  4096,
-		TileSize:         cfg.TileSize,
-		TempDir:          cfg.OutputDir,
-		MemoryLimitBytes: memLimit,
-		Format:           cfg.Encoder.Format(),
-		Verbose:          cfg.Verbose,
-	}
-	store := NewDiskTileStore(storeCfg)
+	// The initial store is a lightweight placeholder (no I/O goroutine)
+	// because the max-zoom level renders from COG sources, not from a
+	// previous store. Each zoom level creates its own store with disk
+	// spilling enabled.
+	store := NewDiskTileStore(DiskTileStoreConfig{
+		InitialCapacity: 64,
+		TileSize:        cfg.TileSize,
+	})
 	defer store.Close()
 
 	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64

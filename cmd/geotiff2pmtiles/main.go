@@ -241,6 +241,7 @@ func main() {
 		Bounds:     mergedBounds,
 		TileFormat: enc.PMTileType(),
 		TileSize:   tileSize,
+		TempDir:    outputDir,
 	})
 	if err != nil {
 		log.Fatalf("Creating PMTiles writer: %v", err)
