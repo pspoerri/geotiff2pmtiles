@@ -184,6 +184,32 @@ internal/
 - Pyramid downsampling avoids redundant source reads for lower zoom levels
 - Typical peak memory: 15-20 MB for 36 input files at z14-z20
 
+## Performance
+
+The render pipeline has been profiled and optimized for throughput. Key optimizations and their measured impact (36 Swiss LV95 COGs, z10-16, 512px tiles, WebP encoding, Apple M-series):
+
+| Optimization | Technique | CPU reduction |
+| --- | --- | --- |
+| Precompute lon/lat | Web Mercator lon is linear with px, lat depends only on py; precompute per-row/col instead of per-pixel trig (Atan, Sinh) | O(n^2) -> O(n) trig calls |
+| Tile-level pixel extraction | `pixelFromImage` type-switch (YCbCr, RGBA) avoids `image.At()` interface boxing and `Point.In` bounds checks | ~18% of baseline eliminated |
+| Bilinear tile reuse | `fetchTileCached` fetches 1-2 tiles instead of 4 per-pixel cache lookups for bilinear interpolation | ~35% of baseline eliminated |
+| RWMutex tile cache | `sync.RWMutex` on cache shards allows concurrent readers | 82% reduction in cache lock time |
+| Bit-shift pow2 | `pow2(z)` via bit shift replaces `math.Pow(2, float64(z))` in all Mercator functions | ~4% of baseline eliminated |
+| Package-level clampByte | Moved out of closure so the compiler can inline it | Enables inlining |
+| Direct Pix writes | Write to `img.Pix[]` directly instead of `img.SetRGBA()` | Eliminates bounds checks |
+
+**End-to-end result**: ~24% wall-time speedup (8.1s -> 6.3s median), 43% CPU reduction, with byte-identical output (verified via SHA-256).
+
+After optimization, the remaining CPU budget is dominated by the WebP WASM encoder (~41%), JPEG tile decoding, and irreducible projection math (`SwissLV95.FromWGS84`).
+
+### Profiling
+
+```bash
+make demo-profile                          # Run with CPU + memory profiling
+go tool pprof -http=:8080 dist/cpu.prof    # Interactive flame graph
+go tool pprof -http=:8081 dist/mem.prof    # Memory profile
+```
+
 ## Adding New Projections
 
 Implement the `coord.Projection` interface:
