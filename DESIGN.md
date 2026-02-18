@@ -95,6 +95,29 @@ handles the rare case of multiple tile sizes. `GetRGBA` zeros the pixel buffer w
   with `poolable` flags and returned after the loop (borrowed `TileData.img` pointers
   are not recycled)
 
+## Disk tile store memory accounting
+
+The disk tile store tracks memory usage to enforce the configured limit. Two key insights
+that required fixes:
+
+**Map pre-allocation**: When creating the store for zoom 20 with 112M tiles, Go maps were
+pre-allocated with `make(map[K]V, 112M)`. Each map bucket is ~400 bytes (8 entries × key
++ value + metadata), so a 112M-hint `encoded` map alone pre-allocated ~13.4 GB of empty
+hash buckets. Combined with the `uniforms` map (~2.3 GB), this was ~16 GB of waste at
+creation time, before any tiles were stored. Fixed by capping pre-allocation to the
+number of tiles that actually fit in the memory limit (~600K for 12 GB at 20 KB/tile).
+
+**Map overhead tracking**: The memory counter (`memBytes`) only tracked encoded byte slice
+lengths (and 4 bytes per uniform tile), completely ignoring Go map entry overhead: ~128
+bytes per uniform entry (key + pointer + TileData struct + bucket metadata) and ~64 bytes
+per disk index entry. Over 112M tiles, the `index` map alone uses ~7 GB untracked. Added
+a separate `mapOverhead` counter that includes these estimates and is included in the
+memory limit check.
+
+**Gray tile RGBA leak**: `AsImage()` for gray tiles called `ToRGBA()` which allocated a
+256 KB RGBA via `GetRGBA()` that was never returned to the pool. Fixed by caching the
+expanded image in `t.img` so that `Release()` returns it.
+
 ## Horizontal differencing predictor
 
 LZW and Deflate compressed TIFFs may use a horizontal differencing predictor

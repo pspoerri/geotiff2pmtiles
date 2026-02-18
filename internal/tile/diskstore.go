@@ -21,6 +21,14 @@ type diskEntry struct {
 	length int32
 }
 
+// Estimated per-entry Go map overhead including bucket metadata, hash table
+// load factor (~6.5 entries/bucket), and key/value storage. These are
+// conservative estimates to keep the memory limit honest.
+const (
+	mapOverheadUniform = 128 // map[[3]int]*TileData entry + TileData struct
+	mapOverheadIndex   = 64  // map[[3]int]diskEntry entry
+)
+
 // ioRequest is sent from Put() to the I/O goroutine for async disk writes.
 type ioRequest struct {
 	key      [3]int
@@ -67,8 +75,9 @@ type DiskTileStore struct {
 	dir      string // directory for temp files
 
 	// Memory tracking.
-	memBytes    atomic.Int64 // estimated bytes of in-memory tile data
-	memoryLimit int64        // max in-memory tile bytes before blocking Put(); 0 = no limit
+	memBytes    atomic.Int64 // estimated bytes of in-memory encoded tile data
+	mapOverhead atomic.Int64 // estimated bytes for map entry overhead (uniforms + index)
+	memoryLimit int64        // max total memory before blocking Put(); 0 = no limit
 	spillMu     sync.Mutex   // protects memCond waits (separate from mu to avoid contention)
 	memCond     *sync.Cond   // signaled by ioLoop when memBytes decreases; nil when spilling is off
 
@@ -116,9 +125,29 @@ func NewDiskTileStore(cfg DiskTileStoreConfig) *DiskTileStore {
 		dir = os.TempDir()
 	}
 
+	// When disk spilling is enabled, the encoded map holds only a small
+	// working set (bounded by MemoryLimitBytes). Pre-allocating for the
+	// full tile count wastes enormous amounts of memory on empty hash
+	// buckets (e.g. 112M entries × ~400 bytes/bucket ≈ 13 GB).
+	encodedCap := cap
+	uniformCap := cap / 4
+	if cfg.MemoryLimitBytes > 0 {
+		// Estimate: average encoded tile is ~20 KB (JPEG). Pre-allocate
+		// for roughly the number of tiles that fit in the memory limit,
+		// capped at a reasonable size to avoid huge upfront allocations.
+		encodedCap = int(cfg.MemoryLimitBytes / (20 * 1024))
+		if encodedCap > 1_000_000 {
+			encodedCap = 1_000_000
+		}
+		if encodedCap < 1024 {
+			encodedCap = 1024
+		}
+		uniformCap = 1024
+	}
+
 	s := &DiskTileStore{
-		uniforms: make(map[[3]int]*TileData, cap/4),
-		encoded:  make(map[[3]int][]byte, cap),
+		uniforms: make(map[[3]int]*TileData, uniformCap),
+		encoded:  make(map[[3]int][]byte, encodedCap),
 		index:    make(map[[3]int]diskEntry),
 		tileSize: cfg.TileSize,
 		format:   cfg.Format,
@@ -154,7 +183,7 @@ func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) {
 		s.mu.Lock()
 		s.uniforms[key] = td
 		s.mu.Unlock()
-		s.memBytes.Add(4)
+		s.mapOverhead.Add(mapOverheadUniform)
 		return
 	}
 
@@ -178,7 +207,7 @@ func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) {
 	// would deadlock.
 	if s.memCond != nil {
 		s.spillMu.Lock()
-		for s.memBytes.Load() > s.memoryLimit {
+		for s.totalMemory() > s.memoryLimit {
 			s.memCond.Wait()
 		}
 		s.spillMu.Unlock()
@@ -302,6 +331,7 @@ func (s *DiskTileStore) ioLoop() {
 
 		fileOff += int64(n)
 		s.memBytes.Add(-req.memBytes)
+		s.mapOverhead.Add(mapOverheadIndex)
 		s.totalDiskTiles++
 		s.totalDiskBytes += int64(n)
 
@@ -337,9 +367,15 @@ func (s *DiskTileStore) Len() int {
 	return len(s.uniforms) + len(s.encoded) + len(s.index)
 }
 
-// MemoryBytes returns the estimated in-memory tile data size.
+// totalMemory returns the estimated total memory usage: encoded tile data
+// plus map entry overhead for uniforms and disk index.
+func (s *DiskTileStore) totalMemory() int64 {
+	return s.memBytes.Load() + s.mapOverhead.Load()
+}
+
+// MemoryBytes returns the estimated total in-memory usage.
 func (s *DiskTileStore) MemoryBytes() int64 {
-	return s.memBytes.Load()
+	return s.totalMemory()
 }
 
 // Close drains pending I/O and removes the temporary file.
@@ -359,9 +395,10 @@ func (s *DiskTileStore) Close() {
 func (s *DiskTileStore) Stats() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return fmt.Sprintf("in-memory: %d tiles (%d uniform, %d encoded, %.1f MB), on-disk: %d tiles (%.1f MB)",
+	return fmt.Sprintf("in-memory: %d tiles (%d uniform, %d encoded, %.1f MB data + %.1f MB overhead), on-disk: %d tiles (%.1f MB)",
 		len(s.uniforms)+len(s.encoded), len(s.uniforms), len(s.encoded),
 		float64(s.memBytes.Load())/(1024*1024),
+		float64(s.mapOverhead.Load())/(1024*1024),
 		len(s.index), float64(s.totalDiskBytes)/(1024*1024))
 }
 

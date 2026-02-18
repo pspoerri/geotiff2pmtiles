@@ -117,16 +117,16 @@ func (t *TileData) ToRGBA() *image.RGBA {
 
 // AsImage returns an image.Image suitable for encoders. For full tiles it
 // returns the underlying *image.RGBA (so encoders can type-switch to the fast
-// path). For gray tiles it expands to RGBA (encoders expect color output).
-// For uniform tiles it returns *TileData itself (which implements
-// image.Image via generic At() — trivially fast for uniform data).
+// path). For gray tiles it expands to RGBA and caches the result in t.img
+// so that Release() can return it to the pool. For uniform tiles it returns
+// *TileData itself (which implements image.Image via generic At()).
 func (t *TileData) AsImage() image.Image {
 	if t.img != nil {
 		return t.img
 	}
 	if t.gray != nil {
-		// Encoders (PNG, JPEG, WebP) produce color output, so expand to RGBA.
-		return t.ToRGBA()
+		t.img = t.ToRGBA()
+		return t.img
 	}
 	return t
 }
