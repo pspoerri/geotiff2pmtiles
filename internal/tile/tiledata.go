@@ -29,9 +29,11 @@ var _ image.Image = (*TileData)(nil)
 // Priority: uniform (single color) → gray (R=G=B, A=255) → full RGBA.
 func newTileData(img *image.RGBA, tileSize int) *TileData {
 	if c, ok := detectUniform(img); ok {
+		PutRGBA(img)
 		return &TileData{color: c, tileSize: tileSize}
 	}
 	if g, ok := detectGray(img); ok {
+		PutRGBA(img)
 		return &TileData{gray: g, tileSize: tileSize}
 	}
 	return &TileData{img: img, tileSize: tileSize}
@@ -85,7 +87,7 @@ func (t *TileData) ToRGBA() *image.RGBA {
 	if t.img != nil {
 		return t.img
 	}
-	img := image.NewRGBA(image.Rect(0, 0, t.tileSize, t.tileSize))
+	img := GetRGBA(t.tileSize, t.tileSize)
 	pix := img.Pix
 	if t.gray != nil {
 		gPix := t.gray.Pix
@@ -258,11 +260,20 @@ func DeserializeTileData(data []byte, typ tileDataType, tileSize int) *TileData 
 		if len(data) < expected {
 			return nil
 		}
-		img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
+		img := GetRGBA(tileSize, tileSize)
 		copy(img.Pix, data[:expected])
 		return &TileData{img: img, tileSize: tileSize}
 	}
 	return nil
+}
+
+// Release returns the tile's internal RGBA image (if any) to the pool.
+// After Release, the TileData must not be used.
+func (t *TileData) Release() {
+	if t.img != nil {
+		PutRGBA(t.img)
+		t.img = nil
+	}
 }
 
 // MemoryBytes returns the estimated heap bytes used by this tile's pixel data.

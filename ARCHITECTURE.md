@@ -23,6 +23,7 @@ internal/
     resample.go                     Lanczos/bicubic/bilinear/nearest interpolation + reprojection (LUT-accelerated)
     downsample.go                   Pyramid downsampling for lower zoom levels
     diskstore.go                    Disk-backed tile store with memory backpressure
+    rgbapool.go                     sync.Pool for *image.RGBA reuse (keyed by dimensions)
     zoom.go                         Zoom level auto-calculation
     progress.go                     Progress reporting
   encode/
@@ -56,6 +57,7 @@ internal/
 - Tiles stored as encoded bytes (PNG/WebP/JPEG) in memory: 5-25x smaller than raw pixels
 - Continuous disk spilling via dedicated I/O goroutine with configurable memory backpressure (auto ~90% of RAM)
 - Uniform tiles (single color) stored as 4 bytes, never spilled to disk
+- `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers instead of allocating/GC'ing per tile
 - PMTiles writer uses temp file for tile data (only directory entries in memory)
 - Pyramid downsampling avoids redundant source reads for lower zoom levels
 

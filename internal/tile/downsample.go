@@ -108,8 +108,16 @@ func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSi
 		tileDataToRGBA(bottomLeft),
 		tileDataToRGBA(bottomRight),
 	}
+	// Track which images were expanded from gray/uniform (poolable)
+	// vs. borrowed from TileData.img (not ours to recycle).
+	poolable := [4]bool{
+		topLeft != nil && topLeft.img == nil,
+		topRight != nil && topRight.img == nil,
+		bottomLeft != nil && bottomLeft.img == nil,
+		bottomRight != nil && bottomRight.img == nil,
+	}
 
-	dst := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
+	dst := GetRGBA(tileSize, tileSize)
 	half := tileSize / 2
 
 	quadrants := [4]struct {
@@ -128,6 +136,12 @@ func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSi
 			continue
 		}
 		downsampleQuadrant(dst, q.src, q.dstX, q.dstY, half, tileSize, mode)
+	}
+
+	for i, img := range imgs {
+		if poolable[i] {
+			PutRGBA(img)
+		}
 	}
 
 	return newTileData(dst, tileSize)
@@ -723,8 +737,14 @@ func downsampleTileTerrarium(topLeft, topRight, bottomLeft, bottomRight *TileDat
 		tileDataToRGBA(bottomLeft),
 		tileDataToRGBA(bottomRight),
 	}
+	poolable := [4]bool{
+		topLeft != nil && topLeft.img == nil,
+		topRight != nil && topRight.img == nil,
+		bottomLeft != nil && bottomLeft.img == nil,
+		bottomRight != nil && bottomRight.img == nil,
+	}
 
-	dst := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
+	dst := GetRGBA(tileSize, tileSize)
 	half := tileSize / 2
 
 	quadrants := [4]struct {
@@ -743,6 +763,12 @@ func downsampleTileTerrarium(topLeft, topRight, bottomLeft, bottomRight *TileDat
 			continue
 		}
 		downsampleQuadrantTerrarium(dst, q.src, q.dstX, q.dstY, half, tileSize, mode)
+	}
+
+	for i, img := range imgs {
+		if poolable[i] {
+			PutRGBA(img)
+		}
 	}
 
 	return newTileData(dst, tileSize)

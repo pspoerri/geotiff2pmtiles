@@ -248,7 +248,7 @@ func (s *DiskTileStore) decodeEncoded(data []byte) *TileData {
 
 	// General case: convert to RGBA (handles NRGBA from PNG, YCbCr from JPEG, etc.).
 	bounds := img.Bounds()
-	rgba := image.NewRGBA(bounds)
+	rgba := GetRGBA(bounds.Dx(), bounds.Dy())
 	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
 	return newTileData(rgba, s.tileSize)
 }
