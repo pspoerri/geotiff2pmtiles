@@ -20,7 +20,7 @@ internal/
     hilbert.go                      Hilbert curve for spatial tile ordering
   tile/
     generator.go                    Parallel tile generation pipeline
-    resample.go                     Lanczos/bicubic/bilinear/nearest interpolation + reprojection
+    resample.go                     Lanczos/bicubic/bilinear/nearest interpolation + reprojection (LUT-accelerated)
     downsample.go                   Pyramid downsampling for lower zoom levels
     diskstore.go                    Disk-backed tile store with memory backpressure
     zoom.go                         Zoom level auto-calculation
