@@ -754,8 +754,8 @@ func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 	for k := 0; k < n; k++ {
 		pxArr[k] = clamp(ix0+k, 0, imgW-1)
 		pyArr[k] = clamp(iy0+k, 0, imgH-1)
-		wxArr[k] = bicubic(fx - float64(ix0+k))
-		wyArr[k] = bicubic(fy - float64(iy0+k))
+		wxArr[k] = bicubicLUT(fx - float64(ix0+k))
+		wyArr[k] = bicubicLUT(fy - float64(iy0+k))
 	}
 
 	colMin := pxArr[0] / tw
@@ -1302,6 +1302,40 @@ func bicubic(x float64) float64 {
 	return -0.5*x3 + 2.5*x2 - 4*x + 2
 }
 
+// bicubicLUTSize is the number of entries in each half of the lookup table.
+// 1024 entries over [0, 2] gives a step of ~0.00195.
+const bicubicLUTSize = 1024
+
+// bicubicTable stores precomputed Catmull-Rom kernel values for x in [0, 2).
+// The kernel is symmetric so we only store the positive half.
+var bicubicTable [bicubicLUTSize]float64
+
+func init() {
+	for i := 0; i < bicubicLUTSize; i++ {
+		x := float64(i) * 2.0 / float64(bicubicLUTSize)
+		bicubicTable[i] = bicubic(x)
+	}
+}
+
+// bicubicLUT evaluates the Catmull-Rom bicubic kernel via table lookup with
+// linear interpolation. Eliminates repeated polynomial evaluation in the
+// inner resampling loops.
+func bicubicLUT(x float64) float64 {
+	if x < 0 {
+		x = -x
+	}
+	if x >= 2 {
+		return 0
+	}
+	pos := x * (bicubicLUTSize / 2.0)
+	idx := int(pos)
+	if idx >= bicubicLUTSize-1 {
+		return bicubicTable[bicubicLUTSize-1]
+	}
+	frac := pos - float64(idx)
+	return bicubicTable[idx]*(1-frac) + bicubicTable[idx+1]*frac
+}
+
 // renderTileTerrarium renders a single web map tile from float GeoTIFF data,
 // converting elevation values to Terrarium RGB encoding.
 func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.FloatTileCache, mode Resampling) *image.RGBA {
@@ -1600,8 +1634,8 @@ func bicubicSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, 
 	for k := 0; k < n; k++ {
 		pxArr[k] = clamp(ix0+k, 0, imgW-1)
 		pyArr[k] = clamp(iy0+k, 0, imgH-1)
-		wxArr[k] = bicubic(fx - float64(ix0+k))
-		wyArr[k] = bicubic(fy - float64(iy0+k))
+		wxArr[k] = bicubicLUT(fx - float64(ix0+k))
+		wyArr[k] = bicubicLUT(fy - float64(iy0+k))
 	}
 
 	colMin := pxArr[0] / tw

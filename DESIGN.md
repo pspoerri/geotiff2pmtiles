@@ -68,6 +68,14 @@ A third cost is the decode-reencode tax for downsampling: tiles encoded as WebP 
 decoded back to RGBA for the next zoom level, then re-encoded. This adds ~6s CPU and
 17 GB of allocations for the DiskTileStore decode path.
 
+## Bicubic kernel LUT
+
+Same approach as the Lanczos-3 LUT: a 1024-entry precomputed table over [0, 2) with
+linear interpolation replaces the Catmull-Rom polynomial evaluation (`1.5x³ - 2.5x² + 1`
+/ `-0.5x³ + 2.5x² - 4x + 2`) in the inner resampling loops. The kernel is symmetric
+so only the positive half is stored. While the polynomial is cheaper than Lanczos sin()
+calls, at ~3.25s cumulative CPU it was still worth eliminating.
+
 ## Horizontal differencing predictor
 
 LZW and Deflate compressed TIFFs may use a horizontal differencing predictor
