@@ -20,7 +20,7 @@ internal/
     hilbert.go                      Hilbert curve for spatial tile ordering
   tile/
     generator.go                    Parallel tile generation pipeline
-    resample.go                     Lanczos/bilinear/nearest interpolation + reprojection
+    resample.go                     Lanczos/bicubic/bilinear/nearest interpolation + reprojection
     downsample.go                   Pyramid downsampling for lower zoom levels
     diskstore.go                    Disk-backed tile store with memory backpressure
     zoom.go                         Zoom level auto-calculation
@@ -44,7 +44,7 @@ internal/
 3. **Plan**: Compute merged WGS84 bounds and zoom range; auto-detect float data
 4. **Generate (max zoom)**: Enumerate tiles, sort by Hilbert curve, distribute to worker pool
 5. **Reproject**: Per-pixel inverse projection from output tile to source CRS
-6. **Resample**: Lanczos-3, bilinear, or nearest-neighbor interpolation from source COG tiles (cached)
+6. **Resample**: Lanczos-3, bicubic (Catmull-Rom), bilinear, or nearest-neighbor interpolation from source COG tiles (cached)
 7. **Downsample (lower zooms)**: Combine 4 child tiles into parent tiles via pyramid downsampling
 8. **Encode**: JPEG/PNG/WebP/Terrarium encoding
 9. **Write**: Two-pass PMTiles assembly (temp file for tile data, then final archive with clustering)

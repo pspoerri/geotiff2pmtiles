@@ -33,6 +33,10 @@ const (
 	// high-quality interpolation with a 6×6 pixel neighborhood. Produces
 	// sharper results than bilinear at the cost of more computation.
 	ResamplingLanczos
+	// ResamplingBicubic uses a Catmull-Rom (a = -0.5) bicubic kernel with
+	// a 4×4 pixel neighborhood. Sharper than bilinear with less ringing
+	// and lower cost than Lanczos.
+	ResamplingBicubic
 )
 
 // ParseResampling converts a string to a Resampling constant.
@@ -40,12 +44,14 @@ func ParseResampling(s string) (Resampling, error) {
 	switch s {
 	case "lanczos":
 		return ResamplingLanczos, nil
+	case "bicubic":
+		return ResamplingBicubic, nil
 	case "bilinear":
 		return ResamplingBilinear, nil
 	case "nearest":
 		return ResamplingNearest, nil
 	default:
-		return 0, fmt.Errorf("unknown resampling method %q (supported: lanczos, bilinear, nearest)", s)
+		return 0, fmt.Errorf("unknown resampling method %q (supported: lanczos, bicubic, bilinear, nearest)", s)
 	}
 }
 
