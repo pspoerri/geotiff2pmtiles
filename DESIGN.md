@@ -43,6 +43,23 @@ This was never triggered before because Swiss LV95 data stays well within the va
 Mercator range, but global datasets (like the Natural Earth raster covering ±90°)
 require it.
 
+## Performance profile (2026-02-18, bicubic/WebP/512px)
+
+Profiled with 36 Swiss GeoTIFFs, zoom 12-18, 4 workers. Total: 4690 tiles, 72s wall,
+213s CPU (295% utilization). The two dominant bottlenecks are:
+
+1. **WebP encoding via WASM** (~41% of CPU) — The pure-Go `gen2brain/webp` encoder
+   runs libwebp inside a wazero WASM runtime. Each encode grows WASM memory, causing
+   51 GB of total allocations. This is the single largest cost.
+
+2. **Bicubic resampling** (~27% of CPU) — `bicubicAccumYCbCr` is the hot inner loop
+   performing 16 YCbCr→RGB conversions per output pixel. Already optimized with direct
+   array access; the cost is inherent to the kernel size × tile count.
+
+A third cost is the decode-reencode tax for downsampling: tiles encoded as WebP must be
+decoded back to RGBA for the next zoom level, then re-encoded. This adds ~6s CPU and
+17 GB of allocations for the DiskTileStore decode path.
+
 ## Horizontal differencing predictor
 
 LZW and Deflate compressed TIFFs may use a horizontal differencing predictor
