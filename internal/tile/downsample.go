@@ -8,6 +8,25 @@ import (
 	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
 
+// lanczos3Weights2x contains precomputed, normalized 1D Lanczos-3 kernel
+// weights for 2× downsampling. Each output pixel's source center is at
+// (2·dx + 0.5, 2·dy + 0.5), so the 6 nearest source pixels along each
+// axis are at distances -2.5, -1.5, -0.5, 0.5, 1.5, 2.5 from the center.
+// The weights are symmetric: w[i] == w[5-i].
+var lanczos3Weights2x [6]float64
+
+func init() {
+	offsets := [6]float64{-2.5, -1.5, -0.5, 0.5, 1.5, 2.5}
+	var sum float64
+	for i, d := range offsets {
+		lanczos3Weights2x[i] = lanczos3(d)
+		sum += lanczos3Weights2x[i]
+	}
+	for i := range lanczos3Weights2x {
+		lanczos3Weights2x[i] /= sum
+	}
+}
+
 // downsampleTile creates a parent tile by combining up to 4 child tiles.
 // The children correspond to the four quadrants:
 //
@@ -134,6 +153,8 @@ func downsampleTileGray(children [4]*TileData, tileSize int, mode Resampling) *T
 		switch mode {
 		case ResamplingNearest:
 			downsampleQuadrantGrayNearest(dst, q.src, q.dstX, q.dstY, half, tileSize)
+		case ResamplingLanczos:
+			downsampleQuadrantGrayLanczos(dst, q.src, q.dstX, q.dstY, half, tileSize)
 		default:
 			downsampleQuadrantGrayBilinear(dst, q.src, q.dstX, q.dstY, half, tileSize)
 		}
@@ -197,6 +218,45 @@ func downsampleQuadrantGrayBilinear(dst *image.Gray, src *image.Gray, dstOffX, d
 	}
 }
 
+// downsampleQuadrantGrayLanczos uses a Lanczos-3 kernel for gray images.
+func downsampleQuadrantGrayLanczos(dst *image.Gray, src *image.Gray, dstOffX, dstOffY, half, tileSize int) {
+	w := lanczos3Weights2x
+	srcPix := src.Pix
+	srcStride := src.Stride
+	dstPix := dst.Pix
+	dstStride := dst.Stride
+	maxIdx := tileSize - 1
+
+	for dy := 0; dy < half; dy++ {
+		for dx := 0; dx < half; dx++ {
+			var sum float64
+
+			for ky := 0; ky < 6; ky++ {
+				sy := 2*dy - 2 + ky
+				if sy < 0 {
+					sy = 0
+				} else if sy > maxIdx {
+					sy = maxIdx
+				}
+				wyVal := w[ky]
+				srcRowOff := sy * srcStride
+
+				for kx := 0; kx < 6; kx++ {
+					sx := 2*dx - 2 + kx
+					if sx < 0 {
+						sx = 0
+					} else if sx > maxIdx {
+						sx = maxIdx
+					}
+					sum += float64(srcPix[srcRowOff+sx]) * w[kx] * wyVal
+				}
+			}
+
+			dstPix[(dstOffY+dy)*dstStride+dstOffX+dx] = clampByte(sum)
+		}
+	}
+}
+
 // tileDataToGray extracts an *image.Gray from a TileData. For gray tiles
 // this returns the internal image (no allocation). For uniform tiles it
 // allocates a filled gray image.
@@ -238,6 +298,8 @@ func downsampleQuadrant(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half
 	switch mode {
 	case ResamplingNearest:
 		downsampleQuadrantNearest(dst, src, dstOffX, dstOffY, half, tileSize)
+	case ResamplingLanczos:
+		downsampleQuadrantLanczos(dst, src, dstOffX, dstOffY, half, tileSize)
 	default:
 		downsampleQuadrantBilinear(dst, src, dstOffX, dstOffY, half, tileSize)
 	}
@@ -246,8 +308,12 @@ func downsampleQuadrant(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half
 // downsampleQuadrantTerrarium scales a source quadrant using Terrarium-aware averaging.
 // Decodes Terrarium RGB → elevation, averages valid values, re-encodes to Terrarium RGB.
 func downsampleQuadrantTerrarium(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int, mode Resampling) {
-	if mode == ResamplingNearest {
+	switch mode {
+	case ResamplingNearest:
 		downsampleQuadrantTerrariumNearest(dst, src, dstOffX, dstOffY, half, tileSize)
+		return
+	case ResamplingLanczos:
+		downsampleQuadrantTerrariumLanczos(dst, src, dstOffX, dstOffY, half, tileSize)
 		return
 	}
 
@@ -300,6 +366,42 @@ func downsampleQuadrantTerrariumNearest(dst *image.RGBA, src *image.RGBA, dstOff
 	}
 }
 
+// downsampleQuadrantTerrariumLanczos uses a Lanczos-3 kernel for terrarium data.
+// Decodes Terrarium RGB → elevation, applies Lanczos weights to valid values,
+// and re-encodes the averaged elevation back to Terrarium RGB.
+func downsampleQuadrantTerrariumLanczos(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
+	w := lanczos3Weights2x
+
+	for dy := 0; dy < half; dy++ {
+		for dx := 0; dx < half; dx++ {
+			var elevSum, wSum float64
+
+			for ky := 0; ky < 6; ky++ {
+				sy := clamp(2*dy-2+ky, 0, tileSize-1)
+				for kx := 0; kx < 6; kx++ {
+					sx := clamp(2*dx-2+kx, 0, tileSize-1)
+					p := src.RGBAAt(sx, sy)
+					if p.A == 0 {
+						continue
+					}
+					elev := encode.TerrariumToElevation(p)
+					if math.IsNaN(elev) {
+						continue
+					}
+					wt := w[ky] * w[kx]
+					elevSum += elev * wt
+					wSum += wt
+				}
+			}
+
+			if wSum == 0 {
+				continue
+			}
+			dst.SetRGBA(dstOffX+dx, dstOffY+dy, encode.ElevationToTerrarium(elevSum/wSum))
+		}
+	}
+}
+
 // downsampleQuadrantBilinear uses box-filter (average of 2x2 source pixels) to
 // produce each output pixel. This is equivalent to bilinear downsampling.
 // Pixels with alpha == 0 are treated as nodata and excluded from RGB averaging
@@ -347,6 +449,67 @@ func downsampleQuadrantBilinear(dst *image.RGBA, src *image.RGBA, dstOffX, dstOf
 			dst.SetRGBA(dstOffX+dx, dstOffY+dy, color.RGBA{
 				R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a),
 			})
+		}
+	}
+}
+
+// downsampleQuadrantLanczos uses a Lanczos-3 kernel to downsample a
+// tileSize × tileSize source quadrant into a half × half destination region.
+// Uses precomputed 1D weights for the fixed 2× downsample factor.
+// Pixels with alpha == 0 are excluded from RGB interpolation.
+func downsampleQuadrantLanczos(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
+	w := lanczos3Weights2x
+	srcPix := src.Pix
+	srcStride := src.Stride
+	dstPix := dst.Pix
+	dstStride := dst.Stride
+	maxIdx := tileSize - 1
+
+	for dy := 0; dy < half; dy++ {
+		for dx := 0; dx < half; dx++ {
+			var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+
+			for ky := 0; ky < 6; ky++ {
+				sy := 2*dy - 2 + ky
+				if sy < 0 {
+					sy = 0
+				} else if sy > maxIdx {
+					sy = maxIdx
+				}
+				wyVal := w[ky]
+				srcRowOff := sy * srcStride
+
+				for kx := 0; kx < 6; kx++ {
+					sx := 2*dx - 2 + kx
+					if sx < 0 {
+						sx = 0
+					} else if sx > maxIdx {
+						sx = maxIdx
+					}
+
+					wt := w[kx] * wyVal
+					off := srcRowOff + sx*4
+					a := float64(srcPix[off+3])
+					aSum += a * wt
+					wTotal += wt
+					if srcPix[off+3] > 0 {
+						rSum += float64(srcPix[off]) * wt
+						gSum += float64(srcPix[off+1]) * wt
+						bSum += float64(srcPix[off+2]) * wt
+						wRGB += wt
+					}
+				}
+			}
+
+			if wRGB == 0 {
+				continue
+			}
+
+			dstOff := (dstOffY+dy)*dstStride + (dstOffX+dx)*4
+			dstPix[dstOff] = clampByte(rSum / wRGB)
+			dstPix[dstOff+1] = clampByte(gSum / wRGB)
+			dstPix[dstOff+2] = clampByte(bSum / wRGB)
+			dstPix[dstOff+3] = clampByte(aSum / wTotal)
 		}
 	}
 }

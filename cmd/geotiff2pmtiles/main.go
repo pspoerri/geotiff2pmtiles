@@ -48,7 +48,7 @@ func main() {
 	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (default: auto from resolution)")
 	flag.IntVar(&tileSize, "tile-size", 256, "Output tile size in pixels")
 	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers")
-	flag.StringVar(&resampling, "resampling", "bilinear", "Interpolation method: bilinear, nearest")
+	flag.StringVar(&resampling, "resampling", "lanczos", "Interpolation method: lanczos, bilinear, nearest")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "Write CPU profile to file")
@@ -218,6 +218,28 @@ func main() {
 	}
 	// 0 = auto-detect from system RAM (handled inside Generate).
 
+	// Print settings summary.
+	fmt.Printf("geotiff2pmtiles %s (commit %s, built %s)\n", version, commit, buildDate)
+	switch format {
+	case "jpeg", "webp":
+		fmt.Printf("  %-14s %s (quality: %d)\n", "Format:", format, quality)
+	default:
+		fmt.Printf("  %-14s %s\n", "Format:", format)
+	}
+	fmt.Printf("  %-14s %dpx\n", "Tile size:", tileSize)
+	fmt.Printf("  %-14s %d – %d (auto-max: %d)\n", "Zoom:", minZoom, maxZoom, autoMax)
+	fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
+	fmt.Printf("  %-14s %d\n", "Concurrency:", concurrency)
+	if noSpill {
+		fmt.Printf("  %-14s disabled (all in memory)\n", "Disk spill:")
+	} else if memLimitMB > 0 {
+		fmt.Printf("  %-14s %d MB\n", "Mem limit:", memLimitMB)
+	} else {
+		fmt.Printf("  %-14s auto (~90%% of RAM)\n", "Mem limit:")
+	}
+	fmt.Printf("  %-14s %d file(s)\n", "Input:", len(tiffFiles))
+	fmt.Printf("  %-14s %s\n", "Output:", outputPath)
+
 	// Build tile generation config.
 	outputDir := filepath.Dir(outputPath)
 	cfg := tile.Config{
@@ -241,6 +263,7 @@ func main() {
 		Bounds:     mergedBounds,
 		TileFormat: enc.PMTileType(),
 		TileSize:   tileSize,
+		TempDir:    outputDir,
 	})
 	if err != nil {
 		log.Fatalf("Creating PMTiles writer: %v", err)
@@ -267,7 +290,7 @@ func main() {
 
 	elapsed := time.Since(start).Round(time.Millisecond)
 	fi, _ := os.Stat(outputPath)
-	fmt.Printf("Done: %d tiles, %s, %v\n", stats.TileCount, humanSize(fi.Size()), elapsed)
+	fmt.Printf("Done: %d tiles, %s, %v → %s\n", stats.TileCount, humanSize(fi.Size()), elapsed, outputPath)
 }
 
 // collectTIFFs resolves input paths to a list of .tif files.

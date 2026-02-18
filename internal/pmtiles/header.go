@@ -127,4 +127,7 @@ type WriterOptions struct {
 	Bounds     cog.Bounds
 	TileFormat uint8
 	TileSize   int
+	// TempDir is the directory for temporary tile data files.
+	// Defaults to the output file's directory when empty.
+	TempDir string
 }

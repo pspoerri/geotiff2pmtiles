@@ -29,17 +29,23 @@ const (
 	ResamplingBilinear Resampling = iota
 	// ResamplingNearest picks the closest pixel (sharp, fast).
 	ResamplingNearest
+	// ResamplingLanczos uses a Lanczos-3 (sinc-windowed sinc) kernel for
+	// high-quality interpolation with a 6×6 pixel neighborhood. Produces
+	// sharper results than bilinear at the cost of more computation.
+	ResamplingLanczos
 )
 
 // ParseResampling converts a string to a Resampling constant.
 func ParseResampling(s string) (Resampling, error) {
 	switch s {
+	case "lanczos":
+		return ResamplingLanczos, nil
 	case "bilinear":
 		return ResamplingBilinear, nil
 	case "nearest":
 		return ResamplingNearest, nil
 	default:
-		return 0, fmt.Errorf("unknown resampling method %q (supported: bilinear, nearest)", s)
+		return 0, fmt.Errorf("unknown resampling method %q (supported: lanczos, bilinear, nearest)", s)
 	}
 }
 
@@ -116,18 +122,14 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 
 	// Tile image store: holds decoded tiles for the current zoom level
 	// so the next (lower) zoom level can downsample from them.
-	// When memory pressure is configured, tiles are continuously spilled
-	// to disk by a dedicated I/O goroutine, stored in encoded format
-	// (PNG/WebP/JPEG) for reduced disk usage.
-	storeCfg := DiskTileStoreConfig{
-		InitialCapacity:  4096,
-		TileSize:         cfg.TileSize,
-		TempDir:          cfg.OutputDir,
-		MemoryLimitBytes: memLimit,
-		Format:           cfg.Encoder.Format(),
-		Verbose:          cfg.Verbose,
-	}
-	store := NewDiskTileStore(storeCfg)
+	// The initial store is a lightweight placeholder (no I/O goroutine)
+	// because the max-zoom level renders from COG sources, not from a
+	// previous store. Each zoom level creates its own store with disk
+	// spilling enabled.
+	store := NewDiskTileStore(DiskTileStoreConfig{
+		InitialCapacity: 64,
+		TileSize:        cfg.TileSize,
+	})
 	defer store.Close()
 
 	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64

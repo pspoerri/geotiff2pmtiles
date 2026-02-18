@@ -30,9 +30,14 @@ func (w *WebMercatorProj) FromWGS84(lon, lat float64) (x, y float64) {
 	return
 }
 
+// pow2 returns 2^z as a float64 using bit shifting (much faster than math.Pow).
+func pow2(z int) float64 {
+	return float64(uint64(1) << uint(z))
+}
+
 // LonLatToTile converts WGS84 lon/lat to tile coordinates at the given zoom level.
 func LonLatToTile(lon, lat float64, zoom int) (x, y int) {
-	n := math.Pow(2, float64(zoom))
+	n := pow2(zoom)
 	x = int(math.Floor((lon + 180.0) / 360.0 * n))
 	latRad := lat * math.Pi / 180.0
 	y = int(math.Floor((1.0 - math.Log(math.Tan(latRad)+1.0/math.Cos(latRad))/math.Pi) / 2.0 * n))
@@ -55,7 +60,7 @@ func LonLatToTile(lon, lat float64, zoom int) (x, y int) {
 
 // TileBounds returns the WGS84 bounding box of a tile at the given zoom level.
 func TileBounds(z, x, y int) (minLon, minLat, maxLon, maxLat float64) {
-	n := math.Pow(2, float64(z))
+	n := pow2(z)
 	minLon = float64(x)/n*360.0 - 180.0
 	maxLon = float64(x+1)/n*360.0 - 180.0
 	minLat = math.Atan(math.Sinh(math.Pi*(1.0-2.0*float64(y+1)/n))) * 180.0 / math.Pi
@@ -66,7 +71,7 @@ func TileBounds(z, x, y int) (minLon, minLat, maxLon, maxLat float64) {
 // TilePixelBounds returns the fractional pixel coordinates within a tile
 // for a given WGS84 lon/lat and tile (z,x,y), using the given tile size.
 func TilePixelCoords(lon, lat float64, z, tileX, tileY, tileSize int) (px, py float64) {
-	n := math.Pow(2, float64(z))
+	n := pow2(z)
 
 	// Global pixel coordinates.
 	globalX := (lon + 180.0) / 360.0 * n * float64(tileSize)
@@ -81,7 +86,7 @@ func TilePixelCoords(lon, lat float64, z, tileX, tileY, tileSize int) (px, py fl
 
 // PixelToLonLat converts a pixel position within a tile to WGS84 lon/lat.
 func PixelToLonLat(z, tileX, tileY, tileSize int, px, py float64) (lon, lat float64) {
-	n := math.Pow(2, float64(z))
+	n := pow2(z)
 
 	globalX := float64(tileX)*float64(tileSize) + px
 	globalY := float64(tileY)*float64(tileSize) + py
@@ -93,7 +98,7 @@ func PixelToLonLat(z, tileX, tileY, tileSize int, px, py float64) (lon, lat floa
 
 // ResolutionAtLat returns the ground resolution in meters/pixel at the given latitude and zoom level.
 func ResolutionAtLat(lat float64, zoom int) float64 {
-	return EarthCircumference * math.Cos(lat*math.Pi/180.0) / math.Pow(2, float64(zoom)) / float64(DefaultTileSize)
+	return EarthCircumference * math.Cos(lat*math.Pi/180.0) / pow2(zoom) / float64(DefaultTileSize)
 }
 
 // PixelSizeInGroundMeters converts a pixel size from CRS units to ground meters.

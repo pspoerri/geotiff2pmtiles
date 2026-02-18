@@ -331,19 +331,27 @@ func BenchmarkDiskTileStore_PutGet_InMemory(b *testing.B) {
 		InitialCapacity:  b.N,
 		TileSize:         256,
 		MemoryLimitBytes: 0, // no spilling
+		Format:           "png",
 	})
 	defer store.Close()
 
 	img := grayCheckerImage(256, 100, 200)
 	td := newTileData(img, 256)
 
+	// Pre-encode the tile (store keeps encoded bytes in memory).
+	enc := &encode.PNGEncoder{}
+	encoded, err := enc.Encode(td.AsImage())
+	if err != nil {
+		b.Fatal(err)
+	}
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		store.Put(13, i%8192, i/8192, td, nil)
+		store.Put(13, i%8192, i/8192, td, encoded)
 	}
 	b.StopTimer()
 
-	// Verify gets work.
+	// Verify gets work (decodes from in-memory encoded bytes).
 	if store.Get(13, 0, 0) == nil {
 		b.Fatal("expected non-nil get")
 	}

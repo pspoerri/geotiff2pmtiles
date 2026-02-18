@@ -5,30 +5,51 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 )
 
+// dedupEntry records the location of a previously written tile in the temp file.
+type dedupEntry struct {
+	offset uint64
+	length uint32
+}
+
 // Writer writes tiles to a PMTiles v3 archive using a two-pass approach.
 // Pass 1: tiles are appended to a temporary file, entries are collected in memory.
 // Pass 2: directories are built and the final PMTiles file is assembled.
+//
+// Identical tile data is automatically deduplicated: when multiple tiles produce
+// the same encoded bytes (e.g. uniform single-color tiles), the data is written
+// to disk only once and all entries share the same offset.
 type Writer struct {
 	outputPath string
 	opts       WriterOptions
 	header     Header
 
 	tmpFile   *os.File
+	tmpDir    string // directory for temp files
 	tmpOffset uint64
 	entries   []Entry
+	dedup     map[uint64]dedupEntry // FNV-64a hash → first occurrence (for dedup)
 	mu        sync.Mutex
 	finalized bool
+
+	dedupHits int64 // number of tiles that reused existing data
 }
 
 // NewWriter creates a new PMTiles writer.
 func NewWriter(outputPath string, opts WriterOptions) (*Writer, error) {
-	tmpFile, err := os.CreateTemp("", "pmtiles-tiles-*.tmp")
+	tmpDir := opts.TempDir
+	if tmpDir == "" {
+		tmpDir = filepath.Dir(outputPath)
+	}
+
+	tmpFile, err := os.CreateTemp(tmpDir, "pmtiles-tiles-*.tmp")
 	if err != nil {
 		return nil, fmt.Errorf("creating temp file: %w", err)
 	}
@@ -38,27 +59,56 @@ func NewWriter(outputPath string, opts WriterOptions) (*Writer, error) {
 		opts:       opts,
 		header:     NewHeader(opts),
 		tmpFile:    tmpFile,
+		tmpDir:     tmpDir,
 		entries:    make([]Entry, 0, 65536),
+		dedup:      make(map[uint64]dedupEntry),
 	}, nil
 }
 
+// tileHash computes a FNV-64a hash of tile data for deduplication.
+func tileHash(data []byte) uint64 {
+	h := fnv.New64a()
+	h.Write(data)
+	return h.Sum64()
+}
+
 // WriteTile writes a single tile. Safe for concurrent use.
+//
+// Identical tile data is deduplicated: if a tile with the same content has
+// already been written, the new entry reuses the existing offset on disk.
+// This dramatically reduces temp file size for datasets with many uniform tiles.
 func (w *Writer) WriteTile(z, x, y int, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
 
 	tileID := ZXYToTileID(z, x, y)
+	hash := tileHash(data)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Check for a dedup hit: reuse the existing data on disk.
+	if de, ok := w.dedup[hash]; ok && de.length == uint32(len(data)) {
+		w.entries = append(w.entries, Entry{
+			TileID:    tileID,
+			Offset:    de.offset,
+			Length:    de.length,
+			RunLength: 1,
+		})
+		w.dedupHits++
+		return nil
+	}
+
+	// New unique tile: write to temp file.
 	offset := w.tmpOffset
 	n, err := w.tmpFile.Write(data)
 	if err != nil {
 		return fmt.Errorf("writing tile data: %w", err)
 	}
 	w.tmpOffset += uint64(n)
+
+	w.dedup[hash] = dedupEntry{offset: offset, length: uint32(n)}
 
 	w.entries = append(w.entries, Entry{
 		TileID:    tileID,
@@ -126,7 +176,7 @@ func (w *Writer) Finalize() error {
 	w.header.TileDataLength = w.tmpOffset
 	w.header.NumAddressedTiles = uint64(len(w.entries))
 	w.header.NumTileEntries = uint64(len(w.entries))
-	w.header.NumTileContents = uint64(len(w.entries))
+	w.header.NumTileContents = uint64(len(w.entries) - int(w.dedupHits))
 
 	// Write the final file.
 	outFile, err := os.Create(w.outputPath)
@@ -177,9 +227,12 @@ func (w *Writer) Finalize() error {
 // clusterTileData rewrites the temp file so tile data is in the same order
 // as the sorted entries (Hilbert tile-ID order). This makes the archive
 // "clustered" per the PMTiles v3 spec, enabling read-time optimizations.
+//
+// Deduplicated tiles (multiple entries sharing the same offset) are written
+// once and all entries are remapped to the new shared offset.
 func (w *Writer) clusterTileData() error {
 	// Create a new temp file for the reordered data.
-	newTmp, err := os.CreateTemp("", "pmtiles-clustered-*.tmp")
+	newTmp, err := os.CreateTemp(w.tmpDir, "pmtiles-clustered-*.tmp")
 	if err != nil {
 		return fmt.Errorf("creating clustered temp file: %w", err)
 	}
@@ -187,8 +240,24 @@ func (w *Writer) clusterTileData() error {
 	buf := make([]byte, 256*1024) // 256 KiB read buffer
 	var newOffset uint64
 
+	// Track remapped offsets so deduplicated tiles (which share the same
+	// old offset) are written only once and all entries point to the same
+	// new offset.
+	type remap struct {
+		newOffset uint64
+		length    uint32
+	}
+	seen := make(map[uint64]remap) // old offset → new location
+
 	for i := range w.entries {
 		e := &w.entries[i]
+
+		// If we already wrote data from this old offset, reuse it.
+		if m, ok := seen[e.Offset]; ok && m.length == e.Length {
+			e.Offset = m.newOffset
+			continue
+		}
+
 		tileLen := int64(e.Length)
 
 		// Read tile data from old position.
@@ -204,8 +273,10 @@ func (w *Writer) clusterTileData() error {
 			return fmt.Errorf("writing tile at new offset %d: %w", newOffset, err)
 		}
 
-		// Update entry offset to the new position.
+		// Record the remapping and update the entry.
+		oldOffset := e.Offset
 		e.Offset = newOffset
+		seen[oldOffset] = remap{newOffset: newOffset, length: e.Length}
 		newOffset += uint64(tileLen)
 	}
 
