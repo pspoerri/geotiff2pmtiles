@@ -35,8 +35,20 @@ func pow2(z int) float64 {
 	return float64(uint64(1) << uint(z))
 }
 
+// maxMercatorLat is the maximum latitude representable in Web Mercator.
+// Beyond this, the Mercator projection diverges to infinity.
+const maxMercatorLat = 85.0511287798
+
 // LonLatToTile converts WGS84 lon/lat to tile coordinates at the given zoom level.
 func LonLatToTile(lon, lat float64, zoom int) (x, y int) {
+	// Clamp latitude to the valid Web Mercator range to avoid Inf/NaN
+	// from the Mercator projection at the poles.
+	if lat > maxMercatorLat {
+		lat = maxMercatorLat
+	} else if lat < -maxMercatorLat {
+		lat = -maxMercatorLat
+	}
+
 	n := pow2(zoom)
 	x = int(math.Floor((lon + 180.0) / 360.0 * n))
 	latRad := lat * math.Pi / 180.0

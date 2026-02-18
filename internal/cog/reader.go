@@ -28,15 +28,28 @@ func (b Bounds) CenterLat() float64 {
 // Reader provides tile-level access to a COG/GeoTIFF file.
 // The file is memory-mapped for lock-free concurrent access.
 type Reader struct {
-	data []byte // memory-mapped file contents
-	bo   binary.ByteOrder
-	ifds []IFD
-	geo  GeoInfo
-	path string
-	id   int // unique numeric ID for fast cache keying (set by OpenAll)
+	data  []byte // memory-mapped file contents
+	bo    binary.ByteOrder
+	ifds  []IFD
+	geo   GeoInfo
+	path  string
+	id    int          // unique numeric ID for fast cache keying (set by OpenAll)
+	strip *stripLayout // non-nil for strip-based TIFFs promoted to virtual tiles
+}
+
+// stripLayout stores the original strip layout for strip-based TIFFs.
+// Virtual tiles are composed from multiple strips at read time.
+type stripLayout struct {
+	offsets       []uint64
+	byteCounts    []uint64
+	rowsPerStrip  uint32
+	stripsPerTile int // number of original strips per virtual tile
 }
 
 // Open opens a COG/GeoTIFF file by memory-mapping it and parsing its structure.
+// If a TFW (TIFF World File) sidecar is found, it is used for georeferencing
+// when the TIFF lacks embedded GeoTIFF tags. Strip-based TIFFs are supported
+// by converting the strip layout into a virtual tile layout.
 func Open(path string) (*Reader, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -54,13 +67,11 @@ func Open(path string) (*Reader, error) {
 		return nil, fmt.Errorf("%s: empty file", path)
 	}
 
-	// Memory-map the entire file read-only. The fd can be closed after mmap.
 	data, err := mmapFile(f.Fd(), int(size))
 	if err != nil {
 		return nil, fmt.Errorf("mmap %s: %w", path, err)
 	}
 
-	// Parse TIFF structure from the memory-mapped data.
 	ifds, bo, err := parseTIFF(bytes.NewReader(data))
 	if err != nil {
 		munmapFile(data)
@@ -72,14 +83,19 @@ func Open(path string) (*Reader, error) {
 		return nil, fmt.Errorf("%s: no IFDs found", path)
 	}
 
-	// Validate that the first IFD has tile layout.
 	first := &ifds[0]
+
+	// Strip-based TIFFs: convert the strip layout into virtual tiles.
+	var sl *stripLayout
 	if first.TileWidth == 0 || first.TileHeight == 0 {
-		munmapFile(data)
-		return nil, fmt.Errorf("%s: not a tiled TIFF (no TileWidth/TileHeight)", path)
+		if len(first.StripOffsets) > 0 {
+			sl = promoteStripsToTiles(first)
+		} else {
+			munmapFile(data)
+			return nil, fmt.Errorf("%s: no tile or strip layout found", path)
+		}
 	}
 
-	// Validate that the compression is supported.
 	switch first.Compression {
 	case 1, 5, 7, 8, 32946:
 		// Supported: None, LZW, JPEG, Deflate
@@ -90,13 +106,82 @@ func Open(path string) (*Reader, error) {
 
 	geo := parseGeoInfo(first)
 
+	// If GeoTIFF tags are absent, try a TFW sidecar.
+	if geo.PixelSizeX == 0 && geo.PixelSizeY == 0 {
+		if tfwPath := findTFW(path); tfwPath != "" {
+			tfw, err := parseTFW(tfwPath)
+			if err != nil {
+				munmapFile(data)
+				return nil, err
+			}
+			geo = tfw.toGeoInfo()
+		}
+	}
+
+	// Infer EPSG when GeoKeys didn't provide one.
+	if geo.EPSG == 0 && geo.PixelSizeX > 0 {
+		geo.EPSG = inferEPSG(geo, first.Width, first.Height)
+	}
+
 	return &Reader{
-		data: data,
-		bo:   bo,
-		ifds: ifds,
-		geo:  geo,
-		path: path,
+		data:  data,
+		bo:    bo,
+		ifds:  ifds,
+		geo:   geo,
+		path:  path,
+		strip: sl,
 	}, nil
+}
+
+// promoteStripsToTiles converts a strip-based IFD into a virtual tile layout.
+// Small strips are grouped into larger virtual tiles (>= 256 rows) so that
+// resampling kernels (e.g. Lanczos 6x6) never span more than 2 tiles.
+// Returns the stripLayout needed to reconstruct virtual tiles at read time.
+func promoteStripsToTiles(ifd *IFD) *stripLayout {
+	rps := ifd.RowsPerStrip
+	if rps == 0 {
+		rps = ifd.Height
+	}
+
+	const minTileHeight = 256
+	stripsPerTile := 1
+	if rps < minTileHeight {
+		stripsPerTile = int((minTileHeight + rps - 1) / rps)
+	}
+	virtualTileH := rps * uint32(stripsPerTile)
+
+	totalStrips := len(ifd.StripOffsets)
+	numVirtualTiles := (totalStrips + stripsPerTile - 1) / stripsPerTile
+
+	virtualOffsets := make([]uint64, numVirtualTiles)
+	virtualByteCounts := make([]uint64, numVirtualTiles)
+	for i := 0; i < numVirtualTiles; i++ {
+		startStrip := i * stripsPerTile
+		virtualOffsets[i] = ifd.StripOffsets[startStrip]
+		var totalBytes uint64
+		endStrip := startStrip + stripsPerTile
+		if endStrip > totalStrips {
+			endStrip = totalStrips
+		}
+		for s := startStrip; s < endStrip; s++ {
+			totalBytes += ifd.StripByteCounts[s]
+		}
+		virtualByteCounts[i] = totalBytes
+	}
+
+	sl := &stripLayout{
+		offsets:       ifd.StripOffsets,
+		byteCounts:    ifd.StripByteCounts,
+		rowsPerStrip:  rps,
+		stripsPerTile: stripsPerTile,
+	}
+
+	ifd.TileWidth = ifd.Width
+	ifd.TileHeight = virtualTileH
+	ifd.TileOffsets = virtualOffsets
+	ifd.TileByteCounts = virtualByteCounts
+
+	return sl
 }
 
 // Close unmaps the memory-mapped file.
@@ -180,6 +265,11 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 		return nil, nil, fmt.Errorf("tile (%d,%d) out of range (%dx%d)", col, row, tilesAcross, tilesDown)
 	}
 
+	// Strip-based: read individual strips and concatenate.
+	if r.strip != nil && level == 0 {
+		return r.readStripTileRaw(ifd, row)
+	}
+
 	tileIdx := row*tilesAcross + col
 	if tileIdx >= len(ifd.TileOffsets) || tileIdx >= len(ifd.TileByteCounts) {
 		return nil, nil, fmt.Errorf("tile index %d out of range", tileIdx)
@@ -199,25 +289,101 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 
 	data := r.data[offset:end]
 
+	var decompressed []byte
 	switch ifd.Compression {
 	case 7: // JPEG — not applicable for float tiles
 		return data, ifd, nil
 	case 1: // No compression
-		return data, ifd, nil
+		decompressed = data
 	case 8, 32946: // Deflate / zlib
-		decompressed, err := decompressDeflate(data)
+		dec, err := decompressDeflate(data)
 		if err != nil {
 			return nil, nil, fmt.Errorf("decompressing deflate tile: %w", err)
 		}
-		return decompressed, ifd, nil
+		decompressed = dec
 	case 5: // LZW
-		decompressed, err := decompressLZW(data)
+		dec, err := decompressLZW(data)
 		if err != nil {
 			return nil, nil, fmt.Errorf("decompressing LZW tile: %w", err)
 		}
-		return decompressed, ifd, nil
+		decompressed = dec
 	default:
 		return nil, nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
+	}
+
+	if ifd.Predictor == 2 {
+		undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel))
+	}
+	return decompressed, ifd, nil
+}
+
+// readStripTileRaw reads the strips that compose a virtual tile row and
+// returns the concatenated, decompressed bytes.
+func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
+	sl := r.strip
+	startStrip := tileRow * sl.stripsPerTile
+	endStrip := startStrip + sl.stripsPerTile
+	if endStrip > len(sl.offsets) {
+		endStrip = len(sl.offsets)
+	}
+
+	var combined []byte
+
+	for s := startStrip; s < endStrip; s++ {
+		offset := sl.offsets[s]
+		size := sl.byteCounts[s]
+		if size == 0 {
+			continue
+		}
+		end := offset + size
+		if end > uint64(len(r.data)) {
+			return nil, nil, fmt.Errorf("strip %d data [%d:%d] exceeds file size %d", s, offset, end, len(r.data))
+		}
+
+		chunk := r.data[offset:end]
+
+		switch ifd.Compression {
+		case 1: // No compression
+			combined = append(combined, chunk...)
+		case 7: // JPEG
+			combined = append(combined, chunk...)
+		case 8, 32946: // Deflate / zlib
+			dec, err := decompressDeflate(chunk)
+			if err != nil {
+				return nil, nil, fmt.Errorf("decompressing deflate strip %d: %w", s, err)
+			}
+			combined = append(combined, dec...)
+		case 5: // LZW
+			dec, err := decompressLZW(chunk)
+			if err != nil {
+				return nil, nil, fmt.Errorf("decompressing LZW strip %d: %w", s, err)
+			}
+			combined = append(combined, dec...)
+		default:
+			return nil, nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
+		}
+	}
+
+	if len(combined) == 0 {
+		return nil, ifd, nil
+	}
+
+	if ifd.Predictor == 2 {
+		undoHorizontalDifferencing(combined, int(ifd.Width), int(ifd.SamplesPerPixel))
+	}
+	return combined, ifd, nil
+}
+
+// undoHorizontalDifferencing reverses TIFF predictor=2 (horizontal differencing).
+// Each sample is stored as the difference from the previous sample in the same row.
+// This accumulates the deltas to recover the original values.
+func undoHorizontalDifferencing(data []byte, width, samplesPerPixel int) {
+	rowBytes := width * samplesPerPixel
+	for off := 0; off+rowBytes <= len(data); off += rowBytes {
+		row := data[off : off+rowBytes]
+		for x := samplesPerPixel; x < rowBytes; x++ {
+			row[x] += row[x-samplesPerPixel]
+		}
 	}
 }
 
@@ -294,6 +460,18 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 		return nil, fmt.Errorf("tile (%d,%d) out of range (%dx%d)", col, row, tilesAcross, tilesDown)
 	}
 
+	// Strip-based: compose virtual tile from individual strips.
+	if r.strip != nil && level == 0 {
+		data, _, err := r.readStripTileRaw(ifd, row)
+		if err != nil {
+			return nil, err
+		}
+		if data == nil {
+			return image.NewRGBA(image.Rect(0, 0, int(ifd.TileWidth), int(ifd.TileHeight))), nil
+		}
+		return r.decodeRawTile(ifd, data)
+	}
+
 	tileIdx := row*tilesAcross + col
 	if tileIdx >= len(ifd.TileOffsets) || tileIdx >= len(ifd.TileByteCounts) {
 		return nil, fmt.Errorf("tile index %d out of range", tileIdx)
@@ -303,35 +481,43 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 	size := ifd.TileByteCounts[tileIdx]
 
 	if size == 0 {
-		// Empty tile, return a blank image.
 		return image.NewRGBA(image.Rect(0, 0, int(ifd.TileWidth), int(ifd.TileHeight))), nil
 	}
 
-	// Bounds-check the slice into memory-mapped data.
 	end := offset + size
 	if end > uint64(len(r.data)) {
 		return nil, fmt.Errorf("tile data [%d:%d] exceeds file size %d", offset, end, len(r.data))
 	}
 
-	// Direct slice from memory-mapped region — no syscall, no lock.
 	data := r.data[offset:end]
 
-	// Decode based on compression.
 	switch ifd.Compression {
 	case 7: // JPEG
 		return r.decodeJPEGTile(ifd, data)
 	case 1: // No compression
+		if ifd.Predictor == 2 {
+			buf := make([]byte, len(data))
+			copy(buf, data)
+			undoHorizontalDifferencing(buf, int(ifd.TileWidth), int(ifd.SamplesPerPixel))
+			return r.decodeRawTile(ifd, buf)
+		}
 		return r.decodeRawTile(ifd, data)
 	case 8, 32946: // Deflate / zlib
 		decompressed, err := decompressDeflate(data)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing deflate tile: %w", err)
 		}
+		if ifd.Predictor == 2 {
+			undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel))
+		}
 		return r.decodeRawTile(ifd, decompressed)
 	case 5: // LZW
 		decompressed, err := decompressLZW(data)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing LZW tile: %w", err)
+		}
+		if ifd.Predictor == 2 {
+			undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel))
 		}
 		return r.decodeRawTile(ifd, decompressed)
 	default:
