@@ -7,6 +7,7 @@ For more information on the PMTiles format, see the [PMTiles documentation](http
 You can visualize generated PMTiles files at [pmtiles.io](https://pmtiles.io/).
 
 Sample input data is provided in the `data/` directory (download with `wget -i data.csv`).
+A second sample directory `data_tfw/` supports plain TIFFs with TFW sidecar files (see `data_tfw/README.md`).
 
 
 ## Features
@@ -28,7 +29,9 @@ Sample input data is provided in the `data/` directory (download with `wget -i d
 ## Supported Input
 
 - GeoTIFF / Cloud Optimized GeoTIFF (COG) files
-- TIFF compression: JPEG, LZW, Deflate/Zlib, and uncompressed
+- Plain TIFF with TFW (TIFF World File) sidecar for georeferencing
+- Strip-based and tiled TIFF layouts
+- TIFF compression: JPEG, LZW, Deflate/Zlib, and uncompressed (with predictor support)
 - Sample formats: 8-bit RGB/RGBA, Float32/Float64 (for elevation/DEM data)
 - Source CRS: EPSG:2056 (Swiss LV95), EPSG:4326 (WGS84), EPSG:3857 (Web Mercator)
 - Extensible projection interface for adding additional CRS support
@@ -112,6 +115,12 @@ Elevation data (auto-detects float GeoTIFF and selects Terrarium encoding):
 
 ```bash
 ./geotiff2pmtiles --verbose dem/ elevation.pmtiles
+```
+
+Convert a plain TIFF with TFW world file (global Natural Earth data):
+
+```bash
+./geotiff2pmtiles --format webp --max-zoom 6 data_tfw/ output.pmtiles
 ```
 
 ## Utilities

@@ -31,6 +31,9 @@ MEM_LIMIT  ?= 0
         run demo demo-full-disk demo-profile pprof-cpu pprof-mem \
         demo-jpeg demo-png demo-webp \
         demo-full-disk-jpeg demo-full-disk-png demo-full-disk-webp \
+        demo-tfw demo-tfw-full-disk \
+        demo-tfw-jpeg demo-tfw-png demo-tfw-webp \
+        demo-tfw-full-disk-jpeg demo-tfw-full-disk-png demo-tfw-full-disk-webp \
         cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-all \
         help
 
@@ -169,6 +172,51 @@ demo-full-disk-png: demo-full-disk
 demo-full-disk-webp: FORMAT=webp
 demo-full-disk-webp: demo-full-disk
 
+# ---------- TFW Demo (Natural Earth global data) ----------
+
+## demo-tfw: Demo with TFW world-file data (global Natural Earth raster)
+demo-tfw: build
+	./$(OUTPUT) \
+		--format $(FORMAT) \
+		--quality $(QUALITY) \
+		--tile-size $(TILE_SIZE) \
+		--concurrency $(CONCURRENT) \
+		data_tfw/ $(BUILD_DIR)/demo-tfw-$(FORMAT).pmtiles
+
+## demo-tfw-full-disk: TFW demo with aggressive disk spilling (1 MB memory limit)
+demo-tfw-full-disk: build
+	./$(OUTPUT) \
+		--format $(FORMAT) \
+		--quality $(QUALITY) \
+		--tile-size $(TILE_SIZE) \
+		--concurrency $(CONCURRENT) \
+		--mem-limit 1 \
+		data_tfw/ $(BUILD_DIR)/demo-tfw-full-disk-$(FORMAT).pmtiles
+
+## demo-tfw-jpeg: TFW demo with JPEG encoding
+demo-tfw-jpeg: FORMAT=jpeg
+demo-tfw-jpeg: demo-tfw
+
+## demo-tfw-png: TFW demo with PNG encoding
+demo-tfw-png: FORMAT=png
+demo-tfw-png: demo-tfw
+
+## demo-tfw-webp: TFW demo with WebP encoding
+demo-tfw-webp: FORMAT=webp
+demo-tfw-webp: demo-tfw
+
+## demo-tfw-full-disk-jpeg: TFW full-disk mode with JPEG
+demo-tfw-full-disk-jpeg: FORMAT=jpeg
+demo-tfw-full-disk-jpeg: demo-tfw-full-disk
+
+## demo-tfw-full-disk-png: TFW full-disk mode with PNG
+demo-tfw-full-disk-png: FORMAT=png
+demo-tfw-full-disk-png: demo-tfw-full-disk
+
+## demo-tfw-full-disk-webp: TFW full-disk mode with WebP
+demo-tfw-full-disk-webp: FORMAT=webp
+demo-tfw-full-disk-webp: demo-tfw-full-disk
+
 # ---------- Cross-compilation ----------
 
 ## cross-linux: Build for Linux amd64
@@ -228,5 +276,7 @@ help:
 	@echo "  make demo-png QUALITY=100             Run demo with PNG"
 	@echo "  make demo-full-disk                   Demo with full disk spilling (1 MB limit)"
 	@echo "  make demo-full-disk-webp              Full disk + WebP encoding"
+	@echo "  make demo-tfw                         Run demo with TFW world-file data"
+	@echo "  make demo-tfw-webp                    TFW demo with WebP"
 	@echo "  make cross-all                        Cross-compile all platforms"
 	@echo "  make run ARGS=\"--verbose data/ o.pmtiles\""

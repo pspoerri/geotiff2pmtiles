@@ -68,6 +68,9 @@ type IFD struct {
 	Predictor       uint16
 	TileOffsets     []uint64
 	TileByteCounts  []uint64
+	StripOffsets    []uint64
+	StripByteCounts []uint64
+	RowsPerStrip    uint32
 	JPEGTables      []byte
 	ModelTiepoint   []float64
 	ModelPixelScale []float64
@@ -310,6 +313,12 @@ func buildIFD(entries []tiffEntry, bo binary.ByteOrder) IFD {
 			ifd.TileOffsets = getUint64Slice(e, bo)
 		case tagTileByteCounts:
 			ifd.TileByteCounts = getUint64Slice(e, bo)
+		case tagStripOffsets:
+			ifd.StripOffsets = getUint64Slice(e, bo)
+		case tagStripByteCounts:
+			ifd.StripByteCounts = getUint64Slice(e, bo)
+		case tagRowsPerStrip:
+			ifd.RowsPerStrip = getUint32(e, bo)
 		case tagJPEGTables:
 			ifd.JPEGTables = make([]byte, len(e.Value))
 			copy(ifd.JPEGTables, e.Value)

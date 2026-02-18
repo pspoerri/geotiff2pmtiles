@@ -10,6 +10,7 @@ internal/
     reader.go                       COG/GeoTIFF tile-level reader (memory-mapped)
     ifd.go                          TIFF IFD parser
     geotags.go                      GeoTIFF metadata extraction
+    tfw.go                          TFW (TIFF World File) parser + EPSG inference
     tilecache.go                    LRU tile cache for decoded source tiles
     lzw.go                          LZW decompression
   coord/
@@ -38,8 +39,8 @@ internal/
 
 ## Pipeline
 
-1. **Scan**: Collect and open GeoTIFF/COG input files
-2. **Metadata**: Parse GeoTIFF tags for CRS, bounds, and resolution
+1. **Scan**: Collect and open GeoTIFF/COG input files (tiled or strip-based, with optional TFW sidecar)
+2. **Metadata**: Parse GeoTIFF tags (or TFW) for CRS, bounds, and resolution; promote strips to virtual tiles
 3. **Plan**: Compute merged WGS84 bounds and zoom range; auto-detect float data
 4. **Generate (max zoom)**: Enumerate tiles, sort by Hilbert curve, distribute to worker pool
 5. **Reproject**: Per-pixel inverse projection from output tile to source CRS
