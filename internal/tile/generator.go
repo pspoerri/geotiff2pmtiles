@@ -288,6 +288,8 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							nextStore.Put(z, x, y, td, data)
 						}
 
+						td.Release()
+
 						tileCount.Add(1)
 						totalBytes.Add(int64(len(data)))
 						pb.Increment()

@@ -76,6 +76,20 @@ linear interpolation replaces the Catmull-Rom polynomial evaluation (`1.5x³ - 2
 so only the positive half is stored. While the polynomial is cheaper than Lanczos sin()
 calls, at ~3.25s cumulative CPU it was still worth eliminating.
 
+## image.RGBA sync.Pool
+
+`*image.RGBA` allocations (256 KB each for 256×256 tiles) are pooled via `sync.Pool`
+to reduce GC pressure during tile generation. A `sync.Map` of pools keyed by `(w, h)`
+handles the rare case of multiple tile sizes. `GetRGBA` zeros the pixel buffer with
+`clear()` before returning; `PutRGBA` returns to the pool. Key recycling points:
+- `newTileData`: returns the source RGBA when uniform/gray compaction succeeds
+- `TileData.Release()`: returns internal img after encoding + store in the generator
+- `renderTile`/`renderTileTerrarium`: pool allocation moved after overlap check so
+  empty tiles never allocate; returned on `!hasData` early exit
+- Downsample: destination from pool; child images expanded from gray/uniform tracked
+  with `poolable` flags and returned after the loop (borrowed `TileData.img` pointers
+  are not recycled)
+
 ## Horizontal differencing predictor
 
 LZW and Deflate compressed TIFFs may use a horizontal differencing predictor

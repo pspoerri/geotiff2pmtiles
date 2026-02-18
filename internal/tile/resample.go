@@ -111,8 +111,6 @@ func tileCRSBounds(z, tx, ty int, proj coord.Projection) (minX, minY, maxX, maxY
 // with pixel X and latitude depends only on pixel Y, so we reduce trig calls
 // from O(tileSize²) to O(tileSize).
 func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.TileCache, mode Resampling) *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
-
 	// Pre-compute the output pixel size in CRS units for selecting the best overview level.
 	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
 	outputResMeters := coord.ResolutionAtLat(midLat, z)
@@ -124,6 +122,8 @@ func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Proje
 	if len(tileSrcs) == 0 {
 		return nil
 	}
+
+	img := GetRGBA(tileSize, tileSize)
 
 	// Precompute lon per column (linear with pixel X) and lat per row
 	// (non-linear in Mercator, but independent of X). This reduces
@@ -161,7 +161,8 @@ func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Proje
 	}
 
 	if !hasData {
-		return nil // signal: empty tile
+		PutRGBA(img)
+		return nil
 	}
 
 	return img
@@ -1339,8 +1340,6 @@ func bicubicLUT(x float64) float64 {
 // renderTileTerrarium renders a single web map tile from float GeoTIFF data,
 // converting elevation values to Terrarium RGB encoding.
 func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.FloatTileCache, mode Resampling) *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, tileSize, tileSize))
-
 	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
 	outputResMeters := coord.ResolutionAtLat(midLat, z)
 	outputResCRS := coord.MetersToPixelSizeCRS(outputResMeters, proj.EPSG(), midLat)
@@ -1352,6 +1351,7 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj co
 		return nil
 	}
 
+	img := GetRGBA(tileSize, tileSize)
 	hasData := false
 
 	// Parse nodata values from the active sources.
@@ -1394,6 +1394,7 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj co
 	}
 
 	if !hasData {
+		PutRGBA(img)
 		return nil
 	}
 	return img
