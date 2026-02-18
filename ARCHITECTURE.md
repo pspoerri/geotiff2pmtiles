@@ -31,6 +31,8 @@ internal/
     jpeg.go                         JPEG encoder
     png.go                          PNG encoder
     webp.go                         WebP encoder/decoder (native libwebp via CGo)
+    webp_stub.go                    WebP stubs for non-CGo builds (returns errors)
+    webp_available.go               CGo availability flag for conditional tests
     terrarium.go                    Terrarium encoder for elevation data
   pmtiles/
     writer.go                       PMTiles v3 two-pass writer with tile clustering

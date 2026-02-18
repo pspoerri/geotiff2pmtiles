@@ -53,6 +53,11 @@ overhead, no per-call memory growth, and the C encoder runs 3-5x faster. The tra
 that builds now require `CGO_ENABLED=1` and libwebp installed on the system
 (`brew install webp` on macOS, `apt-get install libwebp-dev` on Linux).
 
+A `!cgo` stub (`webp_stub.go`) provides graceful error messages when building with
+`CGO_ENABLED=0` — the binary compiles but WebP encode/decode returns an error at runtime.
+This allows CI cross-compilation without a C toolchain while keeping WebP available for
+native builds.
+
 ## Performance profile (2026-02-18, bicubic/WebP/512px, pre-native-libwebp)
 
 Profiled with 36 Swiss GeoTIFFs, zoom 12-18, 4 workers. Total: 4690 tiles, 72s wall,

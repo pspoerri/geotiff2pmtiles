@@ -43,6 +43,9 @@ func TestNewEncoder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.format, func(t *testing.T) {
+			if tt.format == "webp" && !webpCGOAvailable {
+				t.Skip("webp encoder requires CGO with libwebp")
+			}
 			enc, err := NewEncoder(tt.format, 85)
 			if tt.wantErr {
 				if err == nil {
