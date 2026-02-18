@@ -43,13 +43,13 @@ all: build
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-## build: Compile the binary (pure Go, no CGo)
+## build: Compile the binary (requires libwebp: brew install webp / apt-get install libwebp-dev)
 build: $(BUILD_DIR)
-	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
+	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
 
 ## install: Install to $GOPATH/bin
 install:
-	CGO_ENABLED=0 $(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
+	$(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
 
 # ---------- Testing ----------
 
@@ -218,25 +218,27 @@ demo-tfw-full-disk-webp: FORMAT=webp
 demo-tfw-full-disk-webp: demo-tfw-full-disk
 
 # ---------- Cross-compilation ----------
+# Requires a C cross-compiler (CC) and libwebp built for the target platform.
+# Example: CC=x86_64-linux-musl-gcc PKG_CONFIG_PATH=/path/to/linux-amd64/lib/pkgconfig make cross-linux
 
 ## cross-linux: Build for Linux amd64
 cross-linux: $(BUILD_DIR)
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-linux-amd64 $(CMD)
 
 ## cross-linux-arm64: Build for Linux arm64
 cross-linux-arm64: $(BUILD_DIR)
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-linux-arm64 $(CMD)
 
 ## cross-darwin: Build for macOS amd64
 cross-darwin: $(BUILD_DIR)
-	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 \
+	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-darwin-amd64 $(CMD)
 
 ## cross-darwin-arm64: Build for macOS arm64
 cross-darwin-arm64: $(BUILD_DIR)
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 $(CMD)
 
 ## cross-all: Build for all supported platforms
