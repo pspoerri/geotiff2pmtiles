@@ -43,14 +43,22 @@ This was never triggered before because Swiss LV95 data stays well within the va
 Mercator range, but global datasets (like the Natural Earth raster covering ±90°)
 require it.
 
-## Performance profile (2026-02-18, bicubic/WebP/512px)
+## Native libwebp (replacing WASM)
+
+The WebP encoder/decoder uses native libwebp via CGo instead of the previous WASM-based
+approach (`gen2brain/webp` via `tetratelabs/wazero`). The WASM encoder was the #1 CPU
+bottleneck (~41% of CPU, 81s) and caused 51 GB of WASM memory growth allocations due to
+per-encode heap instantiation. Native libwebp eliminates this entirely: no WASM runtime
+overhead, no per-call memory growth, and the C encoder runs 3-5x faster. The tradeoff is
+that builds now require `CGO_ENABLED=1` and libwebp installed on the system
+(`brew install webp` on macOS, `apt-get install libwebp-dev` on Linux).
+
+## Performance profile (2026-02-18, bicubic/WebP/512px, pre-native-libwebp)
 
 Profiled with 36 Swiss GeoTIFFs, zoom 12-18, 4 workers. Total: 4690 tiles, 72s wall,
-213s CPU (295% utilization). The two dominant bottlenecks are:
+213s CPU (295% utilization). The two dominant bottlenecks were:
 
-1. **WebP encoding via WASM** (~41% of CPU) — The pure-Go `gen2brain/webp` encoder
-   runs libwebp inside a wazero WASM runtime. Each encode grows WASM memory, causing
-   51 GB of total allocations. This is the single largest cost.
+1. **WebP encoding via WASM** (~41% of CPU) — Now replaced by native libwebp via CGo.
 
 2. **Bicubic resampling** (~27% of CPU) — `bicubicAccumYCbCr` is the hot inner loop
    performing 16 YCbCr→RGB conversions per output pixel. Already optimized with direct

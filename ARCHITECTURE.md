@@ -29,7 +29,7 @@ internal/
     encoder.go                      Unified encoding interface
     jpeg.go                         JPEG encoder
     png.go                          PNG encoder
-    webp.go                         WebP encoder (pure Go via gen2brain/webp)
+    webp.go                         WebP encoder/decoder (native libwebp via CGo)
     terrarium.go                    Terrarium encoder for elevation data
   pmtiles/
     writer.go                       PMTiles v3 two-pass writer with tile clustering

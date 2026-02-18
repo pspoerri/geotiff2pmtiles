@@ -1,6 +1,6 @@
 # GeoTIFF to PMTiles
 
-A memory-efficient, pure-Go tool that converts GeoTIFF/COG files into PMTiles v3 archives.
+A memory-efficient tool that converts GeoTIFF/COG files into PMTiles v3 archives.
 
 For more information on the PMTiles format, see the [PMTiles documentation](https://docs.protomaps.com/pmtiles/).
 
@@ -14,7 +14,7 @@ A second sample directory `data_tfw/` supports plain TIFFs with TFW sidecar file
 
 - **Memory-efficient**: Reads COG tiles on-demand via memory-mapped I/O; never loads entire rasters into memory
 - **Disk-backed tile store**: Tiles are stored in encoded form (5-25x smaller than raw pixels) and continuously spilled to disk via a dedicated I/O goroutine with configurable memory backpressure
-- **Pure Go**: No CGo or GDAL dependency; all encodings including WebP work without system libraries
+- **Native WebP**: WebP encoding/decoding via native libwebp (CGo), eliminating WASM overhead for 3-5x faster encodes
 - **Multiple encodings**: JPEG, PNG, WebP, and Terrarium (for elevation/DEM data)
 - **Auto zoom detection**: Calculates maximum zoom level from source resolution
 - **Auto float detection**: Automatically selects Terrarium encoding for float GeoTIFF input (elevation data)
@@ -36,6 +36,21 @@ A second sample directory `data_tfw/` supports plain TIFFs with TFW sidecar file
 - Source CRS: EPSG:2056 (Swiss LV95), EPSG:4326 (WGS84), EPSG:3857 (Web Mercator)
 - Extensible projection interface for adding additional CRS support
 
+## Prerequisites
+
+WebP support requires libwebp to be installed:
+
+```bash
+# macOS
+brew install webp
+
+# Debian/Ubuntu
+sudo apt-get install libwebp-dev
+
+# Fedora/RHEL
+sudo dnf install libwebp-devel
+```
+
 ## Installation
 
 ```bash
@@ -50,7 +65,7 @@ make build
 
 ### Cross-compilation
 
-Build for all supported platforms (Linux, macOS):
+Cross-compilation requires a C cross-compiler and libwebp built for the target platform:
 
 ```bash
 make cross-all
