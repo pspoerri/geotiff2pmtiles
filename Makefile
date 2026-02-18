@@ -98,7 +98,7 @@ run: build
 
 ## demo: Build and run a demonstration with the sample data directory
 demo: build
-	./$(OUTPUT) --verbose \
+	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \
@@ -108,7 +108,7 @@ demo: build
 
 ## demo-profile: Run demo with CPU and memory profiling
 demo-profile: build
-	./$(OUTPUT) --verbose \
+	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \
@@ -136,7 +136,7 @@ pprof-mem:
 
 ## demo-full-disk: Demo with aggressive disk spilling (1 MB memory limit)
 demo-full-disk: build
-	./$(OUTPUT) --verbose \
+	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \

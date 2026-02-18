@@ -218,6 +218,28 @@ func main() {
 	}
 	// 0 = auto-detect from system RAM (handled inside Generate).
 
+	// Print settings summary.
+	fmt.Printf("geotiff2pmtiles %s (commit %s, built %s)\n", version, commit, buildDate)
+	switch format {
+	case "jpeg", "webp":
+		fmt.Printf("  %-14s %s (quality: %d)\n", "Format:", format, quality)
+	default:
+		fmt.Printf("  %-14s %s\n", "Format:", format)
+	}
+	fmt.Printf("  %-14s %dpx\n", "Tile size:", tileSize)
+	fmt.Printf("  %-14s %d – %d (auto-max: %d)\n", "Zoom:", minZoom, maxZoom, autoMax)
+	fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
+	fmt.Printf("  %-14s %d\n", "Concurrency:", concurrency)
+	if noSpill {
+		fmt.Printf("  %-14s disabled (all in memory)\n", "Disk spill:")
+	} else if memLimitMB > 0 {
+		fmt.Printf("  %-14s %d MB\n", "Mem limit:", memLimitMB)
+	} else {
+		fmt.Printf("  %-14s auto (~90%% of RAM)\n", "Mem limit:")
+	}
+	fmt.Printf("  %-14s %d file(s)\n", "Input:", len(tiffFiles))
+	fmt.Printf("  %-14s %s\n", "Output:", outputPath)
+
 	// Build tile generation config.
 	outputDir := filepath.Dir(outputPath)
 	cfg := tile.Config{
@@ -268,7 +290,7 @@ func main() {
 
 	elapsed := time.Since(start).Round(time.Millisecond)
 	fi, _ := os.Stat(outputPath)
-	fmt.Printf("Done: %d tiles, %s, %v\n", stats.TileCount, humanSize(fi.Size()), elapsed)
+	fmt.Printf("Done: %d tiles, %s, %v → %s\n", stats.TileCount, humanSize(fi.Size()), elapsed, outputPath)
 }
 
 // collectTIFFs resolves input paths to a list of .tif files.
