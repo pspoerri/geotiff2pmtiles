@@ -196,6 +196,8 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 			rr, gg, bb, aa, err = nearestSampleCached(src.reader, src.level, pixX, pixY, cache)
 		case ResamplingLanczos:
 			rr, gg, bb, aa, err = lanczosSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
+		case ResamplingBicubic:
+			rr, gg, bb, aa, err = bicubicSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
 		default:
 			rr, gg, bb, aa, err = bilinearSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
 		}
@@ -736,6 +738,361 @@ func lanczosAccumGeneric(tile image.Image, wxArr, wyArr [6]float64, lx, ly [6]in
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
 }
 
+// bicubicSampleCached performs Catmull-Rom bicubic interpolation using the
+// tile cache. Uses a 4×4 pixel neighborhood — sharper than bilinear with less
+// ringing than Lanczos-3. Pixels with alpha == 0 are excluded from RGB
+// interpolation. Optimized with batched tile fetches: the 4×4 neighborhood
+// spans at most 2×2 source tiles.
+func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
+	const n = 4
+
+	ix0 := int(math.Floor(fx)) - 1
+	iy0 := int(math.Floor(fy)) - 1
+
+	var wxArr, wyArr [n]float64
+	var pxArr, pyArr [n]int
+	for k := 0; k < n; k++ {
+		pxArr[k] = clamp(ix0+k, 0, imgW-1)
+		pyArr[k] = clamp(iy0+k, 0, imgH-1)
+		wxArr[k] = bicubic(fx - float64(ix0+k))
+		wyArr[k] = bicubic(fy - float64(iy0+k))
+	}
+
+	colMin := pxArr[0] / tw
+	colMax := pxArr[n-1] / tw
+	rowMin := pyArr[0] / th
+	rowMax := pyArr[n-1] / th
+
+	var localX, localY [n]int
+	for k := 0; k < n; k++ {
+		localX[k] = pxArr[k] % tw
+		localY[k] = pyArr[k] % th
+	}
+
+	// Single-tile fast path.
+	if colMin == colMax && rowMin == rowMax {
+		tile, err := fetchTileCached(src, level, colMin, rowMin, cache)
+		if err != nil {
+			return 0, 0, 0, 0, err
+		}
+		if ycbcr, ok := tile.(*image.YCbCr); ok {
+			return bicubicAccumYCbCr(ycbcr, wxArr, wyArr, localX, localY)
+		}
+		if nycbcra, ok := tile.(*image.NYCbCrA); ok {
+			return bicubicAccumNYCbCrA(nycbcra, wxArr, wyArr, localX, localY)
+		}
+		if rgba, ok := tile.(*image.RGBA); ok {
+			return bicubicAccumRGBA(rgba, wxArr, wyArr, localX, localY)
+		}
+		return bicubicAccumGeneric(tile, wxArr, wyArr, localX, localY)
+	}
+
+	// Multi-tile path: fetch the unique tiles (at most 2×2 = 4).
+	var tiles [2][2]image.Image
+	var tileOK [2][2]bool
+	for r := rowMin; r <= rowMax; r++ {
+		for c := colMin; c <= colMax; c++ {
+			tile, err := fetchTileCached(src, level, c, r, cache)
+			if err == nil {
+				tiles[r-rowMin][c-colMin] = tile
+				tileOK[r-rowMin][c-colMin] = true
+			}
+		}
+	}
+
+	var tileColIdx, tileRowIdx [n]int
+	for k := 0; k < n; k++ {
+		tileColIdx[k] = pxArr[k]/tw - colMin
+		tileRowIdx[k] = pyArr[k]/th - rowMin
+	}
+
+	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+
+	for ky := 0; ky < n; ky++ {
+		wyVal := wyArr[ky]
+		if wyVal == 0 {
+			continue
+		}
+		tr := tileRowIdx[ky]
+		ly := localY[ky]
+
+		for kx := 0; kx < n; kx++ {
+			wt := wxArr[kx] * wyVal
+			if wt == 0 {
+				continue
+			}
+			tc := tileColIdx[kx]
+			if !tileOK[tr][tc] {
+				continue
+			}
+			p := pixelFromImage(tiles[tr][tc], localX[kx], ly)
+
+			aSum += float64(p[3]) * wt
+			wTotal += wt
+			if p[3] > 0 {
+				rSum += float64(p[0]) * wt
+				gSum += float64(p[1]) * wt
+				bSum += float64(p[2]) * wt
+				wRGB += wt
+			}
+		}
+	}
+
+	if wRGB == 0 {
+		return 0, 0, 0, 0, nil
+	}
+
+	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+}
+
+// bicubicAccumYCbCr is the inner loop for bicubic on YCbCr tiles.
+func bicubicAccumYCbCr(img *image.YCbCr, wxArr, wyArr [4]float64, lx, ly [4]int) (uint8, uint8, uint8, uint8, error) {
+	yStride := img.YStride
+	cStride := img.CStride
+	ratio := img.SubsampleRatio
+	yData := img.Y
+	cbData := img.Cb
+	crData := img.Cr
+
+	var rSum, gSum, bSum, wTotal float64
+
+	for ky := 0; ky < 4; ky++ {
+		wyVal := wyArr[ky]
+		if wyVal == 0 {
+			continue
+		}
+		y := ly[ky]
+		yRowOff := y * yStride
+		var cRowOff int
+		switch ratio {
+		case image.YCbCrSubsampleRatio420:
+			cRowOff = (y / 2) * cStride
+		case image.YCbCrSubsampleRatio422:
+			cRowOff = y * cStride
+		default:
+			cRowOff = y * cStride
+		}
+
+		for kx := 0; kx < 4; kx++ {
+			wt := wxArr[kx] * wyVal
+			if wt == 0 {
+				continue
+			}
+
+			x := lx[kx]
+			yi := yRowOff + x
+			var ci int
+			switch ratio {
+			case image.YCbCrSubsampleRatio420:
+				ci = cRowOff + x/2
+			case image.YCbCrSubsampleRatio422:
+				ci = cRowOff + x/2
+			default:
+				ci = cRowOff + x
+			}
+
+			yy1 := int32(yData[yi]) * 0x10101
+			cb1 := int32(cbData[ci]) - 128
+			cr1 := int32(crData[ci]) - 128
+			r := yy1 + 91881*cr1
+			g := yy1 - 22554*cb1 - 46802*cr1
+			b := yy1 + 116130*cb1
+			if r < 0 {
+				r = 0
+			} else if r > 0xFF0000 {
+				r = 0xFF0000
+			}
+			if g < 0 {
+				g = 0
+			} else if g > 0xFF0000 {
+				g = 0xFF0000
+			}
+			if b < 0 {
+				b = 0
+			} else if b > 0xFF0000 {
+				b = 0xFF0000
+			}
+
+			rSum += float64(r>>16) * wt
+			gSum += float64(g>>16) * wt
+			bSum += float64(b>>16) * wt
+			wTotal += wt
+		}
+	}
+
+	if wTotal == 0 {
+		return 0, 0, 0, 0, nil
+	}
+
+	return clampByte(rSum / wTotal), clampByte(gSum / wTotal), clampByte(bSum / wTotal), 255, nil
+}
+
+// bicubicAccumNYCbCrA is the inner loop for bicubic on NYCbCrA tiles.
+func bicubicAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [4]float64, lx, ly [4]int) (uint8, uint8, uint8, uint8, error) {
+	yStride := img.YStride
+	cStride := img.CStride
+	aStride := img.AStride
+	ratio := img.SubsampleRatio
+	yData := img.Y
+	cbData := img.Cb
+	crData := img.Cr
+	aData := img.A
+
+	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+
+	for ky := 0; ky < 4; ky++ {
+		wyVal := wyArr[ky]
+		if wyVal == 0 {
+			continue
+		}
+		y := ly[ky]
+		yRowOff := y * yStride
+		aRowOff := y * aStride
+		var cRowOff int
+		switch ratio {
+		case image.YCbCrSubsampleRatio420:
+			cRowOff = (y / 2) * cStride
+		case image.YCbCrSubsampleRatio422:
+			cRowOff = y * cStride
+		default:
+			cRowOff = y * cStride
+		}
+
+		for kx := 0; kx < 4; kx++ {
+			wt := wxArr[kx] * wyVal
+			if wt == 0 {
+				continue
+			}
+
+			x := lx[kx]
+			yi := yRowOff + x
+			ai := aRowOff + x
+			var ci int
+			switch ratio {
+			case image.YCbCrSubsampleRatio420:
+				ci = cRowOff + x/2
+			case image.YCbCrSubsampleRatio422:
+				ci = cRowOff + x/2
+			default:
+				ci = cRowOff + x
+			}
+
+			alpha := aData[ai]
+			aSum += float64(alpha) * wt
+			wTotal += wt
+
+			if alpha > 0 {
+				yy1 := int32(yData[yi]) * 0x10101
+				cb1 := int32(cbData[ci]) - 128
+				cr1 := int32(crData[ci]) - 128
+				r := yy1 + 91881*cr1
+				g := yy1 - 22554*cb1 - 46802*cr1
+				b := yy1 + 116130*cb1
+				if r < 0 {
+					r = 0
+				} else if r > 0xFF0000 {
+					r = 0xFF0000
+				}
+				if g < 0 {
+					g = 0
+				} else if g > 0xFF0000 {
+					g = 0xFF0000
+				}
+				if b < 0 {
+					b = 0
+				} else if b > 0xFF0000 {
+					b = 0xFF0000
+				}
+
+				rSum += float64(r>>16) * wt
+				gSum += float64(g>>16) * wt
+				bSum += float64(b>>16) * wt
+				wRGB += wt
+			}
+		}
+	}
+
+	if wRGB == 0 {
+		return 0, 0, 0, 0, nil
+	}
+
+	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+}
+
+// bicubicAccumRGBA is the inner loop for bicubic on RGBA tiles.
+func bicubicAccumRGBA(img *image.RGBA, wxArr, wyArr [4]float64, lx, ly [4]int) (uint8, uint8, uint8, uint8, error) {
+	pix := img.Pix
+	stride := img.Stride
+
+	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+
+	for ky := 0; ky < 4; ky++ {
+		wyVal := wyArr[ky]
+		if wyVal == 0 {
+			continue
+		}
+		rowOff := ly[ky] * stride
+
+		for kx := 0; kx < 4; kx++ {
+			wt := wxArr[kx] * wyVal
+			if wt == 0 {
+				continue
+			}
+
+			off := rowOff + lx[kx]*4
+			alpha := pix[off+3]
+			aSum += float64(alpha) * wt
+			wTotal += wt
+			if alpha > 0 {
+				rSum += float64(pix[off+0]) * wt
+				gSum += float64(pix[off+1]) * wt
+				bSum += float64(pix[off+2]) * wt
+				wRGB += wt
+			}
+		}
+	}
+
+	if wRGB == 0 {
+		return 0, 0, 0, 0, nil
+	}
+
+	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+}
+
+// bicubicAccumGeneric is a fallback for rare tile types using the image.Image interface.
+func bicubicAccumGeneric(tile image.Image, wxArr, wyArr [4]float64, lx, ly [4]int) (uint8, uint8, uint8, uint8, error) {
+	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+
+	for ky := 0; ky < 4; ky++ {
+		wyVal := wyArr[ky]
+		if wyVal == 0 {
+			continue
+		}
+		for kx := 0; kx < 4; kx++ {
+			wt := wxArr[kx] * wyVal
+			if wt == 0 {
+				continue
+			}
+			p := pixelFromImage(tile, lx[kx], ly[ky])
+
+			aSum += float64(p[3]) * wt
+			wTotal += wt
+			if p[3] > 0 {
+				rSum += float64(p[0]) * wt
+				gSum += float64(p[1]) * wt
+				bSum += float64(p[2]) * wt
+				wRGB += wt
+			}
+		}
+	}
+
+	if wRGB == 0 {
+		return 0, 0, 0, 0, nil
+	}
+
+	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+}
+
 // fetchTileCached retrieves a decoded tile image using the cache.
 // Callers extract pixels directly from the returned image to avoid per-pixel
 // cache lookups (the bilinear case needs 4 pixels from potentially the same tile).
@@ -925,6 +1282,26 @@ func lanczos3LUT(x float64) float64 {
 	return lanczos3Table[idx]*(1-frac) + lanczos3Table[idx+1]*frac
 }
 
+// bicubic computes the Catmull-Rom (a = -0.5) bicubic kernel value:
+//
+//	W(x) = 1.5|x|³ - 2.5|x|² + 1         for |x| ≤ 1
+//	W(x) = -0.5|x|³ + 2.5|x|² - 4|x| + 2 for 1 < |x| ≤ 2
+//	W(x) = 0                                for |x| > 2
+func bicubic(x float64) float64 {
+	if x < 0 {
+		x = -x
+	}
+	if x >= 2 {
+		return 0
+	}
+	x2 := x * x
+	x3 := x2 * x
+	if x <= 1 {
+		return 1.5*x3 - 2.5*x2 + 1
+	}
+	return -0.5*x3 + 2.5*x2 - 4*x + 2
+}
+
 // renderTileTerrarium renders a single web map tile from float GeoTIFF data,
 // converting elevation values to Terrarium RGB encoding.
 func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.FloatTileCache, mode Resampling) *image.RGBA {
@@ -1013,6 +1390,8 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, sr
 			val, err = nearestSampleFloat(src.reader, src.level, pixX, pixY, cache)
 		case ResamplingLanczos:
 			val, err = lanczosSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
+		case ResamplingBicubic:
+			val, err = bicubicSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
 		default:
 			val, err = bilinearSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
 		}
@@ -1116,6 +1495,115 @@ func lanczosSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, 
 	}
 
 	// Determine the tile column/row range for the 6×6 neighborhood.
+	colMin := pxArr[0] / tw
+	colMax := pxArr[n-1] / tw
+	rowMin := pyArr[0] / th
+	rowMax := pyArr[n-1] / th
+
+	// Fetch the unique float tiles (at most 2×2 = 4).
+	var ftData [2][2][]float32
+	var ftW [2][2]int
+	var ftOK [2][2]bool
+	srcID := src.ID()
+	for r := rowMin; r <= rowMax; r++ {
+		for c := colMin; c <= colMax; c++ {
+			dr := r - rowMin
+			dc := c - colMin
+			var tileData []float32
+			var tileW int
+			if cache != nil {
+				tileData, tileW, _ = cache.Get(srcID, level, c, r)
+			}
+			if tileData == nil {
+				var w, h int
+				var err error
+				tileData, w, h, err = src.ReadFloatTile(level, c, r)
+				if err != nil || tileData == nil {
+					continue
+				}
+				tileW = w
+				if cache != nil {
+					cache.Put(srcID, level, c, r, tileData, w, h)
+				}
+			}
+			ftData[dr][dc] = tileData
+			ftW[dr][dc] = tileW
+			ftOK[dr][dc] = true
+		}
+	}
+
+	var sum, wTotal float64
+	hasNaN := false
+
+	for ky := 0; ky < n; ky++ {
+		wyVal := wyArr[ky]
+		if wyVal == 0 {
+			continue
+		}
+		py := pyArr[ky]
+		tileRow := py/th - rowMin
+		localY := py % th
+
+		for kx := 0; kx < n; kx++ {
+			wt := wxArr[kx] * wyVal
+			if wt == 0 {
+				continue
+			}
+
+			px := pxArr[kx]
+			tileCol := px/tw - colMin
+			if !ftOK[tileRow][tileCol] {
+				continue
+			}
+
+			localX := px % tw
+			idx := localY*ftW[tileRow][tileCol] + localX
+			data := ftData[tileRow][tileCol]
+			if idx < 0 || idx >= len(data) {
+				continue
+			}
+			val := float64(data[idx])
+
+			if math.IsNaN(val) {
+				hasNaN = true
+				continue
+			}
+
+			sum += val * wt
+			wTotal += wt
+		}
+	}
+
+	if wTotal == 0 {
+		if hasNaN {
+			cx := clamp(int(math.Floor(fx+0.5)), 0, imgW-1)
+			cy := clamp(int(math.Floor(fy+0.5)), 0, imgH-1)
+			return readFloatPixelCached(src, level, cx, cy, cache)
+		}
+		return math.NaN(), nil
+	}
+
+	return sum / wTotal, nil
+}
+
+// bicubicSampleFloat performs Catmull-Rom bicubic interpolation on float data.
+// NaN pixels are excluded from the weighted sum; if all neighbors are NaN,
+// falls back to nearest-neighbor.
+func bicubicSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.FloatTileCache) (float64, error) {
+	const n = 4
+
+	ix0 := int(math.Floor(fx)) - 1
+	iy0 := int(math.Floor(fy)) - 1
+
+	var pxArr, pyArr [n]int
+	var wxArr, wyArr [n]float64
+	for k := 0; k < n; k++ {
+		pxArr[k] = clamp(ix0+k, 0, imgW-1)
+		pyArr[k] = clamp(iy0+k, 0, imgH-1)
+		wxArr[k] = bicubic(fx - float64(ix0+k))
+		wyArr[k] = bicubic(fy - float64(iy0+k))
+	}
+
 	colMin := pxArr[0] / tw
 	colMax := pxArr[n-1] / tw
 	rowMin := pyArr[0] / th
