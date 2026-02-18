@@ -67,8 +67,8 @@ type DiskTileStore struct {
 	dir      string // directory for temp files
 
 	// Memory tracking.
-	memBytes    atomic.Int64  // estimated bytes of in-memory tile data
-	memoryLimit int64         // max in-memory tile bytes before blocking Put(); 0 = no limit
+	memBytes    atomic.Int64 // estimated bytes of in-memory tile data
+	memoryLimit int64        // max in-memory tile bytes before blocking Put(); 0 = no limit
 	spillMu     sync.Mutex   // protects memCond waits (separate from mu to avoid contention)
 	memCond     *sync.Cond   // signaled by ioLoop when memBytes decreases; nil when spilling is off
 
