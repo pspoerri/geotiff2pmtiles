@@ -45,11 +45,11 @@ $(BUILD_DIR):
 
 ## build: Compile the binary (requires libwebp: brew install webp / apt-get install libwebp-dev)
 build: $(BUILD_DIR)
-	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
+	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
 
 ## install: Install to $GOPATH/bin
 install:
-	$(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
+	CGO_ENABLED=1 $(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
 
 # ---------- Testing ----------
 
