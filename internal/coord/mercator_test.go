@@ -108,23 +108,29 @@ func TestPixelToLonLat_RoundTrip(t *testing.T) {
 }
 
 func TestResolutionAtLat(t *testing.T) {
-	// At the equator, zoom 0, each pixel covers ~156543 meters.
-	res0 := ResolutionAtLat(0, 0)
+	// At the equator, zoom 0, each pixel covers ~156543 meters (256-pixel tiles).
+	res0 := ResolutionAtLat(0, 0, 256)
 	expected0 := EarthCircumference / 256
 	if math.Abs(res0-expected0)/expected0 > 1e-6 {
-		t.Errorf("ResolutionAtLat(0, 0) = %v, want ~%v", res0, expected0)
+		t.Errorf("ResolutionAtLat(0, 0, 256) = %v, want ~%v", res0, expected0)
 	}
 
 	// Each zoom level halves the resolution.
-	res1 := ResolutionAtLat(0, 1)
+	res1 := ResolutionAtLat(0, 1, 256)
 	if math.Abs(res1-res0/2)/res0 > 1e-6 {
-		t.Errorf("ResolutionAtLat(0, 1) = %v, want ~%v", res1, res0/2)
+		t.Errorf("ResolutionAtLat(0, 1, 256) = %v, want ~%v", res1, res0/2)
 	}
 
 	// Resolution at 60° latitude should be cos(60°) ≈ 0.5 of equatorial.
-	res60 := ResolutionAtLat(60, 0)
+	res60 := ResolutionAtLat(60, 0, 256)
 	if math.Abs(res60-res0*0.5)/res0 > 1e-6 {
-		t.Errorf("ResolutionAtLat(60, 0) = %v, want ~%v", res60, res0*0.5)
+		t.Errorf("ResolutionAtLat(60, 0, 256) = %v, want ~%v", res60, res0*0.5)
+	}
+
+	// 512-pixel tiles at the same zoom have half the per-pixel resolution.
+	res512 := ResolutionAtLat(0, 0, 512)
+	if math.Abs(res512-res0/2)/res0 > 1e-6 {
+		t.Errorf("ResolutionAtLat(0, 0, 512) = %v, want ~%v", res512, res0/2)
 	}
 }
 

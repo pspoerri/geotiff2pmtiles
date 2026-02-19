@@ -108,9 +108,10 @@ func PixelToLonLat(z, tileX, tileY, tileSize int, px, py float64) (lon, lat floa
 	return
 }
 
-// ResolutionAtLat returns the ground resolution in meters/pixel at the given latitude and zoom level.
-func ResolutionAtLat(lat float64, zoom int) float64 {
-	return EarthCircumference * math.Cos(lat*math.Pi/180.0) / pow2(zoom) / float64(DefaultTileSize)
+// ResolutionAtLat returns the ground resolution in meters/pixel at the given
+// latitude, zoom level, and tile size.
+func ResolutionAtLat(lat float64, zoom int, tileSize int) float64 {
+	return EarthCircumference * math.Cos(lat*math.Pi/180.0) / pow2(zoom) / float64(tileSize)
 }
 
 // PixelSizeInGroundMeters converts a pixel size from CRS units to ground meters.
