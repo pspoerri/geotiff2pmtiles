@@ -113,7 +113,7 @@ func tileCRSBounds(z, tx, ty int, proj coord.Projection) (minX, minY, maxX, maxY
 func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.TileCache, mode Resampling) *image.RGBA {
 	// Pre-compute the output pixel size in CRS units for selecting the best overview level.
 	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
-	outputResMeters := coord.ResolutionAtLat(midLat, z)
+	outputResMeters := coord.ResolutionAtLat(midLat, z, tileSize)
 	outputResCRS := coord.MetersToPixelSizeCRS(outputResMeters, proj.EPSG(), midLat)
 
 	// Pre-filter sources to only those overlapping this tile.
@@ -1341,7 +1341,7 @@ func bicubicLUT(x float64) float64 {
 // converting elevation values to Terrarium RGB encoding.
 func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.FloatTileCache, mode Resampling) *image.RGBA {
 	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
-	outputResMeters := coord.ResolutionAtLat(midLat, z)
+	outputResMeters := coord.ResolutionAtLat(midLat, z, tileSize)
 	outputResCRS := coord.MetersToPixelSizeCRS(outputResMeters, proj.EPSG(), midLat)
 
 	// Pre-filter sources and pre-compute overview levels for this tile.

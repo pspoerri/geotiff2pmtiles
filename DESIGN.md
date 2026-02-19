@@ -81,12 +81,36 @@ linear interpolation replaces the Catmull-Rom polynomial evaluation (`1.5x³ - 2
 so only the positive half is stored. While the polynomial is cheaper than Lanczos sin()
 calls, at ~3.25s cumulative CPU it was still worth eliminating.
 
+## Nodata handling for image (non-float) data
+
+For single-band GeoTIFF data (e.g. ESA WorldCover land cover classifications), pixels
+matching the GDAL_NODATA value are decoded as transparent (alpha=0) instead of opaque
+black (alpha=255). This is handled in `decodeRawTile` by parsing the nodata string
+from the first IFD and comparing each pixel against it. Only applied for spp≤2
+(single-band and gray+alpha) since multi-band nodata semantics are more complex.
+The nodata value must be an integer in [0, 255] to qualify. This ensures all downstream
+code (resampling, downsampling, encoding) automatically treats nodata areas as
+transparent — bilinear/Lanczos/bicubic already exclude alpha=0 pixels from RGB
+interpolation, and the `hasData` check in `renderTile` correctly identifies empty tiles.
+
+## Tile size in resolution calculation
+
+`ResolutionAtLat()` accepts the actual tile size (e.g. 256 or 512) instead of
+hardcoding `DefaultTileSize=256`. This ensures that `OverviewForZoom` selects the
+correct overview level for non-standard tile sizes. With 512-pixel tiles at zoom z,
+each pixel covers half the ground distance compared to 256-pixel tiles — using the
+wrong tile size caused 2x too coarse overview selection, producing blurry output.
+
 ## image.RGBA sync.Pool
 
 `*image.RGBA` allocations (256 KB each for 256×256 tiles) are pooled via `sync.Pool`
 to reduce GC pressure during tile generation. A `sync.Map` of pools keyed by `(w, h)`
 handles the rare case of multiple tile sizes. `GetRGBA` zeros the pixel buffer with
-`clear()` before returning; `PutRGBA` returns to the pool. Key recycling points:
+`clear()` before returning; `PutRGBA` returns to the pool. Zeroing is critical:
+`renderTile` only writes pixels where source data is found, so unfound pixels must
+be transparent (0,0,0,0) — without clearing, recycled images retain stale pixel
+data from previous tiles, causing visible artifacts at data boundaries. Key recycling
+points:
 - `newTileData`: returns the source RGBA when uniform/gray compaction succeeds
 - `TileData.Release()`: returns internal img after encoding + store in the generator
 - `renderTile`/`renderTileTerrarium`: pool allocation moved after overlap check so

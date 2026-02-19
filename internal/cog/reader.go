@@ -12,6 +12,8 @@ import (
 	"io"
 	"math"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // Bounds represents geographic bounds in WGS84.
@@ -583,10 +585,25 @@ func (r *Reader) decodeJPEGTile(ifd *IFD, data []byte) (image.Image, error) {
 }
 
 // decodeRawTile decodes an uncompressed tile.
+// For single-band data, pixels matching the GDAL nodata value are set to
+// alpha=0 (transparent) so downstream code treats them as empty.
 func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	w := int(ifd.TileWidth)
 	h := int(ifd.TileHeight)
 	spp := int(ifd.SamplesPerPixel)
+
+	var hasNodata bool
+	var nodataVal uint8
+	if spp <= 2 {
+		nd := r.ifds[0].NoData
+		if nd != "" {
+			v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64)
+			if err == nil && v >= 0 && v <= 255 && v == math.Floor(v) {
+				nodataVal = uint8(v)
+				hasNodata = true
+			}
+		}
+	}
 
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
@@ -598,17 +615,25 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			var c color.RGBA
 			switch spp {
 			case 1:
-				// Single-band: replicate to all RGB channels (grayscale).
-				c.R = data[idx]
-				c.G = data[idx]
-				c.B = data[idx]
-				c.A = 255
+				v := data[idx]
+				c.R = v
+				c.G = v
+				c.B = v
+				if hasNodata && v == nodataVal {
+					c.A = 0
+				} else {
+					c.A = 255
+				}
 			case 2:
-				// Gray + Alpha.
-				c.R = data[idx]
-				c.G = data[idx]
-				c.B = data[idx]
-				c.A = data[idx+1]
+				v := data[idx]
+				c.R = v
+				c.G = v
+				c.B = v
+				a := data[idx+1]
+				if hasNodata && v == nodataVal {
+					a = 0
+				}
+				c.A = a
 			default:
 				c.R = data[idx]
 				if spp > 1 {

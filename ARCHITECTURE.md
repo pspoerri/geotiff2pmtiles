@@ -7,7 +7,7 @@ cmd/
   debug/main.go                     Low-level COG debug utility
 internal/
   cog/
-    reader.go                       COG/GeoTIFF tile-level reader (memory-mapped)
+    reader.go                       COG/GeoTIFF tile-level reader (memory-mapped, nodata-aware)
     ifd.go                          TIFF IFD parser
     geotags.go                      GeoTIFF metadata extraction
     tfw.go                          TFW (TIFF World File) parser + EPSG inference
@@ -61,7 +61,8 @@ internal/
 - Memory limit accounts for both encoded tile data and Go map overhead (uniform entries, disk index entries) to prevent actual usage from exceeding the configured limit
 - Map pre-allocation sized to the working set (tiles that fit in memory), not the total tile count, avoiding multi-GB upfront waste on empty hash buckets
 - Uniform tiles (single color) stored as 4 bytes, never spilled to disk
-- `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers instead of allocating/GC'ing per tile
+- `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers (zeroed on get) instead of allocating/GC'ing per tile
+- Single-band nodata pixels decoded as transparent (alpha=0) so resampling/downsampling automatically excludes them
 - Gray tile RGBA expansions (from `AsImage()`) cached in the TileData so `Release()` returns them to the pool
 - PMTiles writer uses temp file for tile data (only directory entries in memory)
 - Pyramid downsampling avoids redundant source reads for lower zoom levels

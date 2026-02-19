@@ -22,6 +22,7 @@ func GetRGBA(w, h int) *image.RGBA {
 	if p, ok := rgbaPools.Load(key); ok {
 		if v := p.(*sync.Pool).Get(); v != nil {
 			img := v.(*image.RGBA)
+			clear(img.Pix)
 			return img
 		}
 	}
