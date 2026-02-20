@@ -63,6 +63,7 @@ internal/
 - Uniform tiles (single color) stored as 4 bytes, never spilled to disk
 - `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers (zeroed on get) instead of allocating/GC'ing per tile
 - Single-band nodata pixels decoded as transparent (alpha=0) so resampling/downsampling automatically excludes them
+- Source fallthrough on nodata: transparent (alpha=0) samples are skipped and the next source is tried, preventing holes in one source from blocking valid data in another and eliminating all-transparent tiles from the pyramid
 - Gray tile RGBA expansions (from `AsImage()`) cached in the TileData so `Release()` returns them to the pool
 - PMTiles writer uses temp file for tile data (only directory entries in memory)
 - Pyramid downsampling avoids redundant source reads for lower zoom levels

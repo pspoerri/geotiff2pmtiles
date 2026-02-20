@@ -91,7 +91,27 @@ from the first IFD and comparing each pixel against it. Only applied for spp≤2
 The nodata value must be an integer in [0, 255] to qualify. This ensures all downstream
 code (resampling, downsampling, encoding) automatically treats nodata areas as
 transparent — bilinear/Lanczos/bicubic already exclude alpha=0 pixels from RGB
-interpolation, and the `hasData` check in `renderTile` correctly identifies empty tiles.
+interpolation, and `sampleFromTileSources` skips fully transparent results to try the
+next source (see below).
+
+## Nodata-aware source fallthrough
+
+`sampleFromTileSources` skips results with alpha=0 and continues to the next source
+instead of returning them as "found". This is critical for two reasons:
+
+1. **Multi-source hole filling**: When source A has nodata at a location but source B
+   has valid data, source A's transparent pixel must not block source B from contributing.
+   Without this check, the first source whose bounding box covers the coordinate "wins"
+   even if it has no actual data there (e.g. empty COG tiles within the raster extent,
+   or pixels matching the GDAL_NODATA value).
+
+2. **Empty tile elimination**: Tiles that fall entirely within a source's bounding box
+   but contain only nodata/transparent pixels are correctly detected as empty
+   (`renderTile` returns nil, `hasData` stays false). This prevents a cascade of
+   falsely non-empty tiles through the entire zoom pyramid during downsampling, and
+   avoids encoding/writing tiles that carry no visible information — especially
+   important for JPEG output which cannot represent transparency (nodata areas would
+   appear as solid black).
 
 ## Tile size in resolution calculation
 
