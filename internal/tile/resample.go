@@ -193,8 +193,8 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 		var err error
 
 		switch mode {
-		case ResamplingNearest:
-			rr, gg, bb, aa, err = nearestSampleCached(src.reader, src.level, pixX, pixY, cache)
+		case ResamplingNearest, ResamplingMode:
+			rr, gg, bb, aa, err = nearestSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
 		case ResamplingLanczos:
 			rr, gg, bb, aa, err = lanczosSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
 		case ResamplingBicubic:
@@ -215,9 +215,13 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 }
 
 // nearestSampleCached reads the nearest (closest) source pixel.
-func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
-	px := int(math.Floor(fx + 0.5))
-	py := int(math.Floor(fy + 0.5))
+// imgW and imgH are the image dimensions at this level, used to clamp
+// the rounded pixel coordinate so it never exceeds the valid range.
+// Without clamping, Floor(fx+0.5) can produce imgW when fx >= imgW-0.5,
+// reading from the zero-padded overhang of the last COG tile.
+func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
+	px := clamp(int(math.Floor(fx+0.5)), 0, imgW-1)
+	py := clamp(int(math.Floor(fy+0.5)), 0, imgH-1)
 
 	p, err := readPixelCached(src, level, px, py, cache)
 	if err != nil {
@@ -1424,8 +1428,8 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, sr
 		var err error
 
 		switch mode {
-		case ResamplingNearest:
-			val, err = nearestSampleFloat(src.reader, src.level, pixX, pixY, cache)
+		case ResamplingNearest, ResamplingMode:
+			val, err = nearestSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
 		case ResamplingLanczos:
 			val, err = lanczosSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
 		case ResamplingBicubic:
@@ -1453,9 +1457,10 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, sr
 }
 
 // nearestSampleFloat reads the nearest float pixel.
-func nearestSampleFloat(src *cog.Reader, level int, fx, fy float64, cache *cog.FloatTileCache) (float64, error) {
-	px := int(math.Floor(fx + 0.5))
-	py := int(math.Floor(fy + 0.5))
+// imgW and imgH clamp the rounded coordinate (see nearestSampleCached).
+func nearestSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.FloatTileCache) (float64, error) {
+	px := clamp(int(math.Floor(fx+0.5)), 0, imgW-1)
+	py := clamp(int(math.Floor(fy+0.5)), 0, imgH-1)
 	return readFloatPixelCached(src, level, px, py, cache)
 }
 

@@ -185,6 +185,8 @@ func downsampleTileGray(children [4]*TileData, tileSize int, mode Resampling) *T
 		switch mode {
 		case ResamplingNearest:
 			downsampleQuadrantGrayNearest(dst, q.src, q.dstX, q.dstY, half, tileSize)
+		case ResamplingMode:
+			downsampleQuadrantGrayMode(dst, q.src, q.dstX, q.dstY, half, tileSize)
 		case ResamplingLanczos:
 			downsampleQuadrantGrayLanczos(dst, q.src, q.dstX, q.dstY, half, tileSize)
 		case ResamplingBicubic:
@@ -199,6 +201,84 @@ func downsampleTileGray(children [4]*TileData, tileSize int, mode Resampling) *T
 		return newTileDataUniform(color.RGBA{R: c, G: c, B: c, A: 255}, tileSize)
 	}
 	return &TileData{gray: dst, tileSize: tileSize}
+}
+
+// downsampleQuadrantGrayMode picks the most common value from each 2×2 block
+// of gray pixels. Ties prefer the top-left value. Designed for categorical
+// rasters where interpolated values are meaningless.
+func downsampleQuadrantGrayMode(dst *image.Gray, src *image.Gray, dstOffX, dstOffY, half, tileSize int) {
+	srcStride := src.Stride
+	dstStride := dst.Stride
+	srcPix := src.Pix
+	dstPix := dst.Pix
+	for dy := 0; dy < half; dy++ {
+		sy := dy * 2
+		sy1 := sy + 1
+		if sy >= tileSize {
+			sy = tileSize - 1
+		}
+		if sy1 >= tileSize {
+			sy1 = tileSize - 1
+		}
+		srcRow0 := sy * srcStride
+		srcRow1 := sy1 * srcStride
+		dstRowOff := (dstOffY + dy) * dstStride
+		for dx := 0; dx < half; dx++ {
+			sx := dx * 2
+			sx1 := sx + 1
+			if sx >= tileSize {
+				sx = tileSize - 1
+			}
+			if sx1 >= tileSize {
+				sx1 = tileSize - 1
+			}
+			dstPix[dstRowOff+dstOffX+dx] = modeGray(
+				srcPix[srcRow0+sx],
+				srcPix[srcRow0+sx1],
+				srcPix[srcRow1+sx],
+				srcPix[srcRow1+sx1],
+			)
+		}
+	}
+}
+
+// modeGray returns the most frequent value among 4 gray pixels.
+// Ties prefer the first value (top-left bias).
+func modeGray(a, b, c, d uint8) uint8 {
+	// Count occurrences of a (always at least 1).
+	ca := 1
+	if b == a {
+		ca++
+	}
+	if c == a {
+		ca++
+	}
+	if d == a {
+		ca++
+	}
+	if ca >= 2 {
+		return a
+	}
+
+	// a appears once. Check b.
+	cb := 1
+	if c == b {
+		cb++
+	}
+	if d == b {
+		cb++
+	}
+	if cb >= 2 {
+		return b
+	}
+
+	// a, b each appear once. Check c==d.
+	if c == d {
+		return c
+	}
+
+	// All four are distinct — return a (top-left).
+	return a
 }
 
 // downsampleQuadrantGrayNearest picks the top-left pixel from each 2×2 block.
@@ -371,6 +451,8 @@ func downsampleQuadrant(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half
 	switch mode {
 	case ResamplingNearest:
 		downsampleQuadrantNearest(dst, src, dstOffX, dstOffY, half, tileSize)
+	case ResamplingMode:
+		downsampleQuadrantMode(dst, src, dstOffX, dstOffY, half, tileSize)
 	case ResamplingLanczos:
 		downsampleQuadrantLanczos(dst, src, dstOffX, dstOffY, half, tileSize)
 	case ResamplingBicubic:
@@ -384,7 +466,7 @@ func downsampleQuadrant(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half
 // Decodes Terrarium RGB → elevation, averages valid values, re-encodes to Terrarium RGB.
 func downsampleQuadrantTerrarium(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int, mode Resampling) {
 	switch mode {
-	case ResamplingNearest:
+	case ResamplingNearest, ResamplingMode:
 		downsampleQuadrantTerrariumNearest(dst, src, dstOffX, dstOffY, half, tileSize)
 		return
 	case ResamplingLanczos:
@@ -684,6 +766,68 @@ func downsampleQuadrantBicubic(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 			dstPix[dstOff+3] = clampByte(aSum / wTotal)
 		}
 	}
+}
+
+// downsampleQuadrantMode picks the most common RGBA value from each 2×2
+// source block. Ties are broken by taking the first value encountered
+// (top-left bias). Designed for categorical/classified rasters where
+// interpolated values are meaningless.
+func downsampleQuadrantMode(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
+	for dy := 0; dy < half; dy++ {
+		for dx := 0; dx < half; dx++ {
+			sx := dx * 2
+			sy := dy * 2
+
+			p00 := srcPixel(src, sx, sy, tileSize)
+			p10 := srcPixel(src, sx+1, sy, tileSize)
+			p01 := srcPixel(src, sx, sy+1, tileSize)
+			p11 := srcPixel(src, sx+1, sy+1, tileSize)
+
+			dst.SetRGBA(dstOffX+dx, dstOffY+dy, modeRGBA(p00, p10, p01, p11))
+		}
+	}
+}
+
+// modeRGBA returns the most frequent color among up to 4 RGBA pixels.
+// Transparent pixels (alpha == 0) are ignored. If all are transparent,
+// returns transparent black. Ties prefer the earlier pixel.
+func modeRGBA(a, b, c, d color.RGBA) color.RGBA {
+	type entry struct {
+		c     color.RGBA
+		count int
+	}
+	var buf [4]entry
+	n := 0
+
+	for _, p := range [4]color.RGBA{a, b, c, d} {
+		if p.A == 0 {
+			continue
+		}
+		found := false
+		for i := 0; i < n; i++ {
+			if buf[i].c == p {
+				buf[i].count++
+				found = true
+				break
+			}
+		}
+		if !found {
+			buf[n] = entry{p, 1}
+			n++
+		}
+	}
+
+	if n == 0 {
+		return color.RGBA{}
+	}
+
+	best := 0
+	for i := 1; i < n; i++ {
+		if buf[i].count > buf[best].count {
+			best = i
+		}
+	}
+	return buf[best].c
 }
 
 // downsampleQuadrantNearest picks the top-left pixel from each 2x2 block.

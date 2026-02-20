@@ -37,6 +37,13 @@ const (
 	// a 4×4 pixel neighborhood. Sharper than bilinear with less ringing
 	// and lower cost than Lanczos.
 	ResamplingBicubic
+	// ResamplingMode picks the most common (modal) value in the
+	// neighborhood. Ideal for categorical/classified rasters (e.g. land
+	// cover) where interpolated values are meaningless. At the max zoom
+	// level (COG rendering) it behaves like nearest-neighbor; during
+	// pyramid downsampling it selects the most frequent pixel in each
+	// 2×2 block.
+	ResamplingMode
 )
 
 // ParseResampling converts a string to a Resampling constant.
@@ -50,8 +57,10 @@ func ParseResampling(s string) (Resampling, error) {
 		return ResamplingBilinear, nil
 	case "nearest":
 		return ResamplingNearest, nil
+	case "mode":
+		return ResamplingMode, nil
 	default:
-		return 0, fmt.Errorf("unknown resampling method %q (supported: lanczos, bicubic, bilinear, nearest)", s)
+		return 0, fmt.Errorf("unknown resampling method %q (supported: lanczos, bicubic, bilinear, nearest, mode)", s)
 	}
 }
 

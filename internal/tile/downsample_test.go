@@ -376,6 +376,142 @@ func TestDownsampleTile_NilAndUniform(t *testing.T) {
 	}
 }
 
+func TestDownsampleTile_Mode_SolidColor(t *testing.T) {
+	tileSize := 256
+	red := color.RGBA{200, 0, 0, 255}
+
+	child := solidTile(tileSize, red)
+	result := downsampleTile(child, child, child, child, tileSize, ResamplingMode)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.IsUniform() {
+		t.Error("expected uniform result for 4 identical solid children")
+	}
+	if result.Color() != red {
+		t.Errorf("color = %v, want %v", result.Color(), red)
+	}
+}
+
+func TestDownsampleTile_Mode_FourDistinctColors(t *testing.T) {
+	tileSize := 4
+
+	red := solidTile(tileSize, color.RGBA{200, 0, 0, 255})
+	green := solidTile(tileSize, color.RGBA{0, 200, 0, 255})
+	blue := solidTile(tileSize, color.RGBA{0, 0, 200, 255})
+	yellow := solidTile(tileSize, color.RGBA{200, 200, 0, 255})
+
+	result := downsampleTile(red, green, blue, yellow, tileSize, ResamplingMode)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	half := tileSize / 2
+
+	c := result.RGBAAt(0, 0)
+	if c.R < 190 || c.G > 10 || c.B > 10 {
+		t.Errorf("top-left quadrant = %v, want red", c)
+	}
+	c = result.RGBAAt(half, 0)
+	if c.R > 10 || c.G < 190 || c.B > 10 {
+		t.Errorf("top-right quadrant = %v, want green", c)
+	}
+	c = result.RGBAAt(0, half)
+	if c.R > 10 || c.G > 10 || c.B < 190 {
+		t.Errorf("bottom-left quadrant = %v, want blue", c)
+	}
+	c = result.RGBAAt(half, half)
+	if c.R < 190 || c.G < 190 || c.B > 10 {
+		t.Errorf("bottom-right quadrant = %v, want yellow", c)
+	}
+}
+
+func TestDownsampleTile_Mode_PicksMajority(t *testing.T) {
+	tileSize := 4
+
+	// Create a tile where 3 out of 4 pixels in each 2×2 block are red,
+	// and 1 is blue. Mode should pick red.
+	red := color.RGBA{200, 0, 0, 255}
+	blue := color.RGBA{0, 0, 200, 255}
+
+	img := solidImage(tileSize, red)
+	// Set one pixel per 2×2 block to blue (bottom-right corner).
+	img.SetRGBA(1, 1, blue)
+	img.SetRGBA(3, 1, blue)
+	img.SetRGBA(1, 3, blue)
+	img.SetRGBA(3, 3, blue)
+
+	child := fullTile(img, tileSize)
+	result := downsampleTile(child, child, child, child, tileSize, ResamplingMode)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// All output pixels in the top-left quadrant should be red (3/4 majority).
+	for y := 0; y < tileSize/2; y++ {
+		for x := 0; x < tileSize/2; x++ {
+			c := result.RGBAAt(x, y)
+			if c != red {
+				t.Fatalf("pixel (%d,%d) = %v, want %v (mode=red majority)", x, y, c, red)
+			}
+		}
+	}
+}
+
+func TestModeGray(t *testing.T) {
+	tests := []struct {
+		name       string
+		a, b, c, d uint8
+		want       uint8
+	}{
+		{"all same", 10, 10, 10, 10, 10},
+		{"3 same a", 10, 10, 10, 20, 10},
+		{"3 same b", 10, 20, 20, 20, 20},
+		{"2 pairs prefer first", 10, 10, 20, 20, 10},
+		{"2 same c/d", 10, 20, 30, 30, 30},
+		{"all distinct", 10, 20, 30, 40, 10},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := modeGray(tt.a, tt.b, tt.c, tt.d)
+			if got != tt.want {
+				t.Errorf("modeGray(%d,%d,%d,%d) = %d, want %d",
+					tt.a, tt.b, tt.c, tt.d, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestModeRGBA(t *testing.T) {
+	red := color.RGBA{200, 0, 0, 255}
+	blue := color.RGBA{0, 0, 200, 255}
+	transparent := color.RGBA{0, 0, 0, 0}
+
+	// 3 red, 1 blue -> red
+	got := modeRGBA(red, red, red, blue)
+	if got != red {
+		t.Errorf("3 red, 1 blue: got %v, want %v", got, red)
+	}
+
+	// 2 red, 2 blue -> red (first wins tie)
+	got = modeRGBA(red, blue, red, blue)
+	if got != red {
+		t.Errorf("2 red, 2 blue: got %v, want %v", got, red)
+	}
+
+	// Transparent pixels are excluded
+	got = modeRGBA(transparent, blue, transparent, blue)
+	if got != blue {
+		t.Errorf("2 transparent, 2 blue: got %v, want %v", got, blue)
+	}
+
+	// All transparent -> transparent
+	got = modeRGBA(transparent, transparent, transparent, transparent)
+	if got != transparent {
+		t.Errorf("all transparent: got %v, want transparent", got)
+	}
+}
+
 func abs(x int) int {
 	if x < 0 {
 		return -x
