@@ -206,6 +206,9 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 		if err != nil {
 			continue
 		}
+		if aa == 0 {
+			continue // nodata/transparent — try next source
+		}
 		return rr, gg, bb, aa, true
 	}
 	return 0, 0, 0, 0, false
