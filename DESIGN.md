@@ -162,6 +162,33 @@ memory limit check.
 256 KB RGBA via `GetRGBA()` that was never returned to the pool. Fixed by caching the
 expanded image in `t.img` so that `Release()` returns it.
 
+## Mode (most common value) resampling
+
+For categorical/classified rasters (e.g. ESA WorldCover land cover), interpolation
+methods like bilinear or Lanczos produce values that don't correspond to any valid
+class. Mode resampling (`--resampling mode`) picks the most frequently occurring
+value in each 2×2 block during pyramid downsampling, preserving the dominant category
+at each zoom level. At the max zoom level (COG rendering), mode behaves like
+nearest-neighbor since each output pixel maps to approximately one source pixel.
+
+For the gray fast path, a branchless counting approach determines the mode of 4 uint8
+values without heap allocation. For RGBA, a small stack-allocated array of up to 4
+entries avoids maps. Ties prefer the earlier pixel (top-left bias) for deterministic
+output. Transparent pixels (alpha == 0) are excluded from the vote so nodata areas
+don't dominate the result.
+
+## Nearest-neighbor edge clamping
+
+`nearestSampleCached` and `nearestSampleFloat` compute the integer pixel via
+`Floor(fx + 0.5)` (round-to-nearest). The caller's bounds check ensures
+`pixX ∈ [0, imgW)`, but when `pixX >= imgW - 0.5` the rounding produces
+`px = imgW` — one past the last valid pixel. TIFF tiles extend to a multiple
+of the tile width, so the read succeeds but returns zero-padded data, creating
+a ~1 px band of wrong values at the right/bottom edge of every source file.
+Fixed by adding `imgW`/`imgH` parameters and clamping `px`/`py` to
+`[0, imgW-1]`/`[0, imgH-1]`, matching the approach already used by the
+bilinear, bicubic, and Lanczos sampling functions.
+
 ## Horizontal differencing predictor
 
 LZW and Deflate compressed TIFFs may use a horizontal differencing predictor
