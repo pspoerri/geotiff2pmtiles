@@ -31,7 +31,7 @@ MEM_LIMIT  ?= 0
         test test-race test-cover bench \
         lint fmt vet tidy check \
         clean clean-all \
-        run demo demo-full-disk demo-profile pprof-cpu pprof-mem \
+        run demo demo-all demo-full-disk demo-profile pprof-cpu pprof-mem \
         demo-jpeg demo-png demo-webp \
         demo-full-disk-jpeg demo-full-disk-png demo-full-disk-webp \
         demo-tfw demo-tfw-full-disk \
@@ -109,6 +109,13 @@ check: fmt vet test
 ## run: Build and run with ARGS (e.g. make run ARGS="--verbose data/ out.pmtiles")
 run: build
 	./$(OUTPUT) $(ARGS)
+
+## demo-all: Run all demos (all formats, full-disk, TFW, and transform)
+demo-all: demo-jpeg demo-png demo-webp \
+          demo-full-disk-jpeg demo-full-disk-png demo-full-disk-webp \
+          demo-tfw-jpeg demo-tfw-png demo-tfw-webp \
+          demo-tfw-full-disk-jpeg demo-tfw-full-disk-png demo-tfw-full-disk-webp \
+          demo-transform demo-transform-reencode demo-transform-rebuild
 
 ## demo: Build and run a demonstration with the sample data directory
 demo: build
@@ -325,6 +332,7 @@ help:
 	@echo "  make build                           Build geotiff2pmtiles"
 	@echo "  make build-transform                 Build pmtransform"
 	@echo "  make build-all                       Build both binaries"
+	@echo "  make demo-all                        Run every demo target"
 	@echo "  make demo MIN_ZOOM=16 MAX_ZOOM=18    Run demo at zoom 16-18"
 	@echo "  make demo-png QUALITY=100             Run demo with PNG"
 	@echo "  make demo-full-disk                   Demo with full disk spilling (1 MB limit)"

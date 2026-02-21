@@ -66,6 +66,7 @@ Or using the Makefile:
 make build            # geotiff2pmtiles only
 make build-transform  # pmtransform only
 make build-all        # both binaries
+make demo-all         # run every demo target
 ```
 
 ### Cross-compilation
