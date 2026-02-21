@@ -196,3 +196,25 @@ LZW and Deflate compressed TIFFs may use a horizontal differencing predictor
 same row. After decompression, the predictor is reversed by accumulating the deltas
 row-by-row. This applies to both tile-based and strip-based reads. Without this step,
 pixel values are raw deltas, producing garbled imagery.
+
+## pmtransform: separate binary
+
+`pmtransform` is a standalone CLI rather than a subcommand of `geotiff2pmtiles`. The
+GeoTIFF-to-PMTiles pipeline involves CRS detection, reprojection, and COG tile caching —
+none of which apply when transforming an existing PMTiles archive. Keeping them as separate
+binaries avoids bloating either tool with the other's concerns and makes the usage
+clear: `geotiff2pmtiles` for initial conversion, `pmtransform` for post-processing.
+
+## pmtransform: passthrough fast path
+
+When no format change or resampling is needed (e.g. just removing zoom levels), raw tile
+bytes are copied from the source archive to the output without decoding or re-encoding.
+This avoids lossy re-compression artifacts and is significantly faster.
+
+## pmtransform: max-zoom anchored rebuild
+
+When rebuilding the pyramid (resampling change or adding lower zoom levels), the tool
+reads max-zoom tiles from the source archive and uses them as the base layer. Lower zoom
+levels are then rebuilt by downsampling from the level above — exactly matching how
+`geotiff2pmtiles` works with COG sources. This ensures consistent quality across the
+pyramid regardless of what resampling was used in the original archive.

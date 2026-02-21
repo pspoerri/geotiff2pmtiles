@@ -87,6 +87,17 @@ jobs:
             -o dist/geotiff2pmtiles-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/geotiff2pmtiles/
 
+      - name: Build pmtransform
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build \
+            -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }}" \
+            -o dist/pmtransform-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./cmd/pmtransform/
+
       - name: Build coginfo
         env:
           GOOS: ${{ matrix.goos }}

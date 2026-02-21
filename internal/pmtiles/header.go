@@ -2,6 +2,7 @@ package pmtiles
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
@@ -116,8 +117,71 @@ func (h *Header) Serialize() []byte {
 	return buf
 }
 
+// DeserializeHeader parses a 127-byte PMTiles v3 header.
+func DeserializeHeader(buf []byte) (Header, error) {
+	if len(buf) < HeaderSize {
+		return Header{}, fmt.Errorf("header too short: %d bytes (need %d)", len(buf), HeaderSize)
+	}
+
+	if string(buf[0:7]) != "PMTiles" {
+		return Header{}, fmt.Errorf("invalid magic bytes: %q", buf[0:7])
+	}
+	if buf[7] != 3 {
+		return Header{}, fmt.Errorf("unsupported PMTiles version: %d (expected 3)", buf[7])
+	}
+
+	h := Header{
+		RootDirOffset:       binary.LittleEndian.Uint64(buf[8:16]),
+		RootDirLength:       binary.LittleEndian.Uint64(buf[16:24]),
+		MetadataOffset:      binary.LittleEndian.Uint64(buf[24:32]),
+		MetadataLength:      binary.LittleEndian.Uint64(buf[32:40]),
+		LeafDirOffset:       binary.LittleEndian.Uint64(buf[40:48]),
+		LeafDirLength:       binary.LittleEndian.Uint64(buf[48:56]),
+		TileDataOffset:      binary.LittleEndian.Uint64(buf[56:64]),
+		TileDataLength:      binary.LittleEndian.Uint64(buf[64:72]),
+		NumAddressedTiles:   binary.LittleEndian.Uint64(buf[72:80]),
+		NumTileEntries:      binary.LittleEndian.Uint64(buf[80:88]),
+		NumTileContents:     binary.LittleEndian.Uint64(buf[88:96]),
+		Clustered:           buf[96] == 1,
+		InternalCompression: buf[97],
+		TileCompression:     buf[98],
+		TileType:            buf[99],
+		MinZoom:             buf[100],
+		MaxZoom:             buf[101],
+		MinLon:              e7ToLonLat(binary.LittleEndian.Uint32(buf[102:106])),
+		MinLat:              e7ToLonLat(binary.LittleEndian.Uint32(buf[106:110])),
+		MaxLon:              e7ToLonLat(binary.LittleEndian.Uint32(buf[110:114])),
+		MaxLat:              e7ToLonLat(binary.LittleEndian.Uint32(buf[114:118])),
+		CenterZoom:          buf[118],
+		CenterLon:           e7ToLonLat(binary.LittleEndian.Uint32(buf[119:123])),
+		CenterLat:           e7ToLonLat(binary.LittleEndian.Uint32(buf[123:127])),
+	}
+
+	return h, nil
+}
+
+// TileTypeString returns a human-readable name for a tile type constant.
+func TileTypeString(t uint8) string {
+	switch t {
+	case TileTypeMVT:
+		return "mvt"
+	case TileTypePNG:
+		return "png"
+	case TileTypeJPEG:
+		return "jpeg"
+	case TileTypeWebP:
+		return "webp"
+	default:
+		return "unknown"
+	}
+}
+
 func lonLatToE7(v float32) uint32 {
 	return uint32(int32(math.Round(float64(v) * 1e7)))
+}
+
+func e7ToLonLat(v uint32) float32 {
+	return float32(float64(int32(v)) / 1e7)
 }
 
 // WriterOptions holds configuration for the PMTiles writer.

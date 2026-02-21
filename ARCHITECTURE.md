@@ -2,7 +2,8 @@
 
 ```
 cmd/
-  geotiff2pmtiles/main.go          CLI entry point
+  geotiff2pmtiles/main.go          CLI: GeoTIFF/COG → PMTiles conversion
+  pmtransform/main.go              CLI: PMTiles → PMTiles transformation
   coginfo/main.go                   COG metadata inspector
   debug/main.go                     Low-level COG debug utility
 internal/
@@ -19,7 +20,8 @@ internal/
     projection.go                   Extensible projection interface
     hilbert.go                      Hilbert curve for spatial tile ordering
   tile/
-    generator.go                    Parallel tile generation pipeline
+    generator.go                    Parallel tile generation pipeline (GeoTIFF sources)
+    transform.go                    PMTiles transform pipeline (passthrough/re-encode/rebuild)
     resample.go                     Lanczos/bicubic/bilinear/nearest/mode interpolation + reprojection (LUT-accelerated)
     downsample.go                   Pyramid downsampling for lower zoom levels
     diskstore.go                    Disk-backed tile store with memory backpressure
@@ -36,8 +38,9 @@ internal/
     terrarium.go                    Terrarium encoder for elevation data
   pmtiles/
     writer.go                       PMTiles v3 two-pass writer with tile clustering
-    header.go                       Header serialization (127 bytes)
-    directory.go                    Hilbert-curve tile IDs + directory compression
+    reader.go                       PMTiles v3 reader (header, directory, tile data)
+    header.go                       Header serialization/deserialization (127 bytes)
+    directory.go                    Hilbert-curve tile IDs, directory serialization/deserialization
 ```
 
 ## Pipeline
@@ -51,6 +54,19 @@ internal/
 7. **Downsample (lower zooms)**: Combine 4 child tiles into parent tiles via pyramid downsampling
 8. **Encode**: JPEG/PNG/WebP/Terrarium encoding
 9. **Write**: Two-pass PMTiles assembly (temp file for tile data, then final archive with clustering)
+
+## Transform Pipeline (pmtransform)
+
+`pmtransform` reads an existing PMTiles archive and produces a new one with modifications.
+The original file is never touched. Three processing modes are selected automatically:
+
+1. **Passthrough**: No format or zoom change — raw tile bytes are copied directly (fastest)
+2. **Re-encode**: Format changes (e.g. WebP → PNG) — each tile is decoded and re-encoded
+3. **Rebuild pyramid**: Zoom range extension or `--rebuild` flag — max-zoom tiles are decoded,
+   then the entire lower-zoom pyramid is rebuilt via downsampling with the chosen resampling method
+
+Empty tile filling (`--fill-color`) generates solid-color tiles for positions within the
+archive bounds that have no data.
 
 ## Memory Efficiency
 

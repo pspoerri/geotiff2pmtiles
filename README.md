@@ -1,6 +1,7 @@
 # GeoTIFF to PMTiles
 
-A memory-efficient tool that converts GeoTIFF/COG files into PMTiles v3 archives.
+A memory-efficient toolset for working with PMTiles v3 archives: convert GeoTIFF/COG files
+and transform existing archives (change format, zoom levels, resampling, fill empty tiles).
 
 For more information on the PMTiles format, see the [PMTiles documentation](https://docs.protomaps.com/pmtiles/).
 
@@ -56,12 +57,15 @@ sudo dnf install libwebp-devel
 
 ```bash
 go build -o geotiff2pmtiles ./cmd/geotiff2pmtiles/
+go build -o pmtransform ./cmd/pmtransform/
 ```
 
 Or using the Makefile:
 
 ```bash
-make build
+make build            # geotiff2pmtiles only
+make build-transform  # pmtransform only
+make build-all        # both binaries
 ```
 
 ### Cross-compilation
@@ -144,6 +148,65 @@ Convert a plain TIFF with TFW world file (global Natural Earth data):
 
 ```bash
 ./geotiff2pmtiles --format webp --max-zoom 6 data_tfw/ output.pmtiles
+```
+
+## pmtransform
+
+Transform an existing PMTiles archive: change format, zoom levels, resampling,
+or fill empty tiles. Always creates a new file — the original is never modified.
+
+```
+pmtransform [flags] <input.pmtiles> <output.pmtiles>
+```
+
+### Flags
+
+| Flag            | Default       | Description                                        |
+| --------------- | ------------- | -------------------------------------------------- |
+| `--format`      | keep source   | Target tile encoding: `jpeg`, `png`, `webp`        |
+| `--quality`     | `85`          | JPEG/WebP quality (1-100)                          |
+| `--min-zoom`    | keep source   | Minimum zoom level                                 |
+| `--max-zoom`    | keep source   | Maximum zoom level                                 |
+| `--tile-size`   | `256`         | Output tile size in pixels                         |
+| `--resampling`  | `bicubic`     | Interpolation method: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
+| `--rebuild`     | `false`       | Force full pyramid rebuild (for resampling changes) |
+| `--fill-color`  |               | Fill empty tiles with RGBA color, e.g. `"0,0,0,255"` or `"#000000ff"` |
+| `--concurrency` | `NumCPU`      | Number of parallel workers                         |
+| `--mem-limit`   | auto          | Tile store memory limit in MB (0 = auto ~90% of RAM) |
+| `--no-spill`    | `false`       | Disable disk spilling                              |
+| `--verbose`     | `false`       | Verbose progress output                            |
+| `--version`     |               | Print version and exit                             |
+
+### Examples
+
+Convert WebP tiles to PNG format:
+
+```bash
+./pmtransform --format png input.pmtiles output.pmtiles
+```
+
+Extend zoom range by adding lower zoom levels (rebuilds pyramid):
+
+```bash
+./pmtransform --min-zoom 8 --verbose input.pmtiles output.pmtiles
+```
+
+Rebuild the entire pyramid with Lanczos resampling:
+
+```bash
+./pmtransform --rebuild --resampling lanczos input.pmtiles output.pmtiles
+```
+
+Fill empty tile positions with transparent black:
+
+```bash
+./pmtransform --fill-color "0,0,0,0" input.pmtiles output.pmtiles
+```
+
+Remove higher zoom levels (keep only z10-z14):
+
+```bash
+./pmtransform --min-zoom 10 --max-zoom 14 input.pmtiles output.pmtiles
 ```
 
 ## Utilities
