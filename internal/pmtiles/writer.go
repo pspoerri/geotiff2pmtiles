@@ -312,11 +312,25 @@ func (w *Writer) buildMetadata() []byte {
 		tileFormatStr = "webp"
 	}
 
+	name := w.opts.Name
+	if name == "" {
+		name = "geotiff2pmtiles"
+	}
+	description := w.opts.Description
+	if description == "" {
+		description = "Generated from GeoTIFF files"
+	}
+
+	layerType := w.opts.Type
+	if layerType == "" {
+		layerType = "baselayer"
+	}
+
 	meta := map[string]interface{}{
-		"name":        "geotiff2pmtiles",
-		"description": "Generated from GeoTIFF files",
+		"name":        name,
+		"description": description,
 		"format":      tileFormatStr,
-		"type":        "baselayer",
+		"type":        layerType,
 		"minzoom":     fmt.Sprintf("%d", w.opts.MinZoom),
 		"maxzoom":     fmt.Sprintf("%d", w.opts.MaxZoom),
 		"bounds": fmt.Sprintf("%.6f,%.6f,%.6f,%.6f",
@@ -326,6 +340,10 @@ func (w *Writer) buildMetadata() []byte {
 			(w.opts.Bounds.MinLon+w.opts.Bounds.MaxLon)/2,
 			(w.opts.Bounds.MinLat+w.opts.Bounds.MaxLat)/2,
 			(w.opts.MinZoom+w.opts.MaxZoom)/2),
+	}
+
+	if w.opts.Attribution != "" {
+		meta["attribution"] = w.opts.Attribution
 	}
 
 	data, _ := json.Marshal(meta)

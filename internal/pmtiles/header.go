@@ -194,4 +194,15 @@ type WriterOptions struct {
 	// TempDir is the directory for temporary tile data files.
 	// Defaults to the output file's directory when empty.
 	TempDir string
+	// Name is the archive name for the metadata JSON.
+	// Defaults to "geotiff2pmtiles" when empty.
+	Name string
+	// Description is stored in the PMTiles metadata JSON.
+	// When empty, defaults to "Generated from GeoTIFF files".
+	Description string
+	// Attribution is a string crediting data sources, displayed by map renderers.
+	Attribution string
+	// Type categorizes the tileset: "baselayer" or "overlay".
+	// Defaults to "baselayer" when empty.
+	Type string
 }

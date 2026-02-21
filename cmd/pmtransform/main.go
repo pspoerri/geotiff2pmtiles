@@ -43,6 +43,8 @@ func main() {
 		noSpill     bool
 		fillColor   string
 		rebuild     bool
+		attribution string
+		layerType   string
 	)
 
 	flag.StringVar(&format, "format", "", "Target tile encoding: jpeg, png, webp (default: keep source format)")
@@ -60,6 +62,8 @@ func main() {
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
 	flag.StringVar(&fillColor, "fill-color", "", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\"")
 	flag.BoolVar(&rebuild, "rebuild", false, "Force full pyramid rebuild (required for resampling changes)")
+	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (default: keep source)")
+	flag.StringVar(&layerType, "type", "", "Layer type: baselayer, overlay (default: keep source)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: pmtransform [flags] <input.pmtiles> <output.pmtiles>\n\n")
@@ -133,6 +137,32 @@ func main() {
 
 	srcHeader := reader.Header()
 	srcFormat := pmtiles.TileTypeString(srcHeader.TileType)
+
+	// Read source metadata for description/attribution/type propagation.
+	var srcDescription, srcAttribution, srcType string
+	if srcMeta, err := reader.ReadMetadata(); err != nil {
+		if verbose {
+			log.Printf("Warning: could not read source metadata: %v", err)
+		}
+	} else if srcMeta != nil {
+		if v, ok := srcMeta["description"].(string); ok {
+			srcDescription = v
+		}
+		if v, ok := srcMeta["attribution"].(string); ok {
+			srcAttribution = v
+		}
+		if v, ok := srcMeta["type"].(string); ok {
+			srcType = v
+		}
+	}
+
+	// Carry forward source attribution and type when not explicitly overridden.
+	if attribution == "" {
+		attribution = srcAttribution
+	}
+	if layerType == "" {
+		layerType = srcType
+	}
 
 	if verbose {
 		log.Printf("Opened %s: %d tiles, zoom %d-%d, format %s, bounds [%.4f,%.4f,%.4f,%.4f]",
@@ -254,14 +284,22 @@ func main() {
 		OutputDir:        outputDir,
 	}
 
+	// Build description with processing steps prepended to source description.
+	description := buildTransformDescription(srcDescription, srcHeader, mode, srcFormat, format, quality,
+		tileSize, minZoom, maxZoom, resampling, fc)
+
 	// Create PMTiles writer.
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
-		MinZoom:    minZoom,
-		MaxZoom:    maxZoom,
-		Bounds:     cog.Bounds{MinLon: float64(bounds[0]), MinLat: float64(bounds[1]), MaxLon: float64(bounds[2]), MaxLat: float64(bounds[3])},
-		TileFormat: enc.PMTileType(),
-		TileSize:   tileSize,
-		TempDir:    outputDir,
+		MinZoom:     minZoom,
+		MaxZoom:     maxZoom,
+		Bounds:      cog.Bounds{MinLon: float64(bounds[0]), MinLat: float64(bounds[1]), MaxLon: float64(bounds[2]), MaxLat: float64(bounds[3])},
+		TileFormat:  enc.PMTileType(),
+		TileSize:    tileSize,
+		TempDir:     outputDir,
+		Name:        "pmtransform",
+		Description: description,
+		Attribution: attribution,
+		Type:        layerType,
 	})
 	if err != nil {
 		log.Fatalf("Creating PMTiles writer: %v", err)
@@ -365,6 +403,58 @@ func parseHexColor(s string) (color.RGBA, error) {
 	}
 
 	return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a)}, nil
+}
+
+func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
+	mode tile.TransformMode, srcFormat, targetFormat string, quality int,
+	tileSize, minZoom, maxZoom int, resampling string, fc *color.RGBA) string {
+
+	var b strings.Builder
+
+	b.WriteString(fmt.Sprintf("Processing: pmtransform %s\n", version))
+
+	modeStr := "passthrough"
+	switch mode {
+	case tile.TransformReencode:
+		modeStr = "re-encode"
+	case tile.TransformRebuild:
+		modeStr = "rebuild"
+	}
+	b.WriteString(fmt.Sprintf("  Mode: %s\n", modeStr))
+
+	if srcFormat != targetFormat {
+		b.WriteString(fmt.Sprintf("  Format: %s -> %s", srcFormat, targetFormat))
+	} else {
+		b.WriteString(fmt.Sprintf("  Format: %s", targetFormat))
+	}
+	if targetFormat == "jpeg" || targetFormat == "webp" {
+		b.WriteString(fmt.Sprintf(" (quality: %d)", quality))
+	}
+	b.WriteString("\n")
+
+	b.WriteString(fmt.Sprintf("  Tile size: %dpx\n", tileSize))
+
+	if minZoom != int(srcHeader.MinZoom) || maxZoom != int(srcHeader.MaxZoom) {
+		b.WriteString(fmt.Sprintf("  Zoom: %d - %d (source: %d - %d)\n",
+			minZoom, maxZoom, srcHeader.MinZoom, srcHeader.MaxZoom))
+	} else {
+		b.WriteString(fmt.Sprintf("  Zoom: %d - %d\n", minZoom, maxZoom))
+	}
+
+	if mode == tile.TransformRebuild {
+		b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
+	}
+
+	if fc != nil {
+		b.WriteString(fmt.Sprintf("  Fill color: rgba(%d,%d,%d,%d)\n", fc.R, fc.G, fc.B, fc.A))
+	}
+
+	if srcDescription != "" {
+		b.WriteString("\n")
+		b.WriteString(srcDescription)
+	}
+
+	return b.String()
 }
 
 func humanSize(bytes int64) string {

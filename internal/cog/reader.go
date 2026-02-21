@@ -1156,6 +1156,37 @@ func (r *Reader) IFDTileSize(level int) [2]int {
 	return [2]int{int(r.ifds[level].TileWidth), int(r.ifds[level].TileHeight)}
 }
 
+// FormatDescription returns a human-readable summary of the raster format,
+// e.g. "LZW, 3x uint8" or "Deflate, 1x float32".
+func (r *Reader) FormatDescription() string {
+	ifd := &r.ifds[0]
+
+	comp := "unknown"
+	switch ifd.Compression {
+	case 1:
+		comp = "uncompressed"
+	case 5:
+		comp = "LZW"
+	case 7:
+		comp = "JPEG"
+	case 8, 32946:
+		comp = "Deflate"
+	}
+
+	spp := int(ifd.SamplesPerPixel)
+	bps := 8
+	if len(ifd.BitsPerSample) > 0 {
+		bps = int(ifd.BitsPerSample[0])
+	}
+
+	sampleType := "uint"
+	if r.IsFloat() {
+		sampleType = "float"
+	}
+
+	return fmt.Sprintf("%s, %dx %s%d", comp, spp, sampleType, bps)
+}
+
 // IsFloat returns true if the raster data is floating-point (e.g. Float32 elevation data).
 func (r *Reader) IsFloat() bool {
 	ifd := &r.ifds[0]
