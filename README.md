@@ -170,7 +170,7 @@ pmtransform [flags] <input.pmtiles> <output.pmtiles>
 | `--tile-size`   | keep source   | Output tile size in pixels (inferred from first decoded tile) |
 | `--resampling`  | `bicubic`     | Interpolation method: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
 | `--rebuild`     | `false`       | Force full pyramid rebuild (for resampling changes) |
-| `--fill-color`  |               | Fill empty tiles with RGBA color, e.g. `"0,0,0,255"` or `"#000000ff"` |
+| `--fill-color`  |               | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` |
 | `--concurrency` | `NumCPU`      | Number of parallel workers                         |
 | `--mem-limit`   | auto          | Tile store memory limit in MB (0 = auto ~90% of RAM) |
 | `--no-spill`    | `false`       | Disable disk spilling                              |
@@ -197,7 +197,7 @@ Rebuild the entire pyramid with Lanczos resampling:
 ./pmtransform --rebuild --resampling lanczos input.pmtiles output.pmtiles
 ```
 
-Fill empty tile positions with transparent black:
+Substitute transparent/nodata with black and fill missing tile positions:
 
 ```bash
 ./pmtransform --fill-color "0,0,0,0" input.pmtiles output.pmtiles

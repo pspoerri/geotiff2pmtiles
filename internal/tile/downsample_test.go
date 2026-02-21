@@ -43,7 +43,7 @@ func checkerImage(tileSize int, c1, c2 color.RGBA) *image.RGBA {
 }
 
 func TestDownsampleTile_AllNil(t *testing.T) {
-	result := downsampleTile(nil, nil, nil, nil, 256, ResamplingBilinear)
+	result := downsampleTile(nil, nil, nil, nil, 256, ResamplingBilinear, nil)
 	if result != nil {
 		t.Error("downsampleTile with all nil children should return nil")
 	}
@@ -55,7 +55,7 @@ func TestDownsampleTile_SingleChild(t *testing.T) {
 
 	// Only top-left child.
 	tl := solidTile(tileSize, red)
-	result := downsampleTile(tl, nil, nil, nil, tileSize, ResamplingNearest)
+	result := downsampleTile(tl, nil, nil, nil, tileSize, ResamplingNearest, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result with one child")
 	}
@@ -78,7 +78,7 @@ func TestDownsampleTile_Nearest_SolidColor(t *testing.T) {
 	tileSize := 256
 
 	child := solidTile(tileSize, blue)
-	result := downsampleTile(child, child, child, child, tileSize, ResamplingNearest)
+	result := downsampleTile(child, child, child, child, tileSize, ResamplingNearest, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -107,7 +107,7 @@ func TestDownsampleTile_Bilinear_SolidColor(t *testing.T) {
 	tileSize := 256
 
 	child := solidTile(tileSize, green)
-	result := downsampleTile(child, child, child, child, tileSize, ResamplingBilinear)
+	result := downsampleTile(child, child, child, child, tileSize, ResamplingBilinear, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -131,7 +131,7 @@ func TestDownsampleTile_Bilinear_Average(t *testing.T) {
 	black := solidTile(tileSize, color.RGBA{0, 0, 0, 255})
 
 	// Top-left and top-right: white; bottom-left and bottom-right: black.
-	result := downsampleTile(white, white, black, black, tileSize, ResamplingBilinear)
+	result := downsampleTile(white, white, black, black, tileSize, ResamplingBilinear, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -157,7 +157,7 @@ func TestDownsampleTile_FourDistinctColors(t *testing.T) {
 	blue := solidTile(tileSize, color.RGBA{0, 0, 200, 255})
 	yellow := solidTile(tileSize, color.RGBA{200, 200, 0, 255})
 
-	result := downsampleTile(red, green, blue, yellow, tileSize, ResamplingNearest)
+	result := downsampleTile(red, green, blue, yellow, tileSize, ResamplingNearest, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -318,7 +318,7 @@ func TestDownsampleTile_UniformFastPath(t *testing.T) {
 	ocean := color.RGBA{0, 50, 150, 255}
 
 	child := solidTile(tileSize, ocean)
-	result := downsampleTile(child, child, child, child, tileSize, ResamplingBilinear)
+	result := downsampleTile(child, child, child, child, tileSize, ResamplingBilinear, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -337,7 +337,7 @@ func TestDownsampleTile_MixedUniformChildren(t *testing.T) {
 	blue := solidTile(tileSize, color.RGBA{0, 0, 200, 255})
 
 	// Different uniform colors: must not use the fast path.
-	result := downsampleTile(red, red, blue, blue, tileSize, ResamplingNearest)
+	result := downsampleTile(red, red, blue, blue, tileSize, ResamplingNearest, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -359,7 +359,7 @@ func TestDownsampleTile_NilAndUniform(t *testing.T) {
 
 	child := solidTile(tileSize, green)
 	// Only top-left is present; the rest are nil.
-	result := downsampleTile(child, nil, nil, nil, tileSize, ResamplingNearest)
+	result := downsampleTile(child, nil, nil, nil, tileSize, ResamplingNearest, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -376,12 +376,34 @@ func TestDownsampleTile_NilAndUniform(t *testing.T) {
 	}
 }
 
+func TestDownsampleTile_FillColorTransform(t *testing.T) {
+	tileSize := 8
+	green := color.RGBA{0, 200, 0, 255}
+	fill := color.RGBA{128, 128, 128, 255}
+
+	child := solidTile(tileSize, green)
+	// Only top-left present; nil children normally contribute transparent.
+	// With fillColor, transparent pixels should be substituted.
+	result := downsampleTile(child, nil, nil, nil, tileSize, ResamplingNearest, &fill)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	cTopLeft := result.RGBAAt(0, 0)
+	if cTopLeft != green {
+		t.Errorf("top-left (data) = %v, want %v", cTopLeft, green)
+	}
+	cBotRight := result.RGBAAt(tileSize/2+1, tileSize/2+1)
+	if cBotRight != fill {
+		t.Errorf("bottom-right (was transparent, now fill) = %v, want %v", cBotRight, fill)
+	}
+}
+
 func TestDownsampleTile_Mode_SolidColor(t *testing.T) {
 	tileSize := 256
 	red := color.RGBA{200, 0, 0, 255}
 
 	child := solidTile(tileSize, red)
-	result := downsampleTile(child, child, child, child, tileSize, ResamplingMode)
+	result := downsampleTile(child, child, child, child, tileSize, ResamplingMode, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -401,7 +423,7 @@ func TestDownsampleTile_Mode_FourDistinctColors(t *testing.T) {
 	blue := solidTile(tileSize, color.RGBA{0, 0, 200, 255})
 	yellow := solidTile(tileSize, color.RGBA{200, 200, 0, 255})
 
-	result := downsampleTile(red, green, blue, yellow, tileSize, ResamplingMode)
+	result := downsampleTile(red, green, blue, yellow, tileSize, ResamplingMode, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
@@ -442,7 +464,7 @@ func TestDownsampleTile_Mode_PicksMajority(t *testing.T) {
 	img.SetRGBA(3, 3, blue)
 
 	child := fullTile(img, tileSize)
-	result := downsampleTile(child, child, child, child, tileSize, ResamplingMode)
+	result := downsampleTile(child, child, child, child, tileSize, ResamplingMode, nil)
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}

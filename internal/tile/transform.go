@@ -397,6 +397,9 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 									return
 								}
 								rgba := imageToRGBA(img)
+								if cfg.FillColor != nil {
+									applyFillColorTransform(rgba, *cfg.FillColor)
+								}
 								td = newTileData(rgba, cfg.TileSize)
 							}
 						} else {
@@ -405,7 +408,7 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 							tr := store.Get(childZ, 2*x+1, 2*y)
 							bl := store.Get(childZ, 2*x, 2*y+1)
 							br := store.Get(childZ, 2*x+1, 2*y+1)
-							td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+							td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling, cfg.FillColor)
 						}
 
 						if td == nil {

@@ -260,7 +260,7 @@ func BenchmarkDownsample_GrayChildren_Nearest(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		downsampleTile(tl, tr, bl, br, tileSize, ResamplingNearest)
+		downsampleTile(tl, tr, bl, br, tileSize, ResamplingNearest, nil)
 	}
 }
 
@@ -275,7 +275,7 @@ func BenchmarkDownsample_GrayChildren_Bilinear(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		downsampleTile(tl, tr, bl, br, tileSize, ResamplingBilinear)
+		downsampleTile(tl, tr, bl, br, tileSize, ResamplingBilinear, nil)
 	}
 }
 
@@ -292,7 +292,7 @@ func BenchmarkDownsample_RGBAChildren_Nearest(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		downsampleTile(tl, tr, bl, br, tileSize, ResamplingNearest)
+		downsampleTile(tl, tr, bl, br, tileSize, ResamplingNearest, nil)
 	}
 }
 
@@ -309,7 +309,7 @@ func BenchmarkDownsample_RGBAChildren_Bilinear(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		downsampleTile(tl, tr, bl, br, tileSize, ResamplingBilinear)
+		downsampleTile(tl, tr, bl, br, tileSize, ResamplingBilinear, nil)
 	}
 }
 
@@ -320,7 +320,7 @@ func BenchmarkDownsample_UniformChildren(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		downsampleTile(child, child, child, child, tileSize, ResamplingBilinear)
+		downsampleTile(child, child, child, child, tileSize, ResamplingBilinear, nil)
 	}
 }
 
