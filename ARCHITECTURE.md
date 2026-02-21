@@ -37,8 +37,8 @@ internal/
     webp_available.go               CGo availability flag for conditional tests
     terrarium.go                    Terrarium encoder for elevation data
   pmtiles/
-    writer.go                       PMTiles v3 two-pass writer with tile clustering
-    reader.go                       PMTiles v3 reader (header, directory, tile data)
+    writer.go                       PMTiles v3 two-pass writer with tile clustering and metadata
+    reader.go                       PMTiles v3 reader (header, directory, tile data, metadata)
     header.go                       Header serialization/deserialization (127 bytes)
     directory.go                    Hilbert-curve tile IDs, directory serialization/deserialization
 ```

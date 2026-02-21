@@ -234,6 +234,17 @@ same row. After decompression, the predictor is reversed by accumulating the del
 row-by-row. This applies to both tile-based and strip-based reads. Without this step,
 pixel values are raw deltas, producing garbled imagery.
 
+## Description metadata provenance
+
+PMTiles archives record processing provenance in the `description` field of the metadata
+JSON. When `geotiff2pmtiles` creates an archive, the description captures both the
+processing options (format, quality, tile size, zoom, resampling) and source information
+(file count, EPSG, CRS/WGS84 extents, pixel size, data format, coverage holes). When
+`pmtransform` transforms an archive, it reads the source description via `ReadMetadata()`
+and prepends the new processing steps above it. This creates a stacked provenance trail
+where each transformation layer is visible in the output metadata, enabling users to
+trace the full history of how an archive was produced.
+
 ## pmtransform: separate binary
 
 `pmtransform` is a standalone CLI rather than a subcommand of `geotiff2pmtiles`. The

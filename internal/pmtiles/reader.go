@@ -1,6 +1,9 @@
 package pmtiles
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -160,6 +163,37 @@ func (r *Reader) TilesAtZoom(z int) [][3]int {
 // NumTiles returns the total number of tiles in the archive.
 func (r *Reader) NumTiles() int {
 	return len(r.entries)
+}
+
+// ReadMetadata reads and decompresses the JSON metadata from the archive.
+// Returns nil if the archive has no metadata.
+func (r *Reader) ReadMetadata() (map[string]interface{}, error) {
+	if r.header.MetadataLength == 0 {
+		return nil, nil
+	}
+
+	metaRaw := make([]byte, r.header.MetadataLength)
+	if _, err := r.file.ReadAt(metaRaw, int64(r.header.MetadataOffset)); err != nil {
+		return nil, fmt.Errorf("reading metadata: %w", err)
+	}
+
+	gz, err := gzip.NewReader(bytes.NewReader(metaRaw))
+	if err != nil {
+		return nil, fmt.Errorf("decompressing metadata: %w", err)
+	}
+	defer gz.Close()
+
+	jsonData, err := io.ReadAll(gz)
+	if err != nil {
+		return nil, fmt.Errorf("reading decompressed metadata: %w", err)
+	}
+
+	var meta map[string]interface{}
+	if err := json.Unmarshal(jsonData, &meta); err != nil {
+		return nil, fmt.Errorf("parsing metadata JSON: %w", err)
+	}
+
+	return meta, nil
 }
 
 // Close closes the underlying file.

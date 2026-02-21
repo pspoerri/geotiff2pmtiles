@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -40,6 +41,8 @@ func main() {
 		memProfile  string
 		memLimitMB  int
 		noSpill     bool
+		attribution string
+		layerType   string
 	)
 
 	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium")
@@ -55,6 +58,8 @@ func main() {
 	flag.StringVar(&memProfile, "memprofile", "", "Write memory profile to file")
 	flag.IntVar(&memLimitMB, "mem-limit", 0, "Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
+	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (stored in metadata)")
+	flag.StringVar(&layerType, "type", "baselayer", "Layer type: baselayer, overlay")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -158,7 +163,8 @@ func main() {
 	}
 
 	// Check for geographic holes in coverage.
-	if gaps := cog.CheckCoverageGaps(sources); len(gaps) > 0 {
+	gaps := cog.CheckCoverageGaps(sources)
+	if len(gaps) > 0 {
 		log.Printf("WARNING: Detected %d geographic hole(s) in the input coverage:", len(gaps))
 		for i, g := range gaps {
 			log.Printf("  Hole %d: X [%.1f, %.1f], Y [%.1f, %.1f] (source CRS)",
@@ -256,14 +262,20 @@ func main() {
 		OutputDir:        outputDir,
 	}
 
+	// Build description for PMTiles metadata.
+	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling)
+
 	// Create PMTiles writer.
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
-		MinZoom:    minZoom,
-		MaxZoom:    maxZoom,
-		Bounds:     mergedBounds,
-		TileFormat: enc.PMTileType(),
-		TileSize:   tileSize,
-		TempDir:    outputDir,
+		MinZoom:     minZoom,
+		MaxZoom:     maxZoom,
+		Bounds:      mergedBounds,
+		TileFormat:  enc.PMTileType(),
+		TileSize:    tileSize,
+		TempDir:     outputDir,
+		Description: description,
+		Attribution: attribution,
+		Type:        layerType,
 	})
 	if err != nil {
 		log.Fatalf("Creating PMTiles writer: %v", err)
@@ -321,6 +333,63 @@ func collectTIFFs(paths []string) ([]string, error) {
 func isTIFF(name string) bool {
 	lower := strings.ToLower(name)
 	return strings.HasSuffix(lower, ".tif") || strings.HasSuffix(lower, ".tiff")
+}
+
+func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog.CoverageGap,
+	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string) string {
+
+	var b strings.Builder
+
+	b.WriteString(fmt.Sprintf("Processing: geotiff2pmtiles %s\n", version))
+	switch format {
+	case "jpeg", "webp":
+		b.WriteString(fmt.Sprintf("  Format: %s (quality: %d)\n", format, quality))
+	default:
+		b.WriteString(fmt.Sprintf("  Format: %s\n", format))
+	}
+	b.WriteString(fmt.Sprintf("  Tile size: %dpx\n", tileSize))
+	b.WriteString(fmt.Sprintf("  Zoom: %d - %d\n", minZoom, maxZoom))
+	b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
+
+	b.WriteString("\n")
+
+	epsg := sources[0].EPSG()
+	b.WriteString(fmt.Sprintf("Source: %d GeoTIFF file(s), EPSG:%d\n", len(sources), epsg))
+
+	mergedMinX, mergedMinY := math.MaxFloat64, math.MaxFloat64
+	mergedMaxX, mergedMaxY := -math.MaxFloat64, -math.MaxFloat64
+	for _, src := range sources {
+		minX, minY, maxX, maxY := src.BoundsInCRS()
+		if minX < mergedMinX {
+			mergedMinX = minX
+		}
+		if minY < mergedMinY {
+			mergedMinY = minY
+		}
+		if maxX > mergedMaxX {
+			mergedMaxX = maxX
+		}
+		if maxY > mergedMaxY {
+			mergedMaxY = maxY
+		}
+	}
+	b.WriteString(fmt.Sprintf("  Extent (CRS): [%.2f, %.2f] - [%.2f, %.2f]\n",
+		mergedMinX, mergedMinY, mergedMaxX, mergedMaxY))
+
+	b.WriteString(fmt.Sprintf("  Extent (WGS84): [%.6f, %.6f] - [%.6f, %.6f]\n",
+		mergedBounds.MinLon, mergedBounds.MinLat, mergedBounds.MaxLon, mergedBounds.MaxLat))
+
+	b.WriteString(fmt.Sprintf("  Pixel size: %g\n", sources[0].PixelSize()))
+
+	b.WriteString(fmt.Sprintf("  Data: %s\n", sources[0].FormatDescription()))
+
+	if len(gaps) == 0 {
+		b.WriteString("  Holes: none")
+	} else {
+		b.WriteString(fmt.Sprintf("  Holes: %d gap(s)", len(gaps)))
+	}
+
+	return b.String()
 }
 
 func humanSize(bytes int64) string {
