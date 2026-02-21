@@ -71,16 +71,13 @@ func applyFillColorTransform(img *image.RGBA, fill color.RGBA) {
 // Any child may be nil (edge tiles / partial coverage). Nil children
 // contribute transparent black pixels.
 //
-// When fillColor is non-nil, transparent pixels (including those from nil
-// quadrants) are substituted with the fill color rather than being resampled.
-//
 // When all four children are uniform with the same color, the result is
 // returned as a compact uniform TileData without allocating a full image.
 //
 // When all non-nil children are single-channel (gray or uniform with R=G=B,
 // A=255), the downsample operates directly in gray space — avoiding 4 RGBA
 // expansions (saving ~1 MB of temporary allocations per tile).
-func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSize int, mode Resampling, fillColor *color.RGBA) *TileData {
+func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSize int, mode Resampling) *TileData {
 	children := [4]*TileData{topLeft, topRight, bottomLeft, bottomRight}
 
 	// Count non-nil children and check for fast paths.
@@ -108,9 +105,6 @@ func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSi
 	if nonNilCount == 4 && allUniform {
 		c0 := children[0].Color()
 		if children[1].Color() == c0 && children[2].Color() == c0 && children[3].Color() == c0 {
-			if fillColor != nil && c0.A == 0 {
-				return newTileDataUniform(*fillColor, tileSize)
-			}
 			return newTileDataUniform(c0, tileSize)
 		}
 	}
@@ -119,7 +113,7 @@ func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSi
 	// uniform with R=G=B, A=255). Downsample in gray space to avoid
 	// allocating 4 × 256 KB RGBA expansion images.
 	if nonNilCount == 4 && allGrayCompatible {
-		return downsampleTileGray(children, tileSize, mode, fillColor)
+		return downsampleTileGray(children, tileSize, mode)
 	}
 
 	// General RGBA path.
@@ -165,9 +159,6 @@ func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSi
 		}
 	}
 
-	if fillColor != nil {
-		applyFillColorTransform(dst, *fillColor)
-	}
 	return newTileData(dst, tileSize)
 }
 
@@ -175,7 +166,7 @@ func downsampleTile(topLeft, topRight, bottomLeft, bottomRight *TileData, tileSi
 // single-channel space. This avoids allocating 4 × tileSize² × 4 bytes of
 // RGBA expansion images — a 5× reduction in temporary memory for
 // single-channel datasets like land cover classifications.
-func downsampleTileGray(children [4]*TileData, tileSize int, mode Resampling, fillColor *color.RGBA) *TileData {
+func downsampleTileGray(children [4]*TileData, tileSize int, mode Resampling) *TileData {
 	// Extract gray images from children (cheap: gray tiles return their
 	// internal *image.Gray; uniform tiles allocate a small gray image).
 	var grays [4]*image.Gray
@@ -222,13 +213,8 @@ func downsampleTileGray(children [4]*TileData, tileSize int, mode Resampling, fi
 
 	// Detect uniform gray output.
 	if c, ok := detectUniformGray(dst); ok {
-		if fillColor != nil && c == 0 {
-			return newTileDataUniform(*fillColor, tileSize)
-		}
 		return newTileDataUniform(color.RGBA{R: c, G: c, B: c, A: 255}, tileSize)
 	}
-	// Non-uniform gray: no nil children (gray path requires all 4), so no
-	// empty quadrants to substitute. Per-pixel 0 might be valid data.
 	return &TileData{gray: dst, tileSize: tileSize}
 }
 

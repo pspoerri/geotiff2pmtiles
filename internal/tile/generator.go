@@ -256,7 +256,7 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							if cfg.IsTerrarium {
 								td = downsampleTileTerrarium(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
 							} else {
-								td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling, nil)
+								td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
 							}
 						}
 
