@@ -348,6 +348,8 @@ func downsampleQuadrantGrayBilinear(dst *image.Gray, src *image.Gray, dstOffX, d
 }
 
 // downsampleQuadrantGrayLanczos uses a Lanczos-3 kernel for gray images.
+// Out-of-bounds kernel positions are skipped and weights renormalized so
+// the source extent is never extended by edge-pixel clamping.
 func downsampleQuadrantGrayLanczos(dst *image.Gray, src *image.Gray, dstOffX, dstOffY, half, tileSize int) {
 	w := lanczos3Weights2x
 	srcPix := src.Pix
@@ -358,35 +360,37 @@ func downsampleQuadrantGrayLanczos(dst *image.Gray, src *image.Gray, dstOffX, ds
 
 	for dy := 0; dy < half; dy++ {
 		for dx := 0; dx < half; dx++ {
-			var sum float64
+			var sum, wSum float64
 
 			for ky := 0; ky < 6; ky++ {
 				sy := 2*dy - 2 + ky
-				if sy < 0 {
-					sy = 0
-				} else if sy > maxIdx {
-					sy = maxIdx
+				if sy < 0 || sy > maxIdx {
+					continue
 				}
 				wyVal := w[ky]
 				srcRowOff := sy * srcStride
 
 				for kx := 0; kx < 6; kx++ {
 					sx := 2*dx - 2 + kx
-					if sx < 0 {
-						sx = 0
-					} else if sx > maxIdx {
-						sx = maxIdx
+					if sx < 0 || sx > maxIdx {
+						continue
 					}
-					sum += float64(srcPix[srcRowOff+sx]) * w[kx] * wyVal
+					wt := w[kx] * wyVal
+					sum += float64(srcPix[srcRowOff+sx]) * wt
+					wSum += wt
 				}
 			}
 
-			dstPix[(dstOffY+dy)*dstStride+dstOffX+dx] = clampByte(sum)
+			if wSum > 0 {
+				dstPix[(dstOffY+dy)*dstStride+dstOffX+dx] = clampByte(sum / wSum)
+			}
 		}
 	}
 }
 
 // downsampleQuadrantGrayBicubic uses a Catmull-Rom bicubic kernel for gray images.
+// Out-of-bounds kernel positions are skipped and weights renormalized so
+// the source extent is never extended by edge-pixel clamping.
 func downsampleQuadrantGrayBicubic(dst *image.Gray, src *image.Gray, dstOffX, dstOffY, half, tileSize int) {
 	w := bicubicWeights2x
 	srcPix := src.Pix
@@ -397,30 +401,30 @@ func downsampleQuadrantGrayBicubic(dst *image.Gray, src *image.Gray, dstOffX, ds
 
 	for dy := 0; dy < half; dy++ {
 		for dx := 0; dx < half; dx++ {
-			var sum float64
+			var sum, wSum float64
 
 			for ky := 0; ky < 4; ky++ {
 				sy := 2*dy - 1 + ky
-				if sy < 0 {
-					sy = 0
-				} else if sy > maxIdx {
-					sy = maxIdx
+				if sy < 0 || sy > maxIdx {
+					continue
 				}
 				wyVal := w[ky]
 				srcRowOff := sy * srcStride
 
 				for kx := 0; kx < 4; kx++ {
 					sx := 2*dx - 1 + kx
-					if sx < 0 {
-						sx = 0
-					} else if sx > maxIdx {
-						sx = maxIdx
+					if sx < 0 || sx > maxIdx {
+						continue
 					}
-					sum += float64(srcPix[srcRowOff+sx]) * w[kx] * wyVal
+					wt := w[kx] * wyVal
+					sum += float64(srcPix[srcRowOff+sx]) * wt
+					wSum += wt
 				}
 			}
 
-			dstPix[(dstOffY+dy)*dstStride+dstOffX+dx] = clampByte(sum)
+			if wSum > 0 {
+				dstPix[(dstOffY+dy)*dstStride+dstOffX+dx] = clampByte(sum / wSum)
+			}
 		}
 	}
 }
@@ -544,17 +548,26 @@ func downsampleQuadrantTerrariumNearest(dst *image.RGBA, src *image.RGBA, dstOff
 // downsampleQuadrantTerrariumLanczos uses a Lanczos-3 kernel for terrarium data.
 // Decodes Terrarium RGB → elevation, applies Lanczos weights to valid values,
 // and re-encodes the averaged elevation back to Terrarium RGB.
+// Out-of-bounds kernel positions are skipped so the source extent is never
+// extended by edge-pixel clamping.
 func downsampleQuadrantTerrariumLanczos(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
 	w := lanczos3Weights2x
+	maxIdx := tileSize - 1
 
 	for dy := 0; dy < half; dy++ {
 		for dx := 0; dx < half; dx++ {
 			var elevSum, wSum float64
 
 			for ky := 0; ky < 6; ky++ {
-				sy := clamp(2*dy-2+ky, 0, tileSize-1)
+				sy := 2*dy - 2 + ky
+				if sy < 0 || sy > maxIdx {
+					continue
+				}
 				for kx := 0; kx < 6; kx++ {
-					sx := clamp(2*dx-2+kx, 0, tileSize-1)
+					sx := 2*dx - 2 + kx
+					if sx < 0 || sx > maxIdx {
+						continue
+					}
 					p := src.RGBAAt(sx, sy)
 					if p.A == 0 {
 						continue
@@ -578,17 +591,26 @@ func downsampleQuadrantTerrariumLanczos(dst *image.RGBA, src *image.RGBA, dstOff
 }
 
 // downsampleQuadrantTerrariumBicubic uses a Catmull-Rom bicubic kernel for terrarium data.
+// Out-of-bounds kernel positions are skipped so the source extent is never
+// extended by edge-pixel clamping.
 func downsampleQuadrantTerrariumBicubic(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
 	w := bicubicWeights2x
+	maxIdx := tileSize - 1
 
 	for dy := 0; dy < half; dy++ {
 		for dx := 0; dx < half; dx++ {
 			var elevSum, wSum float64
 
 			for ky := 0; ky < 4; ky++ {
-				sy := clamp(2*dy-1+ky, 0, tileSize-1)
+				sy := 2*dy - 1 + ky
+				if sy < 0 || sy > maxIdx {
+					continue
+				}
 				for kx := 0; kx < 4; kx++ {
-					sx := clamp(2*dx-1+kx, 0, tileSize-1)
+					sx := 2*dx - 1 + kx
+					if sx < 0 || sx > maxIdx {
+						continue
+					}
 					p := src.RGBAAt(sx, sy)
 					if p.A == 0 {
 						continue
@@ -666,6 +688,8 @@ func downsampleQuadrantBilinear(dst *image.RGBA, src *image.RGBA, dstOffX, dstOf
 // tileSize × tileSize source quadrant into a half × half destination region.
 // Uses precomputed 1D weights for the fixed 2× downsample factor.
 // Pixels with alpha == 0 are excluded from RGB interpolation.
+// Out-of-bounds kernel positions are treated as transparent (alpha 0) so
+// the source extent is never visually extended by edge-pixel clamping.
 func downsampleQuadrantLanczos(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
 	w := lanczos3Weights2x
 	srcPix := src.Pix
@@ -680,24 +704,19 @@ func downsampleQuadrantLanczos(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 
 			for ky := 0; ky < 6; ky++ {
 				sy := 2*dy - 2 + ky
-				if sy < 0 {
-					sy = 0
-				} else if sy > maxIdx {
-					sy = maxIdx
-				}
 				wyVal := w[ky]
-				srcRowOff := sy * srcStride
+				outY := sy < 0 || sy > maxIdx
 
 				for kx := 0; kx < 6; kx++ {
 					sx := 2*dx - 2 + kx
-					if sx < 0 {
-						sx = 0
-					} else if sx > maxIdx {
-						sx = maxIdx
+					wt := w[kx] * wyVal
+
+					if outY || sx < 0 || sx > maxIdx {
+						wTotal += wt
+						continue
 					}
 
-					wt := w[kx] * wyVal
-					off := srcRowOff + sx*4
+					off := sy*srcStride + sx*4
 					a := float64(srcPix[off+3])
 					aSum += a * wt
 					wTotal += wt
@@ -726,6 +745,8 @@ func downsampleQuadrantLanczos(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 // downsampleQuadrantBicubic uses a Catmull-Rom bicubic kernel to downsample a
 // tileSize × tileSize source quadrant into a half × half destination region.
 // Pixels with alpha == 0 are excluded from RGB interpolation.
+// Out-of-bounds kernel positions are treated as transparent (alpha 0) so
+// the source extent is never visually extended by edge-pixel clamping.
 func downsampleQuadrantBicubic(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
 	w := bicubicWeights2x
 	srcPix := src.Pix
@@ -740,24 +761,19 @@ func downsampleQuadrantBicubic(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 
 			for ky := 0; ky < 4; ky++ {
 				sy := 2*dy - 1 + ky
-				if sy < 0 {
-					sy = 0
-				} else if sy > maxIdx {
-					sy = maxIdx
-				}
 				wyVal := w[ky]
-				srcRowOff := sy * srcStride
+				outY := sy < 0 || sy > maxIdx
 
 				for kx := 0; kx < 4; kx++ {
 					sx := 2*dx - 1 + kx
-					if sx < 0 {
-						sx = 0
-					} else if sx > maxIdx {
-						sx = maxIdx
+					wt := w[kx] * wyVal
+
+					if outY || sx < 0 || sx > maxIdx {
+						wTotal += wt
+						continue
 					}
 
-					wt := w[kx] * wyVal
-					off := srcRowOff + sx*4
+					off := sy*srcStride + sx*4
 					a := float64(srcPix[off+3])
 					aSum += a * wt
 					wTotal += wt

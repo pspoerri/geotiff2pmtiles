@@ -203,6 +203,17 @@ entries avoids maps. Ties prefer the earlier pixel (top-left bias) for determini
 output. Transparent pixels (alpha == 0) are excluded from the vote so nodata areas
 don't dominate the result.
 
+## Downsample edge handling (no extent extension)
+
+When Lanczos-3 and bicubic resampling kernels extend beyond the source tile boundary
+during pyramid downsampling, out-of-bounds kernel positions are treated as empty
+(alpha 0 for RGBA, skipped with weight renormalization for gray) instead of clamping
+to the edge pixel. Edge-pixel clamping was visually extending the source extent by
+repeating boundary colors into the resampling kernel. With the empty treatment, RGBA
+edges fade to transparent naturally, and gray edges are computed from only valid
+positions. Bilinear, nearest, and mode are unaffected since their source coordinates
+never exceed tile bounds.
+
 ## Nearest-neighbor edge clamping
 
 `nearestSampleCached` and `nearestSampleFloat` compute the integer pixel via
