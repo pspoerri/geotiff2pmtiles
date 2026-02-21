@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"fmt"
+	"io"
 	"sort"
 )
 
@@ -187,6 +189,123 @@ func serializeDirectory(entries []Entry) ([]byte, error) {
 	}
 
 	return compressed.Bytes(), nil
+}
+
+// TileIDToZXY converts a PMTiles v3 tile ID back to z/x/y coordinates.
+func TileIDToZXY(tileID uint64) (z, x, y int) {
+	if tileID == 0 {
+		return 0, 0, 0
+	}
+
+	// Find the zoom level: tile IDs for zoom z start at sum of 4^i for i in [0, z-1].
+	var acc uint64
+	z = 0
+	for {
+		n := uint64(1) << uint(z)
+		count := n * n // 4^z tiles at this zoom
+		if acc+count > tileID {
+			break
+		}
+		acc += count
+		z++
+	}
+
+	// The Hilbert index within this zoom level.
+	hilbertIdx := tileID - acc
+	n := uint64(1) << uint(z)
+	hx, hy := hilbertToXY(hilbertIdx, n)
+	return z, int(hx), int(hy)
+}
+
+// hilbertToXY converts a Hilbert curve index to (x, y) for an n x n grid.
+func hilbertToXY(d, n uint64) (x, y uint64) {
+	var rx, ry uint64
+	s := uint64(1)
+	for s < n {
+		rx = 1 & (d / 2)
+		ry = 1 & (d ^ rx)
+		if ry == 0 {
+			if rx == 1 {
+				x = s - 1 - x
+				y = s - 1 - y
+			}
+			x, y = y, x
+		}
+		x += s * rx
+		y += s * ry
+		d /= 4
+		s *= 2
+	}
+	return x, y
+}
+
+// DeserializeDirectory decompresses and parses a gzip-compressed PMTiles v3 directory.
+func DeserializeDirectory(data []byte) ([]Entry, error) {
+	gr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gr.Close()
+
+	raw, err := io.ReadAll(gr)
+	if err != nil {
+		return nil, fmt.Errorf("decompressing directory: %w", err)
+	}
+
+	r := bytes.NewReader(raw)
+
+	numEntries, err := binary.ReadUvarint(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading entry count: %w", err)
+	}
+
+	entries := make([]Entry, numEntries)
+
+	// Read tile IDs (delta-encoded).
+	var lastID uint64
+	for i := uint64(0); i < numEntries; i++ {
+		delta, err := binary.ReadUvarint(r)
+		if err != nil {
+			return nil, fmt.Errorf("reading tile ID delta %d: %w", i, err)
+		}
+		lastID += delta
+		entries[i].TileID = lastID
+	}
+
+	// Read run lengths.
+	for i := uint64(0); i < numEntries; i++ {
+		rl, err := binary.ReadUvarint(r)
+		if err != nil {
+			return nil, fmt.Errorf("reading run length %d: %w", i, err)
+		}
+		entries[i].RunLength = uint32(rl)
+	}
+
+	// Read lengths.
+	for i := uint64(0); i < numEntries; i++ {
+		length, err := binary.ReadUvarint(r)
+		if err != nil {
+			return nil, fmt.Errorf("reading length %d: %w", i, err)
+		}
+		entries[i].Length = uint32(length)
+	}
+
+	// Read offsets (special encoding: 0 means contiguous with previous).
+	var lastOffset uint64
+	for i := uint64(0); i < numEntries; i++ {
+		val, err := binary.ReadUvarint(r)
+		if err != nil {
+			return nil, fmt.Errorf("reading offset %d: %w", i, err)
+		}
+		if val == 0 && i > 0 {
+			entries[i].Offset = lastOffset + uint64(entries[i-1].Length)
+		} else {
+			entries[i].Offset = val - 1
+		}
+		lastOffset = entries[i].Offset
+	}
+
+	return entries, nil
 }
 
 // optimizeRunLengths merges consecutive entries with contiguous tile IDs and offsets.

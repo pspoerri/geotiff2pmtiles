@@ -1,19 +1,22 @@
 # geotiff2pmtiles Makefile
 
-BINARY     := geotiff2pmtiles
-MODULE     := github.com/pspoerri/geotiff2pmtiles
-CMD        := ./cmd/geotiff2pmtiles/
-BUILD_DIR  := dist
-GO         := go
-GOFLAGS    :=
-LDFLAGS    :=
+BINARY           := geotiff2pmtiles
+BINARY_TRANSFORM := pmtransform
+MODULE           := github.com/pspoerri/geotiff2pmtiles
+CMD              := ./cmd/geotiff2pmtiles/
+CMD_TRANSFORM    := ./cmd/pmtransform/
+BUILD_DIR        := dist
+GO               := go
+GOFLAGS          :=
+LDFLAGS          :=
 
 VERSION    := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS    += -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
 
-OUTPUT     := $(BUILD_DIR)/$(BINARY)
+OUTPUT           := $(BUILD_DIR)/$(BINARY)
+OUTPUT_TRANSFORM := $(BUILD_DIR)/$(BINARY_TRANSFORM)
 
 # Default tile format and quality for demo targets
 FORMAT     ?= webp
@@ -24,7 +27,7 @@ TILE_SIZE  ?= 512
 CONCURRENT ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 MEM_LIMIT  ?= 0
 
-.PHONY: all build install \
+.PHONY: all build build-transform build-all install \
         test test-race test-cover bench \
         lint fmt vet tidy check \
         clean clean-all \
@@ -34,11 +37,12 @@ MEM_LIMIT  ?= 0
         demo-tfw demo-tfw-full-disk \
         demo-tfw-jpeg demo-tfw-png demo-tfw-webp \
         demo-tfw-full-disk-jpeg demo-tfw-full-disk-png demo-tfw-full-disk-webp \
+        demo-transform demo-transform-reencode demo-transform-rebuild \
         cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-all \
         help
 
-## all: Build the binary (default target)
-all: build
+## all: Build all binaries (default target)
+all: build build-transform
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -46,6 +50,13 @@ $(BUILD_DIR):
 ## build: Compile the binary (requires libwebp: brew install webp / apt-get install libwebp-dev)
 build: $(BUILD_DIR)
 	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
+
+## build-transform: Compile pmtransform binary
+build-transform: $(BUILD_DIR)
+	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_TRANSFORM) $(CMD_TRANSFORM)
+
+## build-all: Build both geotiff2pmtiles and pmtransform
+build-all: build build-transform
 
 ## install: Install to $GOPATH/bin
 install:
@@ -217,6 +228,44 @@ demo-tfw-full-disk-png: demo-tfw-full-disk
 demo-tfw-full-disk-webp: FORMAT=webp
 demo-tfw-full-disk-webp: demo-tfw-full-disk
 
+# ---------- PMTiles Transform Demo ----------
+
+## demo-transform: Demo passthrough (copy tiles, no re-encode)
+demo-transform: build build-transform
+	./$(OUTPUT) \
+		--format $(FORMAT) \
+		--quality $(QUALITY) \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom $(MAX_ZOOM) \
+		--concurrency $(CONCURRENT) \
+		data/ $(BUILD_DIR)/demo-$(FORMAT).pmtiles
+	./$(OUTPUT_TRANSFORM) --verbose \
+		$(BUILD_DIR)/demo-$(FORMAT).pmtiles $(BUILD_DIR)/demo-transform-passthrough.pmtiles
+
+## demo-transform-reencode: Demo format conversion (WebP → PNG)
+demo-transform-reencode: build build-transform
+	./$(OUTPUT) \
+		--format webp \
+		--quality $(QUALITY) \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom $(MAX_ZOOM) \
+		--concurrency $(CONCURRENT) \
+		data/ $(BUILD_DIR)/demo-webp.pmtiles
+	./$(OUTPUT_TRANSFORM) --verbose --format png \
+		$(BUILD_DIR)/demo-webp.pmtiles $(BUILD_DIR)/demo-transform-png.pmtiles
+
+## demo-transform-rebuild: Demo pyramid rebuild with extended zoom range
+demo-transform-rebuild: build build-transform
+	./$(OUTPUT) \
+		--format $(FORMAT) \
+		--quality $(QUALITY) \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom $(MAX_ZOOM) \
+		--concurrency $(CONCURRENT) \
+		data/ $(BUILD_DIR)/demo-$(FORMAT).pmtiles
+	./$(OUTPUT_TRANSFORM) --verbose --rebuild --min-zoom 10 \
+		$(BUILD_DIR)/demo-$(FORMAT).pmtiles $(BUILD_DIR)/demo-transform-rebuild.pmtiles
+
 # ---------- Cross-compilation ----------
 # Requires a C cross-compiler (CC) and libwebp built for the target platform.
 # Example: CC=x86_64-linux-musl-gcc PKG_CONFIG_PATH=/path/to/linux-amd64/lib/pkgconfig make cross-linux
@@ -273,12 +322,17 @@ help:
 	@echo "  MEM_LIMIT   Memory limit in MB for disk spill    (default: 0 = auto)"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make build                           Build the binary"
+	@echo "  make build                           Build geotiff2pmtiles"
+	@echo "  make build-transform                 Build pmtransform"
+	@echo "  make build-all                       Build both binaries"
 	@echo "  make demo MIN_ZOOM=16 MAX_ZOOM=18    Run demo at zoom 16-18"
 	@echo "  make demo-png QUALITY=100             Run demo with PNG"
 	@echo "  make demo-full-disk                   Demo with full disk spilling (1 MB limit)"
 	@echo "  make demo-full-disk-webp              Full disk + WebP encoding"
 	@echo "  make demo-tfw                         Run demo with TFW world-file data"
 	@echo "  make demo-tfw-webp                    TFW demo with WebP"
+	@echo "  make demo-transform                   Transform demo (passthrough)"
+	@echo "  make demo-transform-reencode          Transform demo (WebP → PNG)"
+	@echo "  make demo-transform-rebuild           Transform demo (rebuild pyramid)"
 	@echo "  make cross-all                        Cross-compile all platforms"
 	@echo "  make run ARGS=\"--verbose data/ o.pmtiles\""
