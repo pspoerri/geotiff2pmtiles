@@ -3,6 +3,7 @@ package tile
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -74,9 +75,10 @@ type Config struct {
 	Encoder          encode.Encoder
 	Bounds           cog.Bounds
 	Resampling       Resampling
-	IsTerrarium      bool   // true for float GeoTIFF → Terrarium encoding
-	MemoryLimitBytes int64  // max tile store memory before disk spilling (0 = auto)
-	OutputDir        string // directory for spill files (defaults to OS temp dir)
+	IsTerrarium      bool        // true for float GeoTIFF → Terrarium encoding
+	FillColor        *color.RGBA // when set, transparent/nodata pixels → fill color; missing tiles → solid fill
+	MemoryLimitBytes int64       // max tile store memory before disk spilling (0 = auto)
+	OutputDir        string      // directory for spill files (defaults to OS temp dir)
 }
 
 // Stats holds generation statistics.
@@ -245,7 +247,12 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 								img = renderTile(z, x, y, cfg.TileSize, srcInfos, proj, cogCache, cfg.Resampling)
 							}
 							if img != nil {
+								if cfg.FillColor != nil {
+									applyFillColorTransform(img, *cfg.FillColor)
+								}
 								td = newTileData(img, cfg.TileSize)
+							} else if cfg.FillColor != nil {
+								td = newTileDataUniform(*cfg.FillColor, cfg.TileSize)
 							}
 						} else {
 							childZ := z + 1
@@ -253,6 +260,21 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							tr := store.Get(childZ, 2*x+1, 2*y)
 							bl := store.Get(childZ, 2*x, 2*y+1)
 							br := store.Get(childZ, 2*x+1, 2*y+1)
+							if cfg.FillColor != nil {
+								fillTile := newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+								if tl == nil {
+									tl = fillTile
+								}
+								if tr == nil {
+									tr = fillTile
+								}
+								if bl == nil {
+									bl = fillTile
+								}
+								if br == nil {
+									br = fillTile
+								}
+							}
 							if cfg.IsTerrarium {
 								td = downsampleTileTerrarium(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
 							} else {
