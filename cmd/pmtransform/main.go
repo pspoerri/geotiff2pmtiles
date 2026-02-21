@@ -152,8 +152,7 @@ func main() {
 		maxZoom = int(srcHeader.MaxZoom)
 	}
 	if tileSize < 0 {
-		tileSize = int(srcHeader.TileType) // can't determine tile size from header
-		tileSize = 256                      // default; PMTiles header doesn't store tile size
+		tileSize = discoverSourceTileSize(reader, srcFormat)
 	}
 
 	// Resolve resampling method.
@@ -290,6 +289,29 @@ func main() {
 	elapsed := time.Since(start).Round(time.Millisecond)
 	fi, _ := os.Stat(outputPath)
 	fmt.Printf("Done: %d tiles, %s, %v → %s\n", stats.TileCount, humanSize(fi.Size()), elapsed, outputPath)
+}
+
+// discoverSourceTileSize reads and decodes one tile to infer the source tile size.
+// PMTiles v3 header does not store tile size, so we must decode to discover it.
+// Returns 256 if no tile could be decoded (e.g. all empty).
+func discoverSourceTileSize(reader *pmtiles.Reader, format string) int {
+	tiles := reader.TilesAtZoom(int(reader.Header().MaxZoom))
+	for _, t := range tiles {
+		z, x, y := t[0], t[1], t[2]
+		data, err := reader.ReadTile(z, x, y)
+		if err != nil || data == nil {
+			continue
+		}
+		img, err := encode.DecodeImage(data, format)
+		if err != nil {
+			continue
+		}
+		b := img.Bounds()
+		if b.Dx() > 0 && b.Dy() > 0 {
+			return b.Dx()
+		}
+	}
+	return 256
 }
 
 // parseColor parses an RGBA color from "R,G,B,A" or "#RRGGBBAA" format.

@@ -167,7 +167,7 @@ pmtransform [flags] <input.pmtiles> <output.pmtiles>
 | `--quality`     | `85`          | JPEG/WebP quality (1-100)                          |
 | `--min-zoom`    | keep source   | Minimum zoom level                                 |
 | `--max-zoom`    | keep source   | Maximum zoom level                                 |
-| `--tile-size`   | `256`         | Output tile size in pixels                         |
+| `--tile-size`   | keep source   | Output tile size in pixels (inferred from first decoded tile) |
 | `--resampling`  | `bicubic`     | Interpolation method: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
 | `--rebuild`     | `false`       | Force full pyramid rebuild (for resampling changes) |
 | `--fill-color`  |               | Fill empty tiles with RGBA color, e.g. `"0,0,0,255"` or `"#000000ff"` |

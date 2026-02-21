@@ -63,7 +63,8 @@ The original file is never touched. Three processing modes are selected automati
 1. **Passthrough**: No format or zoom change — raw tile bytes are copied directly (fastest)
 2. **Re-encode**: Format changes (e.g. WebP → PNG) — each tile is decoded and re-encoded
 3. **Rebuild pyramid**: Zoom range extension or `--rebuild` flag — max-zoom tiles are decoded,
-   then the entire lower-zoom pyramid is rebuilt via downsampling with the chosen resampling method
+   then the entire lower-zoom pyramid is rebuilt via downsampling with the chosen resampling method.
+   When `--tile-size` is omitted, the source tile size is discovered by decoding one tile.
 
 Empty tile filling (`--fill-color`) generates solid-color tiles for positions within the
 archive bounds that have no data.

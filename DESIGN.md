@@ -218,3 +218,12 @@ reads max-zoom tiles from the source archive and uses them as the base layer. Lo
 levels are then rebuilt by downsampling from the level above — exactly matching how
 `geotiff2pmtiles` works with COG sources. This ensures consistent quality across the
 pyramid regardless of what resampling was used in the original archive.
+
+## pmtransform: tile size discovery
+
+The PMTiles v3 header does not store tile size (only format via `TileType`). When
+`--tile-size` is omitted (default: keep source), pmtransform discovers the source tile
+size by reading and decoding one tile from the max zoom level and using its image
+dimensions. If no tile can be decoded (e.g. all empty), it falls back to 256. This
+ensures 512px archives stay 512px when rebuilding with `--resampling lanczos` instead
+of inadvertently reducing to 256.
