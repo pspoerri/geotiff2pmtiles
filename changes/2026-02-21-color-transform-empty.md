@@ -21,26 +21,21 @@ transformation in the pmtransform rebuild pipeline.
 
 ## Implementation
 
-When `--fill-color` is set during pmtransform rebuild:
+Color transform applied only at the source level; downstream code unchanged:
 
-1. **Max-zoom decoded tiles**: Transparent pixels (alpha=0) in source tiles are
-   substituted with the fill color before packing into TileData.
+1. **Max-zoom decoded tiles**: Transparent pixels (alpha=0) → fill color before
+   packing into TileData.
 
-2. **Downsampled tiles**: After combining child tiles, any remaining transparent
-   pixels (from nil children or nodata within tiles) are substituted with the fill
-   color before returning. Applied in `downsampleTile` for the RGBA path and in the
-   gray uniform path (uniform 0 → fill).
+2. **Downsampling**: Nil children are substituted with fill tiles *before* calling
+   `downsampleTile`. The downsample receives 4 tiles (real or fill) and operates
+   normally — no fillColor param or transform in the downsample path.
 
-3. **fillEmptyTiles**: Unchanged — still fills missing tile positions with the
-   solid color.
+3. **fillEmptyTiles**: Unchanged — fills missing tile positions.
 
 ## Changes
 
-- `internal/tile/downsample.go`: Added `applyFillColorTransform`, `downsampleTile(..., fillColor)`,
-  `downsampleTileGray(..., fillColor)`; substitute transparent → fill when set
-- `internal/tile/transform.go`: Apply fill to max-zoom decoded tiles; pass `cfg.FillColor`
-  to `downsampleTile`
-- `internal/tile/generator.go`: Pass `nil` for fillColor (no FillColor in generator)
-- `internal/tile/downsample_test.go`: Updated call sites; added `TestDownsampleTile_FillColorTransform`
-- `internal/tile/bench_test.go`: Updated call sites
-- `DESIGN.md`: Added "Empty as color transformation" section
+- `internal/tile/transform.go`: Apply fill to max-zoom decoded tiles; substitute nil
+  children with `newTileDataUniform(fill)` before `downsampleTile`
+- `internal/tile/downsample.go`: Keep `applyFillColorTransform` for max-zoom path;
+  remove fillColor from `downsampleTile` and `downsampleTileGray`
+- `internal/tile/generator.go`, tests: Revert to 6-param `downsampleTile`

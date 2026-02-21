@@ -408,7 +408,24 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 							tr := store.Get(childZ, 2*x+1, 2*y)
 							bl := store.Get(childZ, 2*x, 2*y+1)
 							br := store.Get(childZ, 2*x+1, 2*y+1)
-							td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling, cfg.FillColor)
+							// Color transform at source: substitute nil children with fill tiles
+							// so downsample operates on 4 tiles; no transform in downsample path.
+							if cfg.FillColor != nil {
+								fillTile := newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+								if tl == nil {
+									tl = fillTile
+								}
+								if tr == nil {
+									tr = fillTile
+								}
+								if bl == nil {
+									bl = fillTile
+								}
+								if br == nil {
+									br = fillTile
+								}
+							}
+							td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
 						}
 
 						if td == nil {

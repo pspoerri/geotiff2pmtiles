@@ -133,10 +133,11 @@ Empty tiles and transparent/nodata pixels should be modeled as a **color transfo
   Downsampling does not yet apply a fill-color transformation to transparent pixels
   within tiles or nil-child quadrants — transparent remains transparent.
 
-- **Implemented**: When `FillColor` is set during pmtransform rebuild, transparent
-  pixels (max-zoom decoded tiles and downsampled output) are substituted with the
-  fill color. Nil child quadrants and nodata within tiles become the fill color
-  instead of remaining transparent.
+- **Implemented**: Color transform applied only at the source level. When `FillColor`
+  is set: (1) max-zoom decoded tiles — transparent pixels → fill before packing;
+  (2) downsampling — nil children are substituted with fill tiles *before* calling
+  downsample, so the existing downsample code receives 4 tiles and operates
+  normally. No transform in the downsample path.
 
 ## Tile size in resolution calculation
 
