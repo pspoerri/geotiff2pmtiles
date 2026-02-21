@@ -301,18 +301,28 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 
 	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64
 
+	// When FillColor is set, build a set of source tiles at max zoom so we
+	// can distinguish "source tile exists" from "fill needed" while iterating
+	// all positions from bounds.
+	var sourceTilesAtMax map[[2]int]bool
+	if cfg.FillColor != nil {
+		srcTiles := reader.TilesAtZoom(effectiveMaxZoom)
+		sourceTilesAtMax = make(map[[2]int]bool, len(srcTiles))
+		for _, t := range srcTiles {
+			sourceTilesAtMax[[2]int{t[1], t[2]}] = true
+		}
+	}
+
 	for z := effectiveMaxZoom; z >= cfg.MinZoom; z-- {
 		isMaxZoom := (z == effectiveMaxZoom)
 
 		var tiles [][3]int
-		if isMaxZoom {
+		if isMaxZoom && cfg.FillColor == nil {
 			tiles = reader.TilesAtZoom(z)
-			// Also include tiles from source zoom levels above this one
-			// that are within range, in case the source had tiles at
-			// intermediate zoom levels we're keeping.
 		} else {
-			// For lower zoom levels, enumerate tiles from bounds so we
-			// downsample even where the source had gaps.
+			// Enumerate all positions from bounds. At max zoom with fill,
+			// this ensures gaps get fill tiles directly. At lower zooms,
+			// this allows downsampling even where the source had gaps.
 			tiles = coord.TilesInBounds(z,
 				float64(cfg.Bounds[0]), float64(cfg.Bounds[1]),
 				float64(cfg.Bounds[2]), float64(cfg.Bounds[3]))
@@ -379,28 +389,36 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 						var td *TileData
 
 						if isMaxZoom {
-							rawData, err := reader.ReadTile(z, x, y)
-							if err != nil {
-								select {
-								case errCh <- fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err):
-								default:
-								}
-								return
-							}
-							if rawData != nil {
-								img, err := encode.DecodeImage(rawData, cfg.SourceFormat)
+							// When fill is set, check whether this position has
+							// a source tile or should be filled.
+							hasSource := sourceTilesAtMax == nil || sourceTilesAtMax[[2]int{x, y}]
+							if hasSource {
+								rawData, err := reader.ReadTile(z, x, y)
 								if err != nil {
 									select {
-									case errCh <- fmt.Errorf("decoding tile z%d/%d/%d: %w", z, x, y, err):
+									case errCh <- fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err):
 									default:
 									}
 									return
 								}
-								rgba := imageToRGBA(img)
-								if cfg.FillColor != nil {
-									applyFillColorTransform(rgba, *cfg.FillColor)
+								if rawData != nil {
+									img, err := encode.DecodeImage(rawData, cfg.SourceFormat)
+									if err != nil {
+										select {
+										case errCh <- fmt.Errorf("decoding tile z%d/%d/%d: %w", z, x, y, err):
+										default:
+										}
+										return
+									}
+									rgba := imageToRGBA(img)
+									if cfg.FillColor != nil {
+										applyFillColorTransform(rgba, *cfg.FillColor)
+									}
+									td = newTileData(rgba, cfg.TileSize)
 								}
-								td = newTileData(rgba, cfg.TileSize)
+							}
+							if td == nil && cfg.FillColor != nil {
+								td = newTileDataUniform(*cfg.FillColor, cfg.TileSize)
 							}
 						} else {
 							childZ := z + 1
@@ -495,14 +513,8 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 
 	store.Close()
 
-	if cfg.FillColor != nil {
-		fc, err := fillEmptyTiles(cfg, reader, writer)
-		if err != nil {
-			return Stats{}, err
-		}
-		tileCount.Add(fc.TileCount)
-		totalBytes.Add(fc.TotalBytes)
-	}
+	// No fillEmptyTiles needed: when FillColor is set, all positions
+	// (including gaps) are handled inline during the zoom loop above.
 
 	return Stats{
 		TileCount:    tileCount.Load(),
@@ -513,7 +525,8 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 }
 
 // fillEmptyTiles generates tiles for positions within the bounds that are
-// missing from the archive, filling them with the configured solid color.
+// missing from the source archive, filling them with the configured solid color.
+// Used by passthrough and reencode modes where tiles are copied from the source.
 func fillEmptyTiles(cfg TransformConfig, reader PMTilesReader, writer TileWriter) (Stats, error) {
 	if cfg.FillColor == nil {
 		return Stats{}, nil
