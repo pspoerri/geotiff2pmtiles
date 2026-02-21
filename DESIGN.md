@@ -133,11 +133,13 @@ Empty tiles and transparent/nodata pixels should be modeled as a **color transfo
   Downsampling does not yet apply a fill-color transformation to transparent pixels
   within tiles or nil-child quadrants — transparent remains transparent.
 
-- **Implemented**: Color transform applied only at the source level. When `FillColor`
-  is set: (1) max-zoom decoded tiles — transparent pixels → fill before packing;
-  (2) downsampling — nil children are substituted with fill tiles *before* calling
-  downsample, so the existing downsample code receives 4 tiles and operates
-  normally. No transform in the downsample path.
+- **Implemented**: Color transform applied only at the source level in both
+  `geotiff2pmtiles` and `pmtransform`. When `FillColor` is set: (1) max-zoom
+  rendered/decoded tiles — transparent pixels → fill before packing; (2) max-zoom
+  positions with no source data → solid fill tile; (3) downsampling — nil children
+  are substituted with fill tiles *before* calling downsample, so the existing
+  downsample code receives 4 tiles and operates normally. No transform in the
+  downsample path.
 
 ## Tile size in resolution calculation
 

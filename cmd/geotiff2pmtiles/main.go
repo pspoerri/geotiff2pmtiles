@@ -3,12 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
+	"image/color"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +43,7 @@ func main() {
 		memProfile  string
 		memLimitMB  int
 		noSpill     bool
+		fillColor   string
 		attribution string
 		layerType   string
 	)
@@ -58,6 +61,7 @@ func main() {
 	flag.StringVar(&memProfile, "memprofile", "", "Write memory profile to file")
 	flag.IntVar(&memLimitMB, "mem-limit", 0, "Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
+	flag.StringVar(&fillColor, "fill-color", "", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\"")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (stored in metadata)")
 	flag.StringVar(&layerType, "type", "baselayer", "Layer type: baselayer, overlay")
 
@@ -132,6 +136,16 @@ func main() {
 	resamplingMode, err := tile.ParseResampling(resampling)
 	if err != nil {
 		log.Fatalf("Resampling: %v", err)
+	}
+
+	// Parse fill color.
+	var fc *color.RGBA
+	if fillColor != "" {
+		c, err := parseColor(fillColor)
+		if err != nil {
+			log.Fatalf("Fill color: %v", err)
+		}
+		fc = &c
 	}
 
 	// Collect GeoTIFF files.
@@ -236,6 +250,9 @@ func main() {
 	fmt.Printf("  %-14s %d – %d (auto-max: %d)\n", "Zoom:", minZoom, maxZoom, autoMax)
 	fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
 	fmt.Printf("  %-14s %d\n", "Concurrency:", concurrency)
+	if fc != nil {
+		fmt.Printf("  %-14s rgba(%d,%d,%d,%d)\n", "Fill color:", fc.R, fc.G, fc.B, fc.A)
+	}
 	if noSpill {
 		fmt.Printf("  %-14s disabled (all in memory)\n", "Disk spill:")
 	} else if memLimitMB > 0 {
@@ -258,12 +275,13 @@ func main() {
 		Bounds:           mergedBounds,
 		Resampling:       resamplingMode,
 		IsTerrarium:      format == "terrarium",
+		FillColor:        fc,
 		MemoryLimitBytes: memoryLimitBytes,
 		OutputDir:        outputDir,
 	}
 
 	// Build description for PMTiles metadata.
-	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling)
+	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling, fc)
 
 	// Create PMTiles writer.
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
@@ -336,7 +354,7 @@ func isTIFF(name string) bool {
 }
 
 func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog.CoverageGap,
-	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string) string {
+	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string, fc *color.RGBA) string {
 
 	var b strings.Builder
 
@@ -350,6 +368,9 @@ func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog
 	b.WriteString(fmt.Sprintf("  Tile size: %dpx\n", tileSize))
 	b.WriteString(fmt.Sprintf("  Zoom: %d - %d\n", minZoom, maxZoom))
 	b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
+	if fc != nil {
+		b.WriteString(fmt.Sprintf("  Fill color: rgba(%d,%d,%d,%d)\n", fc.R, fc.G, fc.B, fc.A))
+	}
 
 	b.WriteString("\n")
 
@@ -390,6 +411,59 @@ func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog
 	}
 
 	return b.String()
+}
+
+// parseColor parses an RGBA color from "R,G,B,A" or "#RRGGBBAA" format.
+func parseColor(s string) (color.RGBA, error) {
+	if strings.HasPrefix(s, "#") {
+		return parseHexColor(s)
+	}
+
+	parts := strings.Split(s, ",")
+	if len(parts) != 4 {
+		return color.RGBA{}, fmt.Errorf("expected R,G,B,A format (e.g. \"0,0,0,255\"), got %q", s)
+	}
+
+	vals := make([]uint8, 4)
+	for i, p := range parts {
+		v, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil || v < 0 || v > 255 {
+			return color.RGBA{}, fmt.Errorf("invalid color component %q (must be 0-255)", p)
+		}
+		vals[i] = uint8(v)
+	}
+	return color.RGBA{R: vals[0], G: vals[1], B: vals[2], A: vals[3]}, nil
+}
+
+func parseHexColor(s string) (color.RGBA, error) {
+	s = strings.TrimPrefix(s, "#")
+	switch len(s) {
+	case 6:
+		s += "ff"
+	case 8:
+		// full RRGGBBAA
+	default:
+		return color.RGBA{}, fmt.Errorf("hex color must be #RRGGBB or #RRGGBBAA, got %q", "#"+s)
+	}
+
+	r, err := strconv.ParseUint(s[0:2], 16, 8)
+	if err != nil {
+		return color.RGBA{}, fmt.Errorf("invalid hex color: %w", err)
+	}
+	g, err := strconv.ParseUint(s[2:4], 16, 8)
+	if err != nil {
+		return color.RGBA{}, fmt.Errorf("invalid hex color: %w", err)
+	}
+	b, err := strconv.ParseUint(s[4:6], 16, 8)
+	if err != nil {
+		return color.RGBA{}, fmt.Errorf("invalid hex color: %w", err)
+	}
+	a, err := strconv.ParseUint(s[6:8], 16, 8)
+	if err != nil {
+		return color.RGBA{}, fmt.Errorf("invalid hex color: %w", err)
+	}
+
+	return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a)}, nil
 }
 
 func humanSize(bytes int64) string {

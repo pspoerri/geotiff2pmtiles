@@ -106,6 +106,7 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--resampling`  | `bicubic`     | Interpolation method: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
 | `--mem-limit`   | auto          | Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM) |
 | `--no-spill`    | `false`       | Disable disk spilling (keep all tiles in memory)   |
+| `--fill-color`  |               | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` |
 | `--attribution` |               | Attribution string for data sources (stored in metadata) |
 | `--type`        | `baselayer`   | Layer type: `baselayer`, `overlay`                 |
 | `--verbose`     | `false`       | Verbose progress output                            |
@@ -140,6 +141,13 @@ Categorical data (e.g. land cover classification) with mode resampling:
 ```bash
 ./geotiff2pmtiles --format png --resampling mode \
   landcover/ classification.pmtiles
+```
+
+Fill transparent/nodata areas with a solid color:
+
+```bash
+./geotiff2pmtiles --fill-color "0,0,0,255" --format png \
+  data/ output.pmtiles
 ```
 
 Elevation data (auto-detects float GeoTIFF and selects Terrarium encoding):

@@ -55,6 +55,11 @@ internal/
 8. **Encode**: JPEG/PNG/WebP/Terrarium encoding
 9. **Write**: Two-pass PMTiles assembly (temp file for tile data, then final archive with clustering)
 
+Empty tile filling (`--fill-color`) uses the same color transformation model as
+`pmtransform`: transparent/nodata pixels in rendered tiles are substituted with
+the target color, nil-child quadrants during downsampling become fill tiles, and
+solid-color tiles are generated for tile positions with no source data.
+
 ## Transform Pipeline (pmtransform)
 
 `pmtransform` reads an existing PMTiles archive and produces a new one with modifications.
