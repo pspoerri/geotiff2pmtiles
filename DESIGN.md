@@ -113,6 +113,31 @@ instead of returning them as "found". This is critical for two reasons:
    important for JPEG output which cannot represent transparency (nodata areas would
    appear as solid black).
 
+## Empty as color transformation (not resampling)
+
+Empty tiles and transparent/nodata pixels should be modeled as a **color transformation**
+(source color → target value) rather than as inputs to spatial resampling.
+
+- **Rationale**: Resampling (bilinear, Lanczos, bicubic, mode) combines *valid* data.
+  Interpolating or voting over "empty" produces meaningless results: blending forest
+  with nodata gives garbage; mode over [data, empty, empty, data] depends on how
+  empty is represented. Empty is a semantic value ("no data") that should be
+  substituted, not interpolated.
+
+- **Model**: Treat empty/nodata/transparent as a distinct "source color" and map it
+  to a configurable target (e.g. `--fill-color`). Transformation = lookup substitution;
+  resampling = spatial kernel over valid pixels only.
+
+- **Current behavior**: Nil children in downsampling contribute nothing (quadrant
+  stays transparent); `fillEmptyTiles` writes solid fill for missing tile positions.
+  Downsampling does not yet apply a fill-color transformation to transparent pixels
+  within tiles or nil-child quadrants — transparent remains transparent.
+
+- **Implemented**: When `FillColor` is set during pmtransform rebuild, transparent
+  pixels (max-zoom decoded tiles and downsampled output) are substituted with the
+  fill color. Nil child quadrants and nodata within tiles become the fill color
+  instead of remaining transparent.
+
 ## Tile size in resolution calculation
 
 `ResolutionAtLat()` accepts the actual tile size (e.g. 256 or 512) instead of

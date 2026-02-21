@@ -66,8 +66,11 @@ The original file is never touched. Three processing modes are selected automati
    then the entire lower-zoom pyramid is rebuilt via downsampling with the chosen resampling method.
    When `--tile-size` is omitted, the source tile size is discovered by decoding one tile.
 
-Empty tile filling (`--fill-color`) generates solid-color tiles for positions within the
-archive bounds that have no data.
+Empty tile filling (`--fill-color`) uses a color transformation model: transparent/
+nodata pixels are substituted with the target color rather than resampled. During
+rebuild, transparent pixels in decoded tiles and nil-child quadrants in downsampled
+tiles become the fill color. Additionally, solid-color tiles are generated for tile
+positions within bounds that have no data.
 
 ## Memory Efficiency
 
