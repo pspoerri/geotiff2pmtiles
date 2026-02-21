@@ -23,19 +23,24 @@ transformation in the pmtransform rebuild pipeline.
 
 Color transform applied only at the source level; downstream code unchanged:
 
-1. **Max-zoom decoded tiles**: Transparent pixels (alpha=0) → fill color before
-   packing into TileData.
+1. **Max-zoom tiles with fill**: Enumerate all positions from bounds (not just
+   source tiles). For positions with source data, decode and apply fill transform
+   (transparent → fill). For gaps, create fill tiles directly. No separate
+   `fillEmptyTiles` pass needed during rebuild.
 
 2. **Downsampling**: Nil children are substituted with fill tiles *before* calling
    `downsampleTile`. The downsample receives 4 tiles (real or fill) and operates
    normally — no fillColor param or transform in the downsample path.
 
-3. **fillEmptyTiles**: Unchanged — fills missing tile positions.
+3. **fillEmptyTiles**: Simplified — only used by passthrough/reencode modes.
+   Rebuild handles all positions inline, eliminating the need for written-tile
+   tracking or post-hoc gap filling.
 
 ## Changes
 
-- `internal/tile/transform.go`: Apply fill to max-zoom decoded tiles; substitute nil
-  children with `newTileDataUniform(fill)` before `downsampleTile`
+- `internal/tile/transform.go`: At max zoom with fill, enumerate all positions
+  from bounds; create fill tiles for gaps inline; remove `fillEmptyTiles` from
+  rebuild; simplify `fillEmptyTiles` signature (remove writtenTiles param)
 - `internal/tile/downsample.go`: Keep `applyFillColorTransform` for max-zoom path;
-  remove fillColor from `downsampleTile` and `downsampleTileGray`
-- `internal/tile/generator.go`, tests: Revert to 6-param `downsampleTile`
+  `downsampleTile` and `downsampleTileGray` unchanged (no fillColor param)
+- `internal/tile/generator.go`, tests: Standard 6-param `downsampleTile`
