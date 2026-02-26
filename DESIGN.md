@@ -203,6 +203,34 @@ same row. After decompression, the predictor is reversed by accumulating the del
 row-by-row. This applies to both tile-based and strip-based reads. Without this step,
 pixel values are raw deltas, producing garbled imagery.
 
+For 16-bit data (bytesPerSample=2), deltas are uint16 values that must be read and
+written using the TIFF byte order rather than single-byte accumulation. The function
+accepts `bytesPerSample` and `binary.ByteOrder` to dispatch between 8-bit and 16-bit
+paths.
+
+## BandConfig: band reordering, alpha, and rescaling
+
+Multi-band GeoTIFFs (e.g. 4-band RGBNIR uint16) need band selection, alpha handling,
+and value rescaling to produce usable 8-bit RGBA output. `BandConfig` is set once
+after `OpenAll()` and before tile generation — it's immutable during concurrent reads.
+
+**Band reordering**: `Bands [3]int` maps 1-indexed input bands to R,G,B output channels.
+For false-color composites, `--bands 4,1,2` maps NIR→R, R→G, G→B. Zero values default
+to `1,2,3`.
+
+**Alpha band**: `AlphaBand` controls transparency. `0` = auto (band 4 for 8-bit spp≥4,
+none for 16-bit), `-1` = force no alpha, `>0` = explicit 1-indexed band. When an alpha
+band is configured and the source value is 0, the pixel is fully transparent.
+
+**Rescaling**: `buildRescaler` returns a `func(uint16) uint8` closure. Linear mode maps
+`[min,max] → [0,255]` proportionally. Log mode uses `ln(1 + v - min) / ln(1 + max - min)`
+for better dynamic range in data with large value spans (e.g. satellite reflectance).
+Auto mode selects linear 0-65535 for 16-bit data, none for 8-bit.
+
+**Backwards compatibility**: Zero-value `BandConfig` activates the legacy code path for
+8-bit data, including nodata handling for spp≤2. No behavioral change for existing
+8-bit workflows.
+
 ## Description metadata provenance
 
 PMTiles archives record processing provenance in the `description` field of the metadata

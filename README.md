@@ -35,7 +35,8 @@ A second sample directory `data_tfw/` supports plain TIFFs with TFW sidecar file
 - Plain TIFF with TFW (TIFF World File) sidecar for georeferencing
 - Strip-based and tiled TIFF layouts
 - TIFF compression: JPEG, LZW, Deflate/Zlib, and uncompressed (with predictor support)
-- Sample formats: 8-bit RGB/RGBA, Float32/Float64 (for elevation/DEM data)
+- Sample formats: 8-bit RGB/RGBA, 16-bit uint16 (with linear/log rescaling), Float32/Float64 (for elevation/DEM data)
+- Band reordering and alpha band selection for multi-band GeoTIFFs (e.g. RGBNIR false-color composites)
 - Source CRS: EPSG:2056 (Swiss LV95), EPSG:4326 (WGS84), EPSG:3857 (Web Mercator)
 - Extensible projection interface for adding additional CRS support
 
@@ -109,6 +110,10 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--fill-color`  |               | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` |
 | `--attribution` |               | Attribution string for data sources (stored in metadata) |
 | `--type`        | `baselayer`   | Layer type: `baselayer`, `overlay`                 |
+| `--bands`       | `1,2,3`       | 1-indexed band numbers for R,G,B output (e.g. `4,1,2` for NIR-R-G false color) |
+| `--alpha-band`  | `auto`        | Alpha band: `auto` (band 4 for 8-bit spp>=4), `-1` (none), or 1-indexed band |
+| `--rescale`     | `auto`        | Rescale mode: `auto` (linear for 16-bit), `linear`, `log`, `none` |
+| `--rescale-range` |             | Input value range `min,max` for rescaling (required when `--rescale` is explicit) |
 | `--verbose`     | `false`       | Verbose progress output                            |
 | `--version`     |               | Print version and exit                             |
 | `--cpuprofile`  |               | Write CPU profile to file                          |
@@ -154,6 +159,20 @@ Elevation data (auto-detects float GeoTIFF and selects Terrarium encoding):
 
 ```bash
 ./geotiff2pmtiles --verbose dem/ elevation.pmtiles
+```
+
+RGBNIR satellite data with log rescaling and NIR as alpha:
+
+```bash
+./geotiff2pmtiles --bands 1,2,3 --alpha-band 4 --rescale log \
+  --rescale-range 1,10000 --format png data2/ rgbnir.pmtiles
+```
+
+RGBNIR false-color composite (NIR-R-G):
+
+```bash
+./geotiff2pmtiles --bands 4,1,2 --alpha-band -1 --rescale linear \
+  --rescale-range 0,8000 --format webp data2/ falsecolor.pmtiles
 ```
 
 Convert a plain TIFF with TFW world file (global Natural Earth data):

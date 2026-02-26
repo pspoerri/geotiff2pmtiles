@@ -80,6 +80,14 @@ type IFD struct {
 	NoData          string
 }
 
+// bytesPerSample returns the number of bytes per sample (1 for 8-bit, 2 for 16-bit).
+func (ifd *IFD) bytesPerSample() int {
+	if len(ifd.BitsPerSample) > 0 && ifd.BitsPerSample[0] == 16 {
+		return 2
+	}
+	return 1
+}
+
 // TilesAcross returns the number of tiles in the horizontal direction.
 func (ifd *IFD) TilesAcross() int {
 	return int((ifd.Width + ifd.TileWidth - 1) / ifd.TileWidth)
