@@ -112,8 +112,8 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--type`        | `baselayer`   | Layer type: `baselayer`, `overlay`                 |
 | `--bands`       | `1,2,3`       | 1-indexed band numbers for R,G,B output (e.g. `4,1,2` for NIR-R-G false color) |
 | `--alpha-band`  | `auto`        | Alpha band: `auto` (band 4 for 8-bit spp>=4), `-1` (none), or 1-indexed band |
-| `--rescale`     | `auto`        | Rescale mode: `auto` (linear for 16-bit), `linear`, `log`, `none` |
-| `--rescale-range` |             | Input value range `min,max` for rescaling (required when `--rescale` is explicit) |
+| `--rescale`     | `auto`        | Rescale mode: `auto`, `linear`, `log`, `none` (auto requires `--rescale-range` for 16-bit) |
+| `--rescale-range` |             | Input value range `min,max` for rescaling (required for 16-bit data) |
 | `--verbose`     | `false`       | Verbose progress output                            |
 | `--version`     |               | Print version and exit                             |
 | `--cpuprofile`  |               | Write CPU profile to file                          |

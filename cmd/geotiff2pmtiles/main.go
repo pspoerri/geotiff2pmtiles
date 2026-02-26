@@ -70,8 +70,8 @@ func main() {
 	flag.StringVar(&layerType, "type", "baselayer", "Layer type: baselayer, overlay")
 	flag.StringVar(&bandsStr, "bands", "1,2,3", "1-indexed band numbers for R,G,B output (e.g. \"4,1,2\" for NIR-R-G)")
 	flag.StringVar(&alphaBandStr, "alpha-band", "auto", "1-indexed band for alpha (0=auto: band 4 for 8-bit spp>=4; -1=force no alpha)")
-	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, log, linear (auto: linear for 16-bit, none for 8-bit)")
-	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (required when --rescale is explicit)")
+	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, log, linear, none (auto: requires --rescale-range for 16-bit)")
+	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (required for 16-bit data)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -551,17 +551,18 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, fi
 	switch rescaleStr {
 	case "auto":
 		if is16 {
-			cfg.Rescale = cog.RescaleLinear
-			cfg.RescaleMin = 0
-			cfg.RescaleMax = 65535
-			if rescaleRange != "" {
-				minV, maxV, err := parseRange(rescaleRange)
-				if err != nil {
-					return cfg, fmt.Errorf("--rescale-range: %w", err)
-				}
-				cfg.RescaleMin = minV
-				cfg.RescaleMax = maxV
+			if rescaleRange == "" {
+				return cfg, fmt.Errorf("16-bit GeoTIFF detected: --rescale-range min,max is required\n" +
+					"  Hint: use gdalinfo or inspect the data to find the value range.\n" +
+					"  Example: --rescale linear --rescale-range 0,5000")
 			}
+			cfg.Rescale = cog.RescaleLinear
+			minV, maxV, err := parseRange(rescaleRange)
+			if err != nil {
+				return cfg, fmt.Errorf("--rescale-range: %w", err)
+			}
+			cfg.RescaleMin = minV
+			cfg.RescaleMax = maxV
 		} else {
 			cfg.Rescale = cog.RescaleNone
 		}
