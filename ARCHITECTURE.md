@@ -83,13 +83,10 @@ positions within bounds that have no data.
 - LRU tile cache prevents redundant reads (~256 tiles, configurable)
 - Tiles stored as encoded bytes (PNG/WebP/JPEG) in memory: 5-25x smaller than raw pixels
 - Continuous disk spilling via dedicated I/O goroutine with configurable memory backpressure (auto ~90% of RAM)
-- Memory limit accounts for both encoded tile data and Go map overhead (uniform entries, disk index entries) to prevent actual usage from exceeding the configured limit
-- Map pre-allocation sized to the working set (tiles that fit in memory), not the total tile count, avoiding multi-GB upfront waste on empty hash buckets
 - Uniform tiles (single color) stored as 4 bytes, never spilled to disk
-- `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers (zeroed on get) instead of allocating/GC'ing per tile
+- `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers instead of allocating/GC'ing per tile
 - Single-band nodata pixels decoded as transparent (alpha=0) so resampling/downsampling automatically excludes them
-- Source fallthrough on nodata: transparent (alpha=0) samples are skipped and the next source is tried, preventing holes in one source from blocking valid data in another and eliminating all-transparent tiles from the pyramid
-- Gray tile RGBA expansions (from `AsImage()`) cached in the TileData so `Release()` returns them to the pool
+- Source fallthrough on nodata: transparent (alpha=0) samples are skipped and the next source is tried, preventing holes in one source from blocking valid data in another
 - PMTiles writer uses temp file for tile data (only directory entries in memory)
 - Pyramid downsampling avoids redundant source reads for lower zoom levels
 
