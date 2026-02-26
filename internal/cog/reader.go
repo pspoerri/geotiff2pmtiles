@@ -681,8 +681,18 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 		}
 	}
 
-	// Build rescaler.
-	rescale := buildRescaler(cfg.Rescale, cfg.RescaleMin, cfg.RescaleMax)
+	// Build rescaler. For 16-bit data with no explicit rescaling (e.g. coginfo
+	// or debug tools using zero-value BandConfig), fall back to linear 0-65535
+	// so values are at least visible rather than uint8-truncated.
+	rescaleMode := cfg.Rescale
+	rescaleMin := cfg.RescaleMin
+	rescaleMax := cfg.RescaleMax
+	if is16 && rescaleMode == RescaleNone {
+		rescaleMode = RescaleLinear
+		rescaleMin = 0
+		rescaleMax = 65535
+	}
+	rescale := buildRescaler(rescaleMode, rescaleMin, rescaleMax)
 
 	// readSample reads one sample from the pixel data at the given 0-indexed band.
 	readSample := func(pixelOff, band int) uint16 {
