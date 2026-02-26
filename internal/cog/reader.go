@@ -16,6 +16,25 @@ import (
 	"strings"
 )
 
+// RescaleMode specifies how to rescale sample values to uint8.
+type RescaleMode int
+
+const (
+	RescaleNone   RescaleMode = iota // No rescaling (identity for 8-bit)
+	RescaleLinear                    // Linear mapping from [min,max] → [0,255]
+	RescaleLog                       // Logarithmic mapping from [min,max] → [0,255]
+)
+
+// BandConfig controls band selection, alpha handling, and rescaling for multi-band GeoTIFFs.
+// Zero value produces identical behavior to the legacy code path (bands 1,2,3; auto alpha for spp≥4; no rescaling).
+type BandConfig struct {
+	Bands      [3]int      // 1-indexed input band → R,G,B output. Zero value = default (1,2,3)
+	AlphaBand  int         // 1-indexed alpha band. 0=auto, -1=none
+	Rescale    RescaleMode // Rescaling mode
+	RescaleMin float64     // Input value range minimum
+	RescaleMax float64     // Input value range maximum
+}
+
 // Bounds represents geographic bounds in WGS84.
 type Bounds struct {
 	MinLon, MaxLon float64
@@ -30,13 +49,14 @@ func (b Bounds) CenterLat() float64 {
 // Reader provides tile-level access to a COG/GeoTIFF file.
 // The file is memory-mapped for lock-free concurrent access.
 type Reader struct {
-	data  []byte // memory-mapped file contents
-	bo    binary.ByteOrder
-	ifds  []IFD
-	geo   GeoInfo
-	path  string
-	id    int          // unique numeric ID for fast cache keying (set by OpenAll)
-	strip *stripLayout // non-nil for strip-based TIFFs promoted to virtual tiles
+	data    []byte // memory-mapped file contents
+	bo      binary.ByteOrder
+	ifds    []IFD
+	geo     GeoInfo
+	path    string
+	id      int          // unique numeric ID for fast cache keying (set by OpenAll)
+	strip   *stripLayout // non-nil for strip-based TIFFs promoted to virtual tiles
+	bandCfg BandConfig   // band selection and rescaling config (set via SetBandConfig)
 }
 
 // stripLayout stores the original strip layout for strip-based TIFFs.
@@ -314,7 +334,7 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 	}
 
 	if ifd.Predictor == 2 {
-		undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel))
+		undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
 	}
 	return decompressed, ifd, nil
 }
@@ -371,7 +391,7 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 	}
 
 	if ifd.Predictor == 2 {
-		undoHorizontalDifferencing(combined, int(ifd.Width), int(ifd.SamplesPerPixel))
+		undoHorizontalDifferencing(combined, int(ifd.Width), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
 	}
 	return combined, ifd, nil
 }
@@ -379,8 +399,24 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 // undoHorizontalDifferencing reverses TIFF predictor=2 (horizontal differencing).
 // Each sample is stored as the difference from the previous sample in the same row.
 // This accumulates the deltas to recover the original values.
-func undoHorizontalDifferencing(data []byte, width, samplesPerPixel int) {
-	rowBytes := width * samplesPerPixel
+// For 16-bit data (bytesPerSample=2), deltas are uint16 values read/written via bo.
+func undoHorizontalDifferencing(data []byte, width, samplesPerPixel, bytesPerSample int, bo binary.ByteOrder) {
+	rowBytes := width * samplesPerPixel * bytesPerSample
+	if bytesPerSample == 2 {
+		for off := 0; off+rowBytes <= len(data); off += rowBytes {
+			row := data[off : off+rowBytes]
+			// Start at the second pixel (first pixel is stored as-is).
+			for x := samplesPerPixel; x < width*samplesPerPixel; x++ {
+				byteOff := x * 2
+				prevOff := (x - samplesPerPixel) * 2
+				cur := bo.Uint16(row[byteOff : byteOff+2])
+				prev := bo.Uint16(row[prevOff : prevOff+2])
+				bo.PutUint16(row[byteOff:byteOff+2], cur+prev)
+			}
+		}
+		return
+	}
+	// 8-bit path (unchanged).
 	for off := 0; off+rowBytes <= len(data); off += rowBytes {
 		row := data[off : off+rowBytes]
 		for x := samplesPerPixel; x < rowBytes; x++ {
@@ -500,7 +536,7 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 		if ifd.Predictor == 2 {
 			buf := make([]byte, len(data))
 			copy(buf, data)
-			undoHorizontalDifferencing(buf, int(ifd.TileWidth), int(ifd.SamplesPerPixel))
+			undoHorizontalDifferencing(buf, int(ifd.TileWidth), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
 			return r.decodeRawTile(ifd, buf)
 		}
 		return r.decodeRawTile(ifd, data)
@@ -510,7 +546,7 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 			return nil, fmt.Errorf("decompressing deflate tile: %w", err)
 		}
 		if ifd.Predictor == 2 {
-			undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel))
+			undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
 		}
 		return r.decodeRawTile(ifd, decompressed)
 	case 5: // LZW
@@ -519,7 +555,7 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 			return nil, fmt.Errorf("decompressing LZW tile: %w", err)
 		}
 		if ifd.Predictor == 2 {
-			undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel))
+			undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
 		}
 		return r.decodeRawTile(ifd, decompressed)
 	default:
@@ -585,16 +621,56 @@ func (r *Reader) decodeJPEGTile(ifd *IFD, data []byte) (image.Image, error) {
 }
 
 // decodeRawTile decodes an uncompressed tile.
-// For single-band data, pixels matching the GDAL nodata value are set to
-// alpha=0 (transparent) so downstream code treats them as empty.
+// Supports 8-bit and 16-bit samples, band reordering, alpha band selection, and rescaling
+// via the reader's BandConfig. For single-band data, pixels matching the GDAL nodata value
+// are set to alpha=0 (transparent) so downstream code treats them as empty.
+// Zero-value BandConfig produces identical behavior to the legacy code path.
 func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	w := int(ifd.TileWidth)
 	h := int(ifd.TileHeight)
 	spp := int(ifd.SamplesPerPixel)
+	bps := ifd.bytesPerSample() // 1 for 8-bit, 2 for 16-bit
+	is16 := bps == 2
+	pixelBytes := spp * bps
 
+	// Resolve band mapping from config (with defaults).
+	cfg := r.bandCfg
+	bandR, bandG, bandB := cfg.Bands[0], cfg.Bands[1], cfg.Bands[2]
+	if bandR == 0 {
+		bandR = 1
+	}
+	if bandG == 0 {
+		bandG = 2
+	}
+	if bandB == 0 {
+		bandB = 3
+	}
+	// Convert to 0-indexed.
+	bandR--
+	bandG--
+	bandB--
+
+	// Resolve alpha band: 0=auto, -1=none, >0=explicit (1-indexed).
+	alphaBand := cfg.AlphaBand
+	effectiveAlpha := -1 // -1 means no alpha band
+	if alphaBand == 0 {
+		// Auto: band 4 (0-indexed: 3) for 8-bit spp≥4 with zero-value BandConfig.
+		if !is16 && spp >= 4 {
+			effectiveAlpha = 3
+		}
+	} else if alphaBand > 0 {
+		effectiveAlpha = alphaBand - 1 // convert to 0-indexed
+	}
+	// alphaBand == -1 → effectiveAlpha stays -1 (no alpha)
+
+	// Determine if we're in the legacy single-band nodata path.
+	// Only for spp≤2, no explicit band config, and no alpha band.
+	useLegacyNodata := false
 	var hasNodata bool
 	var nodataVal uint8
-	if spp <= 2 {
+	isDefaultBandCfg := cfg.Bands == [3]int{} && cfg.AlphaBand == 0 && cfg.Rescale == RescaleNone
+	if spp <= 2 && isDefaultBandCfg && !is16 {
+		useLegacyNodata = true
 		nd := r.ifds[0].NoData
 		if nd != "" {
 			v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64)
@@ -605,50 +681,93 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 		}
 	}
 
+	// Build rescaler.
+	rescale := buildRescaler(cfg.Rescale, cfg.RescaleMin, cfg.RescaleMax)
+
+	// readSample reads one sample from the pixel data at the given 0-indexed band.
+	readSample := func(pixelOff, band int) uint16 {
+		off := pixelOff + band*bps
+		if off+bps > len(data) {
+			return 0
+		}
+		if is16 {
+			return r.bo.Uint16(data[off : off+2])
+		}
+		return uint16(data[off])
+	}
+
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	pix := img.Pix
+
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			idx := (y*w + x) * spp
-			if idx+spp > len(data) {
+			pixelOff := (y*w + x) * pixelBytes
+			if pixelOff+pixelBytes > len(data) {
 				break
 			}
-			var c color.RGBA
-			switch spp {
-			case 1:
-				v := data[idx]
-				c.R = v
-				c.G = v
-				c.B = v
-				if hasNodata && v == nodataVal {
-					c.A = 0
-				} else {
-					c.A = 255
+			pixIdx := (y*w + x) * 4
+
+			if useLegacyNodata {
+				// Legacy path for 8-bit spp≤2 with default config.
+				switch spp {
+				case 1:
+					v := data[pixelOff]
+					pix[pixIdx+0] = v
+					pix[pixIdx+1] = v
+					pix[pixIdx+2] = v
+					if hasNodata && v == nodataVal {
+						pix[pixIdx+3] = 0
+					} else {
+						pix[pixIdx+3] = 255
+					}
+				case 2:
+					v := data[pixelOff]
+					pix[pixIdx+0] = v
+					pix[pixIdx+1] = v
+					pix[pixIdx+2] = v
+					a := data[pixelOff+1]
+					if hasNodata && v == nodataVal {
+						a = 0
+					}
+					pix[pixIdx+3] = a
 				}
-			case 2:
-				v := data[idx]
-				c.R = v
-				c.G = v
-				c.B = v
-				a := data[idx+1]
-				if hasNodata && v == nodataVal {
-					a = 0
+				continue
+			}
+
+			// General path: band reordering + rescaling.
+			var rV, gV, bV uint16
+			if bandR < spp {
+				rV = readSample(pixelOff, bandR)
+			}
+			if spp > 1 && bandG < spp {
+				gV = readSample(pixelOff, bandG)
+			}
+			if spp > 2 && bandB < spp {
+				bV = readSample(pixelOff, bandB)
+			}
+
+			// Alpha.
+			var a uint8 = 255
+			if effectiveAlpha >= 0 && effectiveAlpha < spp {
+				rawAlpha := readSample(pixelOff, effectiveAlpha)
+				if rawAlpha == 0 {
+					// Transparent source pixel: leave as alpha=0.
+					pix[pixIdx+0] = 0
+					pix[pixIdx+1] = 0
+					pix[pixIdx+2] = 0
+					pix[pixIdx+3] = 0
+					continue
 				}
-				c.A = a
-			default:
-				c.R = data[idx]
-				if spp > 1 {
-					c.G = data[idx+1]
-				}
-				if spp > 2 {
-					c.B = data[idx+2]
-				}
-				if spp > 3 {
-					c.A = data[idx+3]
-				} else {
-					c.A = 255
+				a = rescale(rawAlpha)
+				if a == 0 {
+					a = 1 // Avoid fully transparent for non-zero source alpha
 				}
 			}
-			img.SetRGBA(x, y, c)
+
+			pix[pixIdx+0] = rescale(rV)
+			pix[pixIdx+1] = rescale(gV)
+			pix[pixIdx+2] = rescale(bV)
+			pix[pixIdx+3] = a
 		}
 	}
 	return img, nil
@@ -1199,4 +1318,62 @@ func (r *Reader) IsFloat() bool {
 // NoData returns the GDAL nodata string, or "" if not set.
 func (r *Reader) NoData() string {
 	return r.ifds[0].NoData
+}
+
+// SetBandConfig sets the band selection and rescaling configuration.
+// Must be called after OpenAll() and before any ReadTile() calls.
+func (r *Reader) SetBandConfig(cfg BandConfig) {
+	r.bandCfg = cfg
+}
+
+// BitsPerSample returns the bits per sample of the first IFD (e.g. 8, 16).
+func (r *Reader) BitsPerSample() int {
+	if len(r.ifds[0].BitsPerSample) > 0 {
+		return int(r.ifds[0].BitsPerSample[0])
+	}
+	return 8
+}
+
+// SamplesPerPixel returns the samples per pixel of the first IFD.
+func (r *Reader) SamplesPerPixel() int {
+	return int(r.ifds[0].SamplesPerPixel)
+}
+
+// buildRescaler returns a function that maps uint16 input values to uint8 output.
+func buildRescaler(mode RescaleMode, minVal, maxVal float64) func(uint16) uint8 {
+	switch mode {
+	case RescaleLinear:
+		if maxVal == minVal {
+			return func(uint16) uint8 { return 0 }
+		}
+		scale := 255.0 / (maxVal - minVal)
+		return func(v uint16) uint8 {
+			f := float64(v)
+			if f < minVal {
+				return 0
+			}
+			if f > maxVal {
+				return 255
+			}
+			return uint8(math.Round((f - minVal) * scale))
+		}
+	case RescaleLog:
+		if maxVal == minVal {
+			return func(uint16) uint8 { return 0 }
+		}
+		logRange := math.Log(1 + maxVal - minVal)
+		scale := 255.0 / logRange
+		return func(v uint16) uint8 {
+			f := float64(v)
+			if f < minVal {
+				return 0
+			}
+			if f > maxVal {
+				return 255
+			}
+			return uint8(math.Round(math.Log(1+f-minVal) * scale))
+		}
+	default: // RescaleNone
+		return func(v uint16) uint8 { return uint8(v) }
+	}
 }

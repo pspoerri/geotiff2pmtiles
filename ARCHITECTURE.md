@@ -8,7 +8,7 @@ cmd/
   debug/main.go                     Low-level COG debug utility
 internal/
   cog/
-    reader.go                       COG/GeoTIFF tile-level reader (memory-mapped, nodata-aware)
+    reader.go                       COG/GeoTIFF tile-level reader (memory-mapped, nodata-aware, 8/16-bit, band reorder/rescale)
     ifd.go                          TIFF IFD parser
     geotags.go                      GeoTIFF metadata extraction
     tfw.go                          TFW (TIFF World File) parser + EPSG inference

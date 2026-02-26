@@ -30,22 +30,26 @@ var (
 
 func main() {
 	var (
-		format      string
-		quality     int
-		minZoom     int
-		maxZoom     int
-		showVersion bool
-		tileSize    int
-		concurrency int
-		verbose     bool
-		resampling  string
-		cpuProfile  string
-		memProfile  string
-		memLimitMB  int
-		noSpill     bool
-		fillColor   string
-		attribution string
-		layerType   string
+		format       string
+		quality      int
+		minZoom      int
+		maxZoom      int
+		showVersion  bool
+		tileSize     int
+		concurrency  int
+		verbose      bool
+		resampling   string
+		cpuProfile   string
+		memProfile   string
+		memLimitMB   int
+		noSpill      bool
+		fillColor    string
+		attribution  string
+		layerType    string
+		bandsStr     string
+		alphaBandStr string
+		rescaleStr   string
+		rescaleRange string
 	)
 
 	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium")
@@ -64,6 +68,10 @@ func main() {
 	flag.StringVar(&fillColor, "fill-color", "", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\"")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (stored in metadata)")
 	flag.StringVar(&layerType, "type", "baselayer", "Layer type: baselayer, overlay")
+	flag.StringVar(&bandsStr, "bands", "1,2,3", "1-indexed band numbers for R,G,B output (e.g. \"4,1,2\" for NIR-R-G)")
+	flag.StringVar(&alphaBandStr, "alpha-band", "auto", "1-indexed band for alpha (0=auto: band 4 for 8-bit spp>=4; -1=force no alpha)")
+	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, log, linear (auto: linear for 16-bit, none for 8-bit)")
+	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (required when --rescale is explicit)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -186,6 +194,15 @@ func main() {
 		}
 	}
 
+	// Parse band config.
+	bandCfg, err := parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange, sources[0])
+	if err != nil {
+		log.Fatalf("Band config: %v", err)
+	}
+	for _, src := range sources {
+		src.SetBandConfig(bandCfg)
+	}
+
 	// Auto-detect float GeoTIFFs and suggest terrarium format.
 	isFloat := sources[0].IsFloat()
 	if isFloat {
@@ -260,6 +277,23 @@ func main() {
 	} else {
 		fmt.Printf("  %-14s auto (~90%% of RAM)\n", "Mem limit:")
 	}
+	if bandCfg.Bands != ([3]int{1, 2, 3}) || bandCfg.AlphaBand != 0 || bandCfg.Rescale != cog.RescaleNone {
+		fmt.Printf("  %-14s %d,%d,%d\n", "Bands:", bandCfg.Bands[0], bandCfg.Bands[1], bandCfg.Bands[2])
+		switch bandCfg.AlphaBand {
+		case 0:
+			fmt.Printf("  %-14s auto\n", "Alpha band:")
+		case -1:
+			fmt.Printf("  %-14s none\n", "Alpha band:")
+		default:
+			fmt.Printf("  %-14s %d\n", "Alpha band:", bandCfg.AlphaBand)
+		}
+		switch bandCfg.Rescale {
+		case cog.RescaleLinear:
+			fmt.Printf("  %-14s linear [%.0f, %.0f]\n", "Rescale:", bandCfg.RescaleMin, bandCfg.RescaleMax)
+		case cog.RescaleLog:
+			fmt.Printf("  %-14s log [%.0f, %.0f]\n", "Rescale:", bandCfg.RescaleMin, bandCfg.RescaleMax)
+		}
+	}
 	fmt.Printf("  %-14s %d file(s)\n", "Input:", len(tiffFiles))
 	fmt.Printf("  %-14s %s\n", "Output:", outputPath)
 
@@ -281,7 +315,7 @@ func main() {
 	}
 
 	// Build description for PMTiles metadata.
-	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling, fc)
+	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling, fc, bandCfg)
 
 	// Create PMTiles writer.
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
@@ -354,7 +388,7 @@ func isTIFF(name string) bool {
 }
 
 func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog.CoverageGap,
-	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string, fc *color.RGBA) string {
+	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string, fc *color.RGBA, bandCfg cog.BandConfig) string {
 
 	var b strings.Builder
 
@@ -370,6 +404,23 @@ func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog
 	b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
 	if fc != nil {
 		b.WriteString(fmt.Sprintf("  Fill color: rgba(%d,%d,%d,%d)\n", fc.R, fc.G, fc.B, fc.A))
+	}
+	if bandCfg.Bands != ([3]int{1, 2, 3}) || bandCfg.AlphaBand != 0 || bandCfg.Rescale != cog.RescaleNone {
+		b.WriteString(fmt.Sprintf("  Bands: %d,%d,%d\n", bandCfg.Bands[0], bandCfg.Bands[1], bandCfg.Bands[2]))
+		switch bandCfg.AlphaBand {
+		case 0:
+			b.WriteString("  Alpha band: auto\n")
+		case -1:
+			b.WriteString("  Alpha band: none\n")
+		default:
+			b.WriteString(fmt.Sprintf("  Alpha band: %d\n", bandCfg.AlphaBand))
+		}
+		switch bandCfg.Rescale {
+		case cog.RescaleLinear:
+			b.WriteString(fmt.Sprintf("  Rescale: linear [%.0f, %.0f]\n", bandCfg.RescaleMin, bandCfg.RescaleMax))
+		case cog.RescaleLog:
+			b.WriteString(fmt.Sprintf("  Rescale: log [%.0f, %.0f]\n", bandCfg.RescaleMin, bandCfg.RescaleMax))
+		}
 	}
 
 	b.WriteString("\n")
@@ -464,6 +515,102 @@ func parseHexColor(s string) (color.RGBA, error) {
 	}
 
 	return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a)}, nil
+}
+
+// parseBandConfig parses CLI flags into a cog.BandConfig.
+func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, firstSrc *cog.Reader) (cog.BandConfig, error) {
+	var cfg cog.BandConfig
+
+	// Parse --bands.
+	parts := strings.Split(bandsStr, ",")
+	if len(parts) != 3 {
+		return cfg, fmt.Errorf("--bands must be 3 comma-separated band numbers (e.g. \"1,2,3\"), got %q", bandsStr)
+	}
+	for i, p := range parts {
+		v, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil || v < 1 {
+			return cfg, fmt.Errorf("invalid band number %q (must be >= 1)", p)
+		}
+		cfg.Bands[i] = v
+	}
+
+	// Parse --alpha-band.
+	switch alphaBandStr {
+	case "auto":
+		cfg.AlphaBand = 0
+	default:
+		v, err := strconv.Atoi(strings.TrimSpace(alphaBandStr))
+		if err != nil {
+			return cfg, fmt.Errorf("--alpha-band must be \"auto\" or an integer, got %q", alphaBandStr)
+		}
+		cfg.AlphaBand = v
+	}
+
+	// Parse --rescale and --rescale-range.
+	is16 := firstSrc.BitsPerSample() == 16
+	switch rescaleStr {
+	case "auto":
+		if is16 {
+			cfg.Rescale = cog.RescaleLinear
+			cfg.RescaleMin = 0
+			cfg.RescaleMax = 65535
+			if rescaleRange != "" {
+				minV, maxV, err := parseRange(rescaleRange)
+				if err != nil {
+					return cfg, fmt.Errorf("--rescale-range: %w", err)
+				}
+				cfg.RescaleMin = minV
+				cfg.RescaleMax = maxV
+			}
+		} else {
+			cfg.Rescale = cog.RescaleNone
+		}
+	case "linear":
+		if rescaleRange == "" {
+			return cfg, fmt.Errorf("--rescale-range is required when --rescale is set to %q", rescaleStr)
+		}
+		minV, maxV, err := parseRange(rescaleRange)
+		if err != nil {
+			return cfg, fmt.Errorf("--rescale-range: %w", err)
+		}
+		cfg.Rescale = cog.RescaleLinear
+		cfg.RescaleMin = minV
+		cfg.RescaleMax = maxV
+	case "log":
+		if rescaleRange == "" {
+			return cfg, fmt.Errorf("--rescale-range is required when --rescale is set to %q", rescaleStr)
+		}
+		minV, maxV, err := parseRange(rescaleRange)
+		if err != nil {
+			return cfg, fmt.Errorf("--rescale-range: %w", err)
+		}
+		cfg.Rescale = cog.RescaleLog
+		cfg.RescaleMin = minV
+		cfg.RescaleMax = maxV
+	case "none":
+		cfg.Rescale = cog.RescaleNone
+	default:
+		return cfg, fmt.Errorf("--rescale must be auto, linear, log, or none, got %q", rescaleStr)
+	}
+
+	return cfg, nil
+}
+
+// parseRange parses a "min,max" string into two float64 values.
+func parseRange(s string) (float64, float64, error) {
+	parts := strings.Split(s, ",")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("expected min,max format, got %q", s)
+	}
+	minV, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid min value %q: %w", parts[0], err)
+	}
+	maxV, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid max value %q: %w", parts[1], err)
+	}
+	return minV, maxV, nil
 }
 
 func humanSize(bytes int64) string {
