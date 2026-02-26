@@ -247,36 +247,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full project structure, pipeline 
 
 ## Performance
 
-The render pipeline has been profiled and optimized for throughput across multiple rounds.
-
-### Lanczos-3 resampling optimization
-
-Workload: 4690 tiles (36 Swiss LV95 COGs, z12-18, 512px WebP q85, concurrency 4):
-
-| Optimization | Technique | Reduction |
-| --- | --- | --- |
-| Batched tile fetches | 6×6 kernel spans at most 4 tiles; fetch each once instead of 36 cache lookups per pixel | 58x cache lookup reduction |
-| Lanczos kernel LUT | 1024-entry precomputed table with linear interpolation replaces 12 `math.Sin` calls per pixel | 16x kernel eval reduction |
-| Bicubic kernel LUT | 1024-entry precomputed table with linear interpolation replaces polynomial evaluation per pixel | Eliminates cubic polynomial overhead |
-| YCbCr fast path | Single type assertion when all 36 pixels fall in one tile; inline YCbCr→RGB conversion | 33x pixel extraction reduction |
-
-**Result**: 4.7x wall-time speedup (7m15s to 1m32s), 5.2x CPU reduction. Final profile is balanced across YCbCr accumulation (29%), Lanczos sampling (44% cumulative), and downsampling (8%).
-
-### Earlier pipeline optimizations
-
-Measured impact (36 Swiss LV95 COGs, z10-16, 512px WebP, Apple M-series):
-
-| Optimization | Technique | CPU reduction |
-| --- | --- | --- |
-| Precompute lon/lat | Web Mercator lon is linear with px, lat depends only on py; precompute per-row/col instead of per-pixel trig (Atan, Sinh) | O(n^2) -> O(n) trig calls |
-| Tile-level pixel extraction | `pixelFromImage` type-switch (YCbCr, RGBA) avoids `image.At()` interface boxing and `Point.In` bounds checks | ~18% of baseline eliminated |
-| Bilinear tile reuse | `fetchTileCached` fetches 1-2 tiles instead of 4 per-pixel cache lookups for bilinear interpolation | ~35% of baseline eliminated |
-| RWMutex tile cache | `sync.RWMutex` on cache shards allows concurrent readers | 82% reduction in cache lock time |
-| Bit-shift pow2 | `pow2(z)` via bit shift replaces `math.Pow(2, float64(z))` in all Mercator functions | ~4% of baseline eliminated |
-| Package-level clampByte | Moved out of closure so the compiler can inline it | Enables inlining |
-| Direct Pix writes | Write to `img.Pix[]` directly instead of `img.SetRGBA()` | Eliminates bounds checks |
-
-**Result**: ~24% wall-time speedup (8.1s to 6.3s median), 43% CPU reduction, with byte-identical output (verified via SHA-256).
+The pipeline is profiled and optimized for throughput. Key techniques: LUT-accelerated
+resampling (precomputed Lanczos-3 and bicubic kernel tables), batched tile fetches to
+minimize cache lookups, native libwebp encoding via CGo, precomputed lon/lat arrays for
+O(n) Mercator projection, direct pixel buffer writes, and YCbCr fast paths.
 
 ### Profiling
 
