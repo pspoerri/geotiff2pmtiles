@@ -285,6 +285,16 @@ resampling (precomputed Lanczos-3 and bicubic kernel tables), batched tile fetch
 minimize cache lookups, native libwebp encoding via CGo, precomputed lon/lat arrays for
 O(n) Mercator projection, direct pixel buffer writes, and YCbCr fast paths.
 
+### Integration Tests
+
+End-to-end tests exercise the full pipeline with synthetic and real satellite data:
+
+```bash
+make test-integration            # Synthetic tests (~8s)
+make test-integration-download   # Download real satellite data (~210 MB)
+make test-integration-all        # Download + run all tests
+```
+
 ### Profiling
 
 ```bash

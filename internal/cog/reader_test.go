@@ -728,44 +728,6 @@ func TestDetectPresetInsufficientBands(t *testing.T) {
 	}
 }
 
-func TestDetectPresetRealFile(t *testing.T) {
-	// Validate against the actual ESA WorldCover S2 RGBNIR file if present.
-	path := "../../data2/ESA_WorldCover_10m_2021_v200_N00E009_S2RGBNIR.tif"
-	r, err := Open(path)
-	if err != nil {
-		t.Skipf("skipping: %v", err)
-	}
-	defer r.Close()
-
-	// Verify GDAL metadata was parsed.
-	md := r.GDALMeta()
-	if md == nil {
-		t.Fatal("expected GDAL metadata")
-	}
-	if got := md.Items["bands"]; got == "" {
-		t.Error("expected non-empty 'bands' item")
-	}
-
-	// Verify auto-detection works.
-	preset, ok := r.DetectPreset()
-	if !ok {
-		t.Fatal("expected preset to be detected")
-	}
-	if preset.Name != "multispectral-rgbnir" {
-		t.Errorf("name = %q, want %q", preset.Name, "multispectral-rgbnir")
-	}
-	// ESA WorldCover: Band 1=Red, Band 2=Green, Band 3=Blue, Band 4=NIR.
-	if preset.BandCfg.Bands != [3]int{1, 2, 3} {
-		t.Errorf("bands = %v, want [1,2,3]", preset.BandCfg.Bands)
-	}
-	if preset.BandCfg.RescaleMax != 10000 {
-		t.Errorf("rescale max = %.0f, want 10000", preset.BandCfg.RescaleMax)
-	}
-	if preset.BandCfg.RescaleMin != 0 {
-		t.Errorf("rescale min = %.0f, want 0", preset.BandCfg.RescaleMin)
-	}
-}
-
 func assertPixel(t *testing.T, img *image.RGBA, x, y int, want color.RGBA) {
 	t.Helper()
 	got := img.RGBAAt(x, y)
