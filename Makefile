@@ -350,6 +350,7 @@ demo-esaworldcover-gamma0: build test-integration-download
 		--tile-size $(TILE_SIZE) \
 		--max-zoom 9 \
 		--alpha-band -1 \
+		--rescale-range 0,65535 \
 		--concurrency $(CONCURRENT) \
 		$(ESAWORLDCOVER_GAMMA0_DIR)/ $(BUILD_DIR)/demo-esaworldcover-gamma0.pmtiles
 

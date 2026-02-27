@@ -41,20 +41,17 @@ func TestSwissImagePipeline(t *testing.T) {
 		Concurrency: runtime.NumCPU(),
 	})
 
-	result := validatePMTiles(t, outPath)
-	if result.TileCount == 0 {
-		t.Error("expected tiles from SWISSIMAGE DOP10")
-	}
-	if result.Header.TileType != pmtiles.TileTypeJPEG {
-		t.Errorf("expected JPEG tile type, got %d", result.Header.TileType)
-	}
+	assertPlausiblePMTiles(t, outPath, plausibilityExpectation{
+		MinZoom:       14,
+		MaxZoom:       18,
+		TileType:      pmtiles.TileTypeJPEG,
+		MinLon:        7.4,
+		MaxLon:        7.5,
+		MinLat:        46.9,
+		MaxLat:        47.0,
+		BoundsTol:     2,
+		MinTotalTiles: 50,
+	})
 
-	// Multi-source mosaic should produce tiles across the zoom range.
-	for z := 14; z <= 18; z++ {
-		if result.ZoomCounts[z] == 0 {
-			t.Errorf("expected tiles at zoom %d, got 0", z)
-		}
-	}
-
-	t.Logf("SWISSIMAGE: %d tiles across zoom 14-18 from %d source files", result.TileCount, len(paths))
+	t.Logf("SWISSIMAGE: from %d source files", len(paths))
 }

@@ -25,20 +25,15 @@ func TestNaturalEarthRaster(t *testing.T) {
 		Concurrency: runtime.NumCPU(),
 	})
 
-	result := validatePMTiles(t, outPath)
-	if result.TileCount == 0 {
-		t.Error("expected tiles from Natural Earth raster")
-	}
-	if result.Header.TileType != pmtiles.TileTypeJPEG {
-		t.Errorf("expected JPEG tile type, got %d", result.Header.TileType)
-	}
-
-	// Global dataset should have tiles at every zoom.
-	for z := 0; z <= 4; z++ {
-		if result.ZoomCounts[z] == 0 {
-			t.Errorf("expected tiles at zoom %d, got 0", z)
-		}
-	}
-
-	t.Logf("Natural Earth: %d tiles across zoom 0-4", result.TileCount)
+	assertPlausiblePMTiles(t, outPath, plausibilityExpectation{
+		MinZoom:       0,
+		MaxZoom:       4,
+		TileType:      pmtiles.TileTypeJPEG,
+		MinLon:        -180,
+		MaxLon:        180,
+		MinLat:        -85,
+		MaxLat:        85,
+		BoundsTol:     5,
+		MinTotalTiles: 5,
+	})
 }

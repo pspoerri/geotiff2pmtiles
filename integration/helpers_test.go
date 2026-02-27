@@ -656,3 +656,128 @@ func absDiff(a, b int) int {
 	}
 	return b - a
 }
+
+// ---------------------------------------------------------------------------
+// Plausibility validation for satellite integration tests
+// ---------------------------------------------------------------------------
+
+// plausibilityExpectation defines expected properties of a PMTiles output
+// for comprehensive plausibility validation.
+type plausibilityExpectation struct {
+	MinZoom  int
+	MaxZoom  int
+	TileType uint8
+
+	// Geographic bounds (approximate).
+	MinLon, MaxLon float64
+	MinLat, MaxLat float64
+	BoundsTol      float64 // tolerance in degrees for each bound
+
+	MinTotalTiles int // minimum expected total tile count
+}
+
+// assertPlausiblePMTiles performs comprehensive plausibility checks on a
+// PMTiles output file against the given expectations.
+func assertPlausiblePMTiles(t *testing.T, path string, exp plausibilityExpectation) {
+	t.Helper()
+
+	result := validatePMTiles(t, path)
+	h := result.Header
+
+	// 1. Zoom levels
+	if int(h.MinZoom) != exp.MinZoom {
+		t.Errorf("MinZoom = %d, want %d", h.MinZoom, exp.MinZoom)
+	}
+	if int(h.MaxZoom) != exp.MaxZoom {
+		t.Errorf("MaxZoom = %d, want %d", h.MaxZoom, exp.MaxZoom)
+	}
+
+	// 2. Tile type
+	if h.TileType != exp.TileType {
+		t.Errorf("TileType = %d, want %d", h.TileType, exp.TileType)
+	}
+
+	// 3. Geographic bounds — valid and within tolerance of expected area
+	if h.MinLon >= h.MaxLon {
+		t.Errorf("invalid bounds: MinLon (%f) >= MaxLon (%f)", h.MinLon, h.MaxLon)
+	}
+	if h.MinLat >= h.MaxLat {
+		t.Errorf("invalid bounds: MinLat (%f) >= MaxLat (%f)", h.MinLat, h.MaxLat)
+	}
+	if math.Abs(float64(h.MinLon)-exp.MinLon) > exp.BoundsTol {
+		t.Errorf("MinLon = %f, want ~%f (±%f)", h.MinLon, exp.MinLon, exp.BoundsTol)
+	}
+	if math.Abs(float64(h.MaxLon)-exp.MaxLon) > exp.BoundsTol {
+		t.Errorf("MaxLon = %f, want ~%f (±%f)", h.MaxLon, exp.MaxLon, exp.BoundsTol)
+	}
+	if math.Abs(float64(h.MinLat)-exp.MinLat) > exp.BoundsTol {
+		t.Errorf("MinLat = %f, want ~%f (±%f)", h.MinLat, exp.MinLat, exp.BoundsTol)
+	}
+	if math.Abs(float64(h.MaxLat)-exp.MaxLat) > exp.BoundsTol {
+		t.Errorf("MaxLat = %f, want ~%f (±%f)", h.MaxLat, exp.MaxLat, exp.BoundsTol)
+	}
+
+	// 4. Center point — within bounds and CenterZoom within zoom range
+	if h.CenterLon < h.MinLon || h.CenterLon > h.MaxLon {
+		t.Errorf("CenterLon %f outside bounds [%f, %f]", h.CenterLon, h.MinLon, h.MaxLon)
+	}
+	if h.CenterLat < h.MinLat || h.CenterLat > h.MaxLat {
+		t.Errorf("CenterLat %f outside bounds [%f, %f]", h.CenterLat, h.MinLat, h.MaxLat)
+	}
+	if int(h.CenterZoom) < exp.MinZoom || int(h.CenterZoom) > exp.MaxZoom {
+		t.Errorf("CenterZoom %d outside range [%d, %d]", h.CenterZoom, exp.MinZoom, exp.MaxZoom)
+	}
+
+	// 5. Tile counts — total, per-zoom non-zero, non-decreasing across zoom levels
+	if result.TileCount < exp.MinTotalTiles {
+		t.Errorf("TileCount = %d, want >= %d", result.TileCount, exp.MinTotalTiles)
+	}
+	prevCount := 0
+	for z := exp.MinZoom; z <= exp.MaxZoom; z++ {
+		count := result.ZoomCounts[z]
+		if count == 0 {
+			t.Errorf("expected tiles at zoom %d, got 0", z)
+		}
+		if count < prevCount {
+			t.Errorf("tile count decreased from zoom %d (%d) to zoom %d (%d)", z-1, prevCount, z, count)
+		}
+		prevCount = count
+	}
+
+	// 6. Tile decoding — first tile at MaxZoom decodes as a valid image
+	reader, err := pmtiles.OpenReader(path)
+	if err != nil {
+		t.Fatalf("plausibility: OpenReader: %v", err)
+	}
+	defer reader.Close()
+
+	maxZoomTiles := reader.TilesAtZoom(exp.MaxZoom)
+	if len(maxZoomTiles) > 0 {
+		tile := maxZoomTiles[0]
+		img := assertTileDecodesAsImage(t, path, tile[0], tile[1], tile[2])
+		bounds := img.Bounds()
+		if bounds.Dx() == 0 || bounds.Dy() == 0 {
+			t.Errorf("decoded tile %d/%d/%d has zero dimensions", tile[0], tile[1], tile[2])
+		}
+	}
+
+	// 7. Clustering
+	if !h.Clustered {
+		t.Error("expected Clustered = true")
+	}
+
+	// 8. Metadata — non-empty with required keys
+	if result.Metadata == nil {
+		t.Error("metadata is nil")
+	} else {
+		for _, key := range []string{"name", "format", "bounds", "minzoom", "maxzoom"} {
+			if _, ok := result.Metadata[key]; !ok {
+				t.Errorf("metadata missing required key %q", key)
+			}
+		}
+	}
+
+	t.Logf("plausibility: %d tiles across zoom %d-%d, bounds [%.2f,%.2f,%.2f,%.2f]",
+		result.TileCount, exp.MinZoom, exp.MaxZoom,
+		h.MinLon, h.MinLat, h.MaxLon, h.MaxLat)
+}

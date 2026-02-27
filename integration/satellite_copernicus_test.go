@@ -25,20 +25,15 @@ func TestCopernicusDEM(t *testing.T) {
 		Concurrency: runtime.NumCPU(),
 	})
 
-	result := validatePMTiles(t, outPath)
-	if result.TileCount == 0 {
-		t.Error("expected tiles from Copernicus DEM")
-	}
-	if result.Header.TileType != pmtiles.TileTypePNG {
-		t.Errorf("expected PNG tile type for terrarium, got %d", result.Header.TileType)
-	}
-
-	// Verify tiles exist at each zoom level.
-	for z := 7; z <= 10; z++ {
-		if result.ZoomCounts[z] == 0 {
-			t.Errorf("expected tiles at zoom %d, got 0", z)
-		}
-	}
-
-	t.Logf("Copernicus DEM: %d tiles across zoom 7-10", result.TileCount)
+	assertPlausiblePMTiles(t, outPath, plausibilityExpectation{
+		MinZoom:       7,
+		MaxZoom:       10,
+		TileType:      pmtiles.TileTypePNG,
+		MinLon:        8,
+		MaxLon:        9,
+		MinLat:        46,
+		MaxLat:        47,
+		BoundsTol:     2,
+		MinTotalTiles: 10,
+	})
 }
