@@ -60,7 +60,7 @@ func main() {
 	flag.StringVar(&memProfile, "memprofile", "", "Write memory profile to file")
 	flag.IntVar(&memLimitMB, "mem-limit", 0, "Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
-	flag.StringVar(&fillColor, "fill-color", "", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\"")
+	flag.StringVar(&fillColor, "fill-color", "0,0,0,0", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\" (default: transparent)")
 	flag.BoolVar(&rebuild, "rebuild", false, "Force full pyramid rebuild (required for resampling changes)")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (default: keep source)")
 	flag.StringVar(&layerType, "type", "", "Layer type: baselayer, overlay (default: keep source)")
