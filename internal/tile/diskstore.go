@@ -205,9 +205,14 @@ func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) {
 	// This must happen AFTER the ioCh send so the ioLoop always has work
 	// to process — otherwise a single blocked worker with no pending I/O
 	// would deadlock.
+	//
+	// Only gate on memBytes (evictable encoded tile data), not mapOverhead.
+	// mapOverhead only grows (one entry per tile ever written) and can never
+	// be reduced, so including it in the condition would cause a permanent
+	// deadlock once enough tiles have been spilled.
 	if s.memCond != nil {
 		s.spillMu.Lock()
-		for s.totalMemory() > s.memoryLimit {
+		for s.memBytes.Load() > s.memoryLimit {
 			s.memCond.Wait()
 		}
 		s.spillMu.Unlock()
