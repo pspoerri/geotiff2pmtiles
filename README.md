@@ -67,7 +67,7 @@ Or using the Makefile:
 make build            # geotiff2pmtiles only
 make build-transform  # pmtransform only
 make build-all        # both binaries
-make demo-all         # run every demo target
+make example-all      # run every example target
 ```
 
 ### Cross-compilation
@@ -297,7 +297,7 @@ make test-integration-all        # Download + run all tests
 ### Profiling
 
 ```bash
-make demo-profile                          # Run with CPU + memory profiling
+make example-swissimage-profile             # Run with CPU + memory profiling
 go tool pprof -http=:8080 dist/cpu.prof    # Interactive flame graph
 go tool pprof -http=:8081 dist/mem.prof    # Memory profile
 ```
