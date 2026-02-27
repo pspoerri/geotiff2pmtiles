@@ -24,6 +24,7 @@ testdata/
   esaworldcover-ndvi/    # ESA WorldCover S2 NDVI (single-band, ~168 MB)
   esaworldcover-swir/    # ESA WorldCover S2 SWIR (single-band, ~20 MB)
   esaworldcover-gamma0/  # ESA WorldCover S1 VV/VH ratio (SAR, ~346 MB)
+  swissimage/            # swisstopo SWISSIMAGE DOP10 (8-bit RGB LV95, 36 tiles)
 ```
 
 ## Datasets
@@ -36,6 +37,7 @@ testdata/
 | `esaworldcover-ndvi/` | [ESA WorldCover S2](https://esa-worldcover.org/en/data-access) | 4326 | 16-bit 1-band | NDVI (vegetation index) |
 | `esaworldcover-swir/` | [ESA WorldCover S2](https://esa-worldcover.org/en/data-access) | 4326 | 16-bit 1-band | SWIR (shortwave infrared) |
 | `esaworldcover-gamma0/` | [ESA WorldCover S1](https://esa-worldcover.org/en/data-access) | 4326 | 16-bit multi-band | Sentinel-1 SAR VV/VH ratio |
+| `swissimage/` | [swisstopo SWISSIMAGE DOP10](https://www.swisstopo.admin.ch/en/orthoimage-swissimage-10) | 2056 (LV95) | 8-bit RGB | 10cm orthophoto mosaic (36 tiles) |
 
 ## Running Tests
 
@@ -53,6 +55,7 @@ make test-integration-esaworldcover        # 16-bit 4-band RGBNIR -> PNG
 make test-integration-esaworldcover-ndvi   # Single-band NDVI -> grayscale PNG
 make test-integration-esaworldcover-swir   # Single-band SWIR -> grayscale PNG
 make test-integration-esaworldcover-gamma0 # SAR VV/VH ratio -> PNG
+make test-integration-swissimage          # 8-bit RGB LV95 mosaic -> JPEG
 ```
 
 ## Demos (CLI)
@@ -64,4 +67,5 @@ make demo-esaworldcover          # ESA WorldCover RGBNIR -> PMTiles
 make demo-esaworldcover-ndvi     # ESA WorldCover NDVI -> grayscale PMTiles
 make demo-esaworldcover-swir     # ESA WorldCover SWIR -> grayscale PMTiles
 make demo-esaworldcover-gamma0   # ESA WorldCover Gamma0 SAR -> PMTiles
+make demo-swissimage             # SWISSIMAGE DOP10 -> JPEG PMTiles
 ```

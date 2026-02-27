@@ -7,8 +7,7 @@ For more information on the PMTiles format, see the [PMTiles documentation](http
 
 You can visualize generated PMTiles files at [pmtiles.io](https://pmtiles.io/).
 
-Sample input data is provided in the `data/` directory (download with `wget -i data.csv`).
-A second sample directory `data_tfw/` supports plain TIFFs with TFW sidecar files (see `data_tfw/README.md`).
+Sample input data (swisstopo SWISSIMAGE DOP10) is downloaded via `make test-integration-download` into `integration/testdata/swissimage/`.
 
 
 ## Features
@@ -124,7 +123,7 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 Convert a directory of GeoTIFFs with auto zoom detection:
 
 ```bash
-./geotiff2pmtiles --verbose data/ output.pmtiles
+./geotiff2pmtiles --verbose integration/testdata/swissimage/ output.pmtiles
 ```
 
 Convert specific files with custom zoom range and PNG format:
@@ -138,7 +137,7 @@ High-quality WebP with bilinear resampling:
 
 ```bash
 ./geotiff2pmtiles --format webp --quality 95 --resampling bilinear \
-  data/ output.pmtiles
+  input/ output.pmtiles
 ```
 
 Categorical data (e.g. land cover classification) with mode resampling:
@@ -152,7 +151,7 @@ Fill transparent/nodata areas with a solid color:
 
 ```bash
 ./geotiff2pmtiles --fill-color "0,0,0,255" --format png \
-  data/ output.pmtiles
+  input/ output.pmtiles
 ```
 
 Elevation data (auto-detects float GeoTIFF and selects Terrarium encoding):
