@@ -10,7 +10,7 @@ import (
 	"github.com/pspoerri/geotiff2pmtiles/internal/pmtiles"
 )
 
-const esaGamma0File = "ESA_WorldCover_10m_2021_v200_N00E009_S1VVVHratio.tif"
+const esaGamma0File = "ESA_WorldCover_10m_2021_v200_N46E008_S1VVVHratio.tif"
 
 func openESAGamma0(t *testing.T) string {
 	t.Helper()
@@ -87,10 +87,10 @@ func TestESAWorldCoverGamma0Pipeline(t *testing.T) {
 		MinZoom:       7,
 		MaxZoom:       9,
 		TileType:      pmtiles.TileTypePNG,
-		MinLon:        9,
-		MaxLon:        10,
-		MinLat:        0,
-		MaxLat:        1,
+		MinLon:        8,
+		MaxLon:        9,
+		MinLat:        46,
+		MaxLat:        47,
 		BoundsTol:     2,
 		MinTotalTiles: 5,
 	})

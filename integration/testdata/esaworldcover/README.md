@@ -4,10 +4,10 @@ Sentinel-2 median Red-Green-Blue-NIR composite at 10m resolution.
 
 ## File
 
-`ESA_WorldCover_10m_2021_v200_N00E009_S2RGBNIR.tif` — 16-bit 4-band COG, EPSG:4326, ~455 MB
+`ESA_WorldCover_10m_2021_v200_N46E008_S2RGBNIR.tif` — 16-bit 4-band COG, EPSG:4326, ~455 MB
 
 4 bands: B04 (Red), B03 (Green), B02 (Blue), B08 (NIR). Values scaled by 10000
-(SCALE=0.0001). Tile covers N00 E009 (Gulf of Guinea / Cameroon coast).
+(SCALE=0.0001). Tile covers N46 E008 (Swiss Alps, Bernese Oberland region).
 
 ## Source
 

@@ -4,10 +4,10 @@ Sentinel-2 NDVI temporal percentile composite at 10m resolution.
 
 ## File
 
-`ESA_WorldCover_10m_2021_v200_N00E009_NDVI.tif` — 8-bit 3-band COG, EPSG:4326, ~168 MB
+`ESA_WorldCover_10m_2021_v200_N46E008_NDVI.tif` — 8-bit 3-band COG, EPSG:4326, ~168 MB
 
 3 bands: NDVI-p90 (upper range), NDVI-p50 (median), NDVI-p10 (lower range).
-12000x12000 pixels. Tile covers N00 E009 (Gulf of Guinea / Cameroon coast).
+12000x12000 pixels. Tile covers N46 E008 (Swiss Alps, Bernese Oberland region).
 
 ## Source
 

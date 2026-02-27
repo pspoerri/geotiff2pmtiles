@@ -4,11 +4,11 @@ Sentinel-1 SAR median gamma0 backscatter composite at 10m resolution.
 
 ## File
 
-`ESA_WorldCover_10m_2021_v200_N00E009_S1VVVHratio.tif` — 16-bit 3-band COG, EPSG:4326, ~346 MB
+`ESA_WorldCover_10m_2021_v200_N46E008_S1VVVHratio.tif` — 16-bit 3-band COG, EPSG:4326, ~346 MB
 
 3 bands: VV, VH, VH/VV ratio. Data is dB-scaled (SCALE=0.001, OFFSET=-45):
 physical dB = pixel_value * 0.001 - 45. 12000x12000 pixels.
-Tile covers N00 E009 (Gulf of Guinea / Cameroon coast).
+Tile covers N46 E008 (Swiss Alps, Bernese Oberland region).
 
 ## Source
 
