@@ -58,14 +58,14 @@ make test-integration-esaworldcover-gamma0 # SAR VV/VH ratio -> PNG
 make test-integration-swissimage          # 8-bit RGB LV95 mosaic -> JPEG
 ```
 
-## Demos (CLI)
+## Examples (CLI)
 
 ```bash
-make demo-tfw                    # Natural Earth -> PMTiles (TFW sidecar)
-make demo-copernicus             # Copernicus DEM -> terrarium PMTiles
-make demo-esaworldcover          # ESA WorldCover RGBNIR -> PMTiles
-make demo-esaworldcover-ndvi     # ESA WorldCover NDVI -> grayscale PMTiles
-make demo-esaworldcover-swir     # ESA WorldCover SWIR -> grayscale PMTiles
-make demo-esaworldcover-gamma0   # ESA WorldCover Gamma0 SAR -> PMTiles
-make demo-swissimage             # SWISSIMAGE DOP10 -> JPEG PMTiles
+make example-naturalearth            # Natural Earth -> PMTiles (TFW sidecar)
+make example-copernicus             # Copernicus DEM -> terrarium PMTiles
+make example-esaworldcover          # ESA WorldCover RGBNIR -> PMTiles
+make example-esaworldcover-ndvi     # ESA WorldCover NDVI -> grayscale PMTiles
+make example-esaworldcover-swir     # ESA WorldCover SWIR -> grayscale PMTiles
+make example-esaworldcover-gamma0   # ESA WorldCover Gamma0 SAR -> PMTiles
+make example-swissimage             # SWISSIMAGE DOP10 -> JPEG PMTiles
 ```
