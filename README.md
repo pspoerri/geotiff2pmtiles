@@ -106,7 +106,7 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--resampling`  | `bicubic`     | Interpolation method: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
 | `--mem-limit`   | auto          | Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM) |
 | `--no-spill`    | `false`       | Disable disk spilling (keep all tiles in memory)   |
-| `--fill-color`  |               | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` |
+| `--fill-color`  | `0,0,0,0`     | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` (default: transparent) |
 | `--attribution` |               | Attribution string for data sources (stored in metadata) |
 | `--type`        | `baselayer`   | Layer type: `baselayer`, `overlay`                 |
 | `--bands`       | `1,2,3`       | 1-indexed band numbers for R,G,B output (e.g. `4,1,2` for NIR-R-G false color) |
@@ -148,7 +148,7 @@ Categorical data (e.g. land cover classification) with mode resampling:
   landcover/ classification.pmtiles
 ```
 
-Fill transparent/nodata areas with a solid color:
+Fill transparent/nodata areas with a solid color (e.g. black):
 
 ```bash
 ./geotiff2pmtiles --fill-color "0,0,0,255" --format png \
@@ -215,7 +215,7 @@ pmtransform [flags] <input.pmtiles> <output.pmtiles>
 | `--tile-size`   | keep source   | Output tile size in pixels (inferred from first decoded tile) |
 | `--resampling`  | `bicubic`     | Interpolation method: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
 | `--rebuild`     | `false`       | Force full pyramid rebuild (for resampling changes) |
-| `--fill-color`  |               | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` |
+| `--fill-color`  | `0,0,0,0`     | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` (default: transparent) |
 | `--concurrency` | `NumCPU`      | Number of parallel workers                         |
 | `--mem-limit`   | auto          | Tile store memory limit in MB (0 = auto ~90% of RAM) |
 | `--no-spill`    | `false`       | Disable disk spilling                              |
@@ -247,7 +247,7 @@ Rebuild the entire pyramid with Lanczos resampling:
 Substitute transparent/nodata with black and fill missing tile positions:
 
 ```bash
-./pmtransform --fill-color "0,0,0,0" input.pmtiles output.pmtiles
+./pmtransform --fill-color "0,0,0,255" input.pmtiles output.pmtiles
 ```
 
 Remove higher zoom levels (keep only z10-z14):

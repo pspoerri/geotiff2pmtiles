@@ -66,7 +66,7 @@ func main() {
 	flag.StringVar(&memProfile, "memprofile", "", "Write memory profile to file")
 	flag.IntVar(&memLimitMB, "mem-limit", 0, "Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
-	flag.StringVar(&fillColor, "fill-color", "", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\"")
+	flag.StringVar(&fillColor, "fill-color", "0,0,0,0", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\" (default: transparent)")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (stored in metadata)")
 	flag.StringVar(&layerType, "type", "baselayer", "Layer type: baselayer, overlay")
 	flag.StringVar(&bandsStr, "bands", "1,2,3", "1-indexed band numbers for R,G,B output (e.g. \"4,1,2\" for NIR-R-G)")
