@@ -307,7 +307,7 @@ example-copernicus: build test-integration-download
 	./$(OUTPUT) \
 		--format terrarium \
 		--tile-size $(TILE_SIZE) \
-		--max-zoom 10 \
+		--resampling mode \
 		--concurrency $(CONCURRENT) \
 		$(COPERNICUS_DIR)/ $(BUILD_DIR)/example-copernicus-terrarium.pmtiles
 
@@ -319,7 +319,6 @@ example-esaworldcover: build test-integration-download
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \
-		--max-zoom 9 \
 		--concurrency $(CONCURRENT) \
 		$(ESAWORLDCOVER_DIR)/ $(BUILD_DIR)/example-esaworldcover-$(FORMAT).pmtiles
 
@@ -328,7 +327,6 @@ example-esaworldcover-ndvi: build test-integration-download
 	./$(OUTPUT) \
 		--format png \
 		--tile-size $(TILE_SIZE) \
-		--max-zoom 9 \
 		--concurrency $(CONCURRENT) \
 		$(ESAWORLDCOVER_NDVI_DIR)/ $(BUILD_DIR)/example-esaworldcover-ndvi.pmtiles
 
@@ -337,7 +335,6 @@ example-esaworldcover-swir: build test-integration-download
 	./$(OUTPUT) \
 		--format png \
 		--tile-size $(TILE_SIZE) \
-		--max-zoom 9 \
 		--bands 1,2,1 \
 		--alpha-band -1 \
 		--concurrency $(CONCURRENT) \
@@ -348,7 +345,6 @@ example-esaworldcover-gamma0: build test-integration-download
 	./$(OUTPUT) \
 		--format png \
 		--tile-size $(TILE_SIZE) \
-		--max-zoom 9 \
 		--alpha-band -1 \
 		--rescale-range 0,65535 \
 		--concurrency $(CONCURRENT) \
