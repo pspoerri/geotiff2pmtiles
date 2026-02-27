@@ -24,23 +24,23 @@ NE_FILE="HYP_HR_SR_OB_DR.tif"
 
 # --- ESA WorldCover S2 RGBNIR composite (16-bit 4-band, EPSG:4326, ~455 MB) ---
 ESA_RGBNIR_DIR="$SCRIPT_DIR/esaworldcover"
-ESA_RGBNIR_URL="https://esa-worldcover-s2.s3.eu-central-1.amazonaws.com/rgbnir/2021/N00/ESA_WorldCover_10m_2021_v200_N00E009_S2RGBNIR.tif"
-ESA_RGBNIR_FILE="ESA_WorldCover_10m_2021_v200_N00E009_S2RGBNIR.tif"
+ESA_RGBNIR_URL="https://esa-worldcover-s2.s3.eu-central-1.amazonaws.com/rgbnir/2021/N46/ESA_WorldCover_10m_2021_v200_N46E008_S2RGBNIR.tif"
+ESA_RGBNIR_FILE="ESA_WorldCover_10m_2021_v200_N46E008_S2RGBNIR.tif"
 
 # --- ESA WorldCover S2 NDVI (single-band, EPSG:4326, ~168 MB) ---
 ESA_NDVI_DIR="$SCRIPT_DIR/esaworldcover-ndvi"
-ESA_NDVI_URL="https://esa-worldcover-s2.s3.eu-central-1.amazonaws.com/ndvi/2021/N00/ESA_WorldCover_10m_2021_v200_N00E009_NDVI.tif"
-ESA_NDVI_FILE="ESA_WorldCover_10m_2021_v200_N00E009_NDVI.tif"
+ESA_NDVI_URL="https://esa-worldcover-s2.s3.eu-central-1.amazonaws.com/ndvi/2021/N46/ESA_WorldCover_10m_2021_v200_N46E008_NDVI.tif"
+ESA_NDVI_FILE="ESA_WorldCover_10m_2021_v200_N46E008_NDVI.tif"
 
 # --- ESA WorldCover S2 SWIR (single-band, EPSG:4326, ~20 MB) ---
 ESA_SWIR_DIR="$SCRIPT_DIR/esaworldcover-swir"
-ESA_SWIR_URL="https://esa-worldcover-s2.s3.eu-central-1.amazonaws.com/swir/2021/N00/ESA_WorldCover_10m_2021_v200_N00E009_SWIR.tif"
-ESA_SWIR_FILE="ESA_WorldCover_10m_2021_v200_N00E009_SWIR.tif"
+ESA_SWIR_URL="https://esa-worldcover-s2.s3.eu-central-1.amazonaws.com/swir/2021/N46/ESA_WorldCover_10m_2021_v200_N46E008_SWIR.tif"
+ESA_SWIR_FILE="ESA_WorldCover_10m_2021_v200_N46E008_SWIR.tif"
 
 # --- ESA WorldCover S1 VV/VH ratio / gamma0 (SAR, EPSG:4326, ~346 MB) ---
 ESA_GAMMA0_DIR="$SCRIPT_DIR/esaworldcover-gamma0"
-ESA_GAMMA0_URL="https://esa-worldcover-s1.s3.eu-central-1.amazonaws.com/vvvhratio/2021/N00/ESA_WorldCover_10m_2021_v200_N00E009_S1VVVHratio.tif"
-ESA_GAMMA0_FILE="ESA_WorldCover_10m_2021_v200_N00E009_S1VVVHratio.tif"
+ESA_GAMMA0_URL="https://esa-worldcover-s1.s3.eu-central-1.amazonaws.com/vvvhratio/2021/N46/ESA_WorldCover_10m_2021_v200_N46E008_S1VVVHratio.tif"
+ESA_GAMMA0_FILE="ESA_WorldCover_10m_2021_v200_N46E008_S1VVVHratio.tif"
 
 # --- swisstopo SWISSIMAGE DOP10 (8-bit RGB, EPSG:2056 LV95, 10cm, ~36 tiles) ---
 SWISSIMAGE_DIR="$SCRIPT_DIR/swissimage"
@@ -82,10 +82,10 @@ if [ ! -f "$NE_DIR/$NE_FILE" ]; then
 fi
 
 # Download ESA WorldCover datasets
-download_file "$ESA_RGBNIR_URL" "$ESA_RGBNIR_DIR/$ESA_RGBNIR_FILE" "ESA WorldCover S2 RGBNIR (N00 E009)"
-download_file "$ESA_NDVI_URL" "$ESA_NDVI_DIR/$ESA_NDVI_FILE" "ESA WorldCover S2 NDVI (N00 E009)"
-download_file "$ESA_SWIR_URL" "$ESA_SWIR_DIR/$ESA_SWIR_FILE" "ESA WorldCover S2 SWIR (N00 E009)"
-download_file "$ESA_GAMMA0_URL" "$ESA_GAMMA0_DIR/$ESA_GAMMA0_FILE" "ESA WorldCover S1 Gamma0 VV/VH ratio (N00 E009)"
+download_file "$ESA_RGBNIR_URL" "$ESA_RGBNIR_DIR/$ESA_RGBNIR_FILE" "ESA WorldCover S2 RGBNIR (N46 E008)"
+download_file "$ESA_NDVI_URL" "$ESA_NDVI_DIR/$ESA_NDVI_FILE" "ESA WorldCover S2 NDVI (N46 E008)"
+download_file "$ESA_SWIR_URL" "$ESA_SWIR_DIR/$ESA_SWIR_FILE" "ESA WorldCover S2 SWIR (N46 E008)"
+download_file "$ESA_GAMMA0_URL" "$ESA_GAMMA0_DIR/$ESA_GAMMA0_FILE" "ESA WorldCover S1 Gamma0 VV/VH ratio (N46 E008)"
 
 # Download SWISSIMAGE DOP10 tiles (from URL list)
 if [ -f "$SWISSIMAGE_CSV" ]; then

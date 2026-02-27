@@ -4,10 +4,10 @@ Sentinel-2 shortwave infrared median composite at 20m resolution.
 
 ## File
 
-`ESA_WorldCover_10m_2021_v200_N00E009_SWIR.tif` — 8-bit 2-band COG, EPSG:4326, ~20 MB
+`ESA_WorldCover_10m_2021_v200_N46E008_SWIR.tif` — 8-bit 2-band COG, EPSG:4326, ~20 MB
 
 2 bands: B11-p50, B12-p50 (median shortwave infrared reflectance).
-6000x6000 pixels (20m resolution). Tile covers N00 E009 (Gulf of Guinea / Cameroon coast).
+6000x6000 pixels (20m resolution). Tile covers N46 E008 (Swiss Alps, Bernese Oberland region).
 
 ## Source
 

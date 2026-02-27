@@ -10,7 +10,7 @@ import (
 	"github.com/pspoerri/geotiff2pmtiles/internal/pmtiles"
 )
 
-const esaNDVIFile = "ESA_WorldCover_10m_2021_v200_N00E009_NDVI.tif"
+const esaNDVIFile = "ESA_WorldCover_10m_2021_v200_N46E008_NDVI.tif"
 
 func openESANDVI(t *testing.T) string {
 	t.Helper()
@@ -73,10 +73,10 @@ func TestESAWorldCoverNDVIPipeline(t *testing.T) {
 		MinZoom:       7,
 		MaxZoom:       9,
 		TileType:      pmtiles.TileTypePNG,
-		MinLon:        9,
-		MaxLon:        10,
-		MinLat:        0,
-		MaxLat:        1,
+		MinLon:        8,
+		MaxLon:        9,
+		MinLat:        46,
+		MaxLat:        47,
 		BoundsTol:     2,
 		MinTotalTiles: 5,
 	})
