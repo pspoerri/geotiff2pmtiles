@@ -9,13 +9,13 @@ import (
 
 func TestClamp(t *testing.T) {
 	tests := []struct{ v, lo, hi, want int }{
-		{5, 0, 10, 5},    // in range
-		{-1, 0, 10, 0},   // below lo
-		{11, 0, 10, 10},  // above hi
-		{0, 0, 10, 0},    // at lo
-		{10, 0, 10, 10},  // at hi
-		{0, 0, 0, 0},     // lo == hi
-		{-5, -10, -1, -5}, // negative range, in range
+		{5, 0, 10, 5},       // in range
+		{-1, 0, 10, 0},      // below lo
+		{11, 0, 10, 10},     // above hi
+		{0, 0, 10, 0},       // at lo
+		{10, 0, 10, 10},     // at hi
+		{0, 0, 0, 0},        // lo == hi
+		{-5, -10, -1, -5},   // negative range, in range
 		{-15, -10, -1, -10}, // below negative lo
 	}
 	for _, tt := range tests {

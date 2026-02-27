@@ -663,7 +663,7 @@ func downsampleQuadrantBilinear(dst *image.RGBA, src *image.RGBA, dstOffX, dstOf
 			a11 := srcPix[off11+3]
 
 			// Alpha: straight average of all 4 (nodata contributes 0).
-			a := uint8((uint16(a00)+uint16(a10)+uint16(a01)+uint16(a11)+2) / 4)
+			a := uint8((uint16(a00) + uint16(a10) + uint16(a01) + uint16(a11) + 2) / 4)
 
 			// RGB: average only pixels with non-zero alpha.
 			var rSum, gSum, bSum uint16
