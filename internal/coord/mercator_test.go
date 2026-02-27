@@ -160,6 +160,56 @@ func TestMaxZoomForResolution(t *testing.T) {
 	}
 }
 
+func TestMinZoomForSingleTile(t *testing.T) {
+	tests := []struct {
+		name           string
+		minLon, minLat float64
+		maxLon, maxLat float64
+		wantZoom       int
+	}{
+		// Switzerland fits in a single tile at zoom 6.
+		{"switzerland", 5.9, 45.8, 10.6, 47.9, 6},
+		// A tiny 0.01° bounding box near Zurich fits in one tile at zoom 13.
+		{"zurich tiny", 8.54, 47.37, 8.55, 47.38, 13},
+		// A single-point region (degenerate box) should return zoom 28.
+		{"point zurich", 8.54, 47.37, 8.54, 47.37, 28},
+		// Whole-world bounds: single tile only at zoom 0.
+		{"world", -180, -85.05, 180, 85.05, 0},
+		// Western hemisphere spans 2 tiles at zoom 1, so single-tile zoom is 0.
+		{"western hemisphere", -180, -85.05, 0, 85.05, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MinZoomForSingleTile(tt.minLon, tt.minLat, tt.maxLon, tt.maxLat)
+			if got != tt.wantZoom {
+				t.Errorf("MinZoomForSingleTile(lon[%.2f,%.2f] lat[%.2f,%.2f]) = %d, want %d",
+					tt.minLon, tt.maxLon, tt.minLat, tt.maxLat, got, tt.wantZoom)
+			}
+			// Verify the result: bounds must fit in exactly one tile at the returned zoom.
+			if got >= 0 {
+				minTX, minTY := LonLatToTile(tt.minLon, tt.maxLat, got)
+				maxTX, maxTY := LonLatToTile(tt.maxLon, tt.minLat, got)
+				if minTX != maxTX || minTY != maxTY {
+					t.Errorf("at zoom %d, bounds span tiles (%d,%d)-(%d,%d), expected single tile",
+						got, minTX, minTY, maxTX, maxTY)
+				}
+			}
+			// Verify that one zoom level higher (if possible) spans multiple tiles
+			// (unless wantZoom==28 meaning the region is a point or extremely tiny).
+			if got < 28 {
+				z1 := got + 1
+				minTX, minTY := LonLatToTile(tt.minLon, tt.maxLat, z1)
+				maxTX, maxTY := LonLatToTile(tt.maxLon, tt.minLat, z1)
+				if minTX == maxTX && minTY == maxTY && tt.wantZoom != 28 {
+					t.Errorf("at zoom %d (one above), bounds still fit in a single tile — MinZoomForSingleTile should have returned %d",
+						z1, z1)
+				}
+			}
+		})
+	}
+}
+
 func TestTilesInBounds(t *testing.T) {
 	// A small bounding box around Zurich at zoom 10.
 	tiles := TilesInBounds(10, 8.4, 47.3, 8.6, 47.5)

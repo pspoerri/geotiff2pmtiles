@@ -236,9 +236,14 @@ func main() {
 		maxZoom = autoMax
 	}
 	if minZoom < 0 {
-		minZoom = maxZoom - 6
-		if minZoom < 0 {
-			minZoom = 0
+		// Use the highest zoom level at which the entire image fits in a single
+		// tile, so the output always has a useful overview at the minimum zoom.
+		minZoom = coord.MinZoomForSingleTile(
+			mergedBounds.MinLon, mergedBounds.MinLat,
+			mergedBounds.MaxLon, mergedBounds.MaxLat,
+		)
+		if minZoom > maxZoom {
+			minZoom = maxZoom
 		}
 	}
 	if verbose {
