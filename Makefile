@@ -35,6 +35,7 @@ ESAWORLDCOVER_DIR       := $(TESTDATA_DIR)/esaworldcover
 ESAWORLDCOVER_NDVI_DIR  := $(TESTDATA_DIR)/esaworldcover-ndvi
 ESAWORLDCOVER_SWIR_DIR  := $(TESTDATA_DIR)/esaworldcover-swir
 ESAWORLDCOVER_GAMMA0_DIR := $(TESTDATA_DIR)/esaworldcover-gamma0
+SWISSIMAGE_DIR           := $(TESTDATA_DIR)/swissimage
 
 .PHONY: all build build-transform build-all install \
         test test-race test-cover bench \
@@ -42,11 +43,13 @@ ESAWORLDCOVER_GAMMA0_DIR := $(TESTDATA_DIR)/esaworldcover-gamma0
         test-integration-copernicus test-integration-naturalearth \
         test-integration-esaworldcover test-integration-esaworldcover-ndvi \
         test-integration-esaworldcover-swir test-integration-esaworldcover-gamma0 \
+        test-integration-swissimage \
         lint fmt vet tidy check \
         clean clean-all \
-        run demo demo-all demo-full-disk demo-profile pprof-cpu pprof-mem \
-        demo-jpeg demo-png demo-webp \
-        demo-full-disk-jpeg demo-full-disk-png demo-full-disk-webp \
+        run demo-all pprof-cpu pprof-mem \
+        demo-swissimage demo-swissimage-full-disk demo-swissimage-profile \
+        demo-swissimage-jpeg demo-swissimage-png demo-swissimage-webp \
+        demo-swissimage-full-disk-jpeg demo-swissimage-full-disk-png demo-swissimage-full-disk-webp \
         demo-tfw demo-tfw-full-disk \
         demo-tfw-jpeg demo-tfw-png demo-tfw-webp \
         demo-tfw-full-disk-jpeg demo-tfw-full-disk-png demo-tfw-full-disk-webp \
@@ -133,6 +136,10 @@ test-integration-esaworldcover-swir:
 test-integration-esaworldcover-gamma0:
 	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestESAWorldCoverGamma0 ./integration/
 
+## test-integration-swissimage: Run SWISSIMAGE DOP10 integration test (8-bit RGB LV95 multi-source → JPEG)
+test-integration-swissimage:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestSwissImage ./integration/
+
 ## test-integration-all: Download data and run all integration tests
 test-integration-all: test-integration-download test-integration-real
 
@@ -160,31 +167,44 @@ check: fmt vet test
 
 # ---------- Run / Demo ----------
 
-## run: Build and run with ARGS (e.g. make run ARGS="--verbose data/ out.pmtiles")
+## run: Build and run with ARGS (e.g. make run ARGS="--verbose integration/testdata/swissimage/ out.pmtiles")
 run: build
 	./$(OUTPUT) $(ARGS)
 
 ## demo-all: Run all demos (all formats, full-disk, TFW, Copernicus, ESA WorldCover, and transform)
-demo-all: demo-jpeg demo-png demo-webp \
-          demo-full-disk-jpeg demo-full-disk-png demo-full-disk-webp \
+demo-all: demo-swissimage-jpeg demo-swissimage-png demo-swissimage-webp \
+          demo-swissimage-full-disk-jpeg demo-swissimage-full-disk-png demo-swissimage-full-disk-webp \
           demo-tfw-jpeg demo-tfw-png demo-tfw-webp \
           demo-tfw-full-disk-jpeg demo-tfw-full-disk-png demo-tfw-full-disk-webp \
           demo-copernicus \
           demo-esaworldcover demo-esaworldcover-ndvi demo-esaworldcover-swir demo-esaworldcover-gamma0 \
           demo-transform demo-transform-reencode demo-transform-rebuild
 
-## demo: Build and run a demonstration with the sample data directory
-demo: build
+# ---------- SWISSIMAGE DOP10 Demo (8-bit RGB LV95 multi-source) ----------
+
+## demo-swissimage: Demo with swisstopo SWISSIMAGE DOP10 (8-bit RGB EPSG:2056 → JPEG)
+demo-swissimage: build test-integration-download
 	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \
 		--max-zoom $(MAX_ZOOM) \
 		--concurrency $(CONCURRENT) \
-		data/ $(BUILD_DIR)/demo-$(FORMAT).pmtiles
+		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/demo-swissimage-$(FORMAT).pmtiles
 
-## demo-profile: Run demo with CPU and memory profiling
-demo-profile: build
+## demo-swissimage-full-disk: SWISSIMAGE demo with aggressive disk spilling (1 MB memory limit)
+demo-swissimage-full-disk: build test-integration-download
+	./$(OUTPUT) \
+		--format $(FORMAT) \
+		--quality $(QUALITY) \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom $(MAX_ZOOM) \
+		--concurrency $(CONCURRENT) \
+		--mem-limit 1 \
+		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/demo-swissimage-full-disk-$(FORMAT).pmtiles
+
+## demo-swissimage-profile: SWISSIMAGE demo with CPU and memory profiling
+demo-swissimage-profile: build test-integration-download
 	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
@@ -193,7 +213,7 @@ demo-profile: build
 		--concurrency $(CONCURRENT) \
 		--cpuprofile $(BUILD_DIR)/cpu.prof \
 		--memprofile $(BUILD_DIR)/mem.prof \
-		data/ $(BUILD_DIR)/demo.pmtiles
+		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/demo-swissimage.pmtiles
 	@echo ""
 	@echo "Profile files written:"
 	@echo "  CPU: $(BUILD_DIR)/cpu.prof"
@@ -211,45 +231,34 @@ pprof-cpu:
 pprof-mem:
 	$(GO) tool pprof -http=:8081 $(BUILD_DIR)/mem.prof
 
-## demo-full-disk: Demo with aggressive disk spilling (1 MB memory limit)
-demo-full-disk: build
-	./$(OUTPUT) \
-		--format $(FORMAT) \
-		--quality $(QUALITY) \
-		--tile-size $(TILE_SIZE) \
-		--max-zoom $(MAX_ZOOM) \
-		--concurrency $(CONCURRENT) \
-		--mem-limit 1 \
-		data/ $(BUILD_DIR)/demo-full-disk-$(FORMAT).pmtiles
+## demo-swissimage-jpeg: SWISSIMAGE demo with JPEG encoding
+demo-swissimage-jpeg: FORMAT=jpeg
+demo-swissimage-jpeg: demo-swissimage
 
-## demo-jpeg: Demo with JPEG encoding (default quality)
-demo-jpeg: FORMAT=jpeg
-demo-jpeg: demo
+## demo-swissimage-png: SWISSIMAGE demo with PNG encoding
+demo-swissimage-png: FORMAT=png
+demo-swissimage-png: demo-swissimage
 
-## demo-png: Demo with PNG encoding
-demo-png: FORMAT=png
-demo-png: demo
+## demo-swissimage-webp: SWISSIMAGE demo with WebP encoding
+demo-swissimage-webp: FORMAT=webp
+demo-swissimage-webp: demo-swissimage
 
-## demo-webp: Demo with WebP encoding
-demo-webp: FORMAT=webp
-demo-webp: demo
+## demo-swissimage-full-disk-jpeg: SWISSIMAGE full-disk mode with JPEG
+demo-swissimage-full-disk-jpeg: FORMAT=jpeg
+demo-swissimage-full-disk-jpeg: demo-swissimage-full-disk
 
-## demo-full-disk-jpeg: Full-disk mode with JPEG
-demo-full-disk-jpeg: FORMAT=jpeg
-demo-full-disk-jpeg: demo-full-disk
+## demo-swissimage-full-disk-png: SWISSIMAGE full-disk mode with PNG
+demo-swissimage-full-disk-png: FORMAT=png
+demo-swissimage-full-disk-png: demo-swissimage-full-disk
 
-## demo-full-disk-png: Full-disk mode with PNG
-demo-full-disk-png: FORMAT=png
-demo-full-disk-png: demo-full-disk
-
-## demo-full-disk-webp: Full-disk mode with WebP
-demo-full-disk-webp: FORMAT=webp
-demo-full-disk-webp: demo-full-disk
+## demo-swissimage-full-disk-webp: SWISSIMAGE full-disk mode with WebP
+demo-swissimage-full-disk-webp: FORMAT=webp
+demo-swissimage-full-disk-webp: demo-swissimage-full-disk
 
 # ---------- TFW Demo (Natural Earth global data) ----------
 
 ## demo-tfw: Demo with TFW world-file data (global Natural Earth raster)
-demo-tfw: build
+demo-tfw: build test-integration-download
 	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
@@ -258,7 +267,7 @@ demo-tfw: build
 		$(NATURALEARTH_DIR)/ $(BUILD_DIR)/demo-tfw-$(FORMAT).pmtiles
 
 ## demo-tfw-full-disk: TFW demo with aggressive disk spilling (1 MB memory limit)
-demo-tfw-full-disk: build
+demo-tfw-full-disk: build test-integration-download
 	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
@@ -294,7 +303,7 @@ demo-tfw-full-disk-webp: demo-tfw-full-disk
 # ---------- Copernicus DEM Demo (float32 → terrarium) ----------
 
 ## demo-copernicus: Demo with Copernicus DEM (float32 → terrarium PNG)
-demo-copernicus: build
+demo-copernicus: build test-integration-download
 	./$(OUTPUT) \
 		--format terrarium \
 		--tile-size $(TILE_SIZE) \
@@ -305,7 +314,7 @@ demo-copernicus: build
 # ---------- ESA WorldCover Demo (16-bit RGBNIR → PNG) ----------
 
 ## demo-esaworldcover: Demo with ESA WorldCover S2 RGBNIR (16-bit 4-band → PNG with auto-detect)
-demo-esaworldcover: build
+demo-esaworldcover: build test-integration-download
 	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
@@ -315,7 +324,7 @@ demo-esaworldcover: build
 		$(ESAWORLDCOVER_DIR)/ $(BUILD_DIR)/demo-esaworldcover-$(FORMAT).pmtiles
 
 ## demo-esaworldcover-ndvi: Demo with ESA WorldCover NDVI (3-band p90/p50/p10 composite → PNG)
-demo-esaworldcover-ndvi: build
+demo-esaworldcover-ndvi: build test-integration-download
 	./$(OUTPUT) \
 		--format png \
 		--tile-size $(TILE_SIZE) \
@@ -324,7 +333,7 @@ demo-esaworldcover-ndvi: build
 		$(ESAWORLDCOVER_NDVI_DIR)/ $(BUILD_DIR)/demo-esaworldcover-ndvi.pmtiles
 
 ## demo-esaworldcover-swir: Demo with ESA WorldCover SWIR (2-band B11/B12 composite → PNG)
-demo-esaworldcover-swir: build
+demo-esaworldcover-swir: build test-integration-download
 	./$(OUTPUT) \
 		--format png \
 		--tile-size $(TILE_SIZE) \
@@ -335,7 +344,7 @@ demo-esaworldcover-swir: build
 		$(ESAWORLDCOVER_SWIR_DIR)/ $(BUILD_DIR)/demo-esaworldcover-swir.pmtiles
 
 ## demo-esaworldcover-gamma0: Demo with ESA WorldCover S1 Gamma0 VV/VH ratio (SAR → PNG)
-demo-esaworldcover-gamma0: build
+demo-esaworldcover-gamma0: build test-integration-download
 	./$(OUTPUT) \
 		--format png \
 		--tile-size $(TILE_SIZE) \
@@ -347,38 +356,38 @@ demo-esaworldcover-gamma0: build
 # ---------- PMTiles Transform Demo ----------
 
 ## demo-transform: Demo passthrough (copy tiles, no re-encode)
-demo-transform: build build-transform
+demo-transform: build build-transform test-integration-download
 	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \
 		--max-zoom $(MAX_ZOOM) \
 		--concurrency $(CONCURRENT) \
-		data/ $(BUILD_DIR)/demo-$(FORMAT).pmtiles
+		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/demo-$(FORMAT).pmtiles
 	./$(OUTPUT_TRANSFORM) --verbose \
 		$(BUILD_DIR)/demo-$(FORMAT).pmtiles $(BUILD_DIR)/demo-transform-passthrough.pmtiles
 
 ## demo-transform-reencode: Demo format conversion (WebP → PNG)
-demo-transform-reencode: build build-transform
+demo-transform-reencode: build build-transform test-integration-download
 	./$(OUTPUT) \
 		--format webp \
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \
 		--max-zoom $(MAX_ZOOM) \
 		--concurrency $(CONCURRENT) \
-		data/ $(BUILD_DIR)/demo-webp.pmtiles
+		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/demo-webp.pmtiles
 	./$(OUTPUT_TRANSFORM) --verbose --format png \
 		$(BUILD_DIR)/demo-webp.pmtiles $(BUILD_DIR)/demo-transform-png.pmtiles
 
 ## demo-transform-rebuild: Demo pyramid rebuild with extended zoom range
-demo-transform-rebuild: build build-transform
+demo-transform-rebuild: build build-transform test-integration-download
 	./$(OUTPUT) \
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \
 		--max-zoom $(MAX_ZOOM) \
 		--concurrency $(CONCURRENT) \
-		data/ $(BUILD_DIR)/demo-$(FORMAT).pmtiles
+		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/demo-$(FORMAT).pmtiles
 	./$(OUTPUT_TRANSFORM) --verbose --rebuild --min-zoom 10 \
 		$(BUILD_DIR)/demo-$(FORMAT).pmtiles $(BUILD_DIR)/demo-transform-rebuild.pmtiles
 
@@ -442,12 +451,12 @@ help:
 	@echo "  make build-transform                 Build pmtransform"
 	@echo "  make build-all                       Build both binaries"
 	@echo "  make demo-all                        Run every demo target"
-	@echo "  make demo MIN_ZOOM=16 MAX_ZOOM=18    Run demo at zoom 16-18"
-	@echo "  make demo-png QUALITY=100             Run demo with PNG"
-	@echo "  make demo-full-disk                   Demo with full disk spilling (1 MB limit)"
-	@echo "  make demo-full-disk-webp              Full disk + WebP encoding"
-	@echo "  make demo-tfw                         Run demo with TFW world-file data"
-	@echo "  make demo-tfw-webp                    TFW demo with WebP"
+	@echo "  make demo-swissimage                  SWISSIMAGE DOP10 demo (LV95 mosaic)"
+	@echo "  make demo-swissimage-png              SWISSIMAGE demo with PNG"
+	@echo "  make demo-swissimage-full-disk        SWISSIMAGE full disk spilling (1 MB limit)"
+	@echo "  make demo-swissimage-profile          SWISSIMAGE demo with profiling"
+	@echo "  make demo-tfw                         Natural Earth TFW demo"
+	@echo "  make demo-tfw-webp                    Natural Earth TFW demo with WebP"
 	@echo "  make demo-copernicus                  Copernicus DEM demo (terrarium)"
 	@echo "  make demo-esaworldcover               ESA WorldCover RGBNIR demo"
 	@echo "  make demo-esaworldcover-ndvi          ESA WorldCover NDVI demo"
@@ -457,4 +466,4 @@ help:
 	@echo "  make demo-transform-reencode          Transform demo (WebP → PNG)"
 	@echo "  make demo-transform-rebuild           Transform demo (rebuild pyramid)"
 	@echo "  make cross-all                        Cross-compile all platforms"
-	@echo "  make run ARGS=\"--verbose data/ o.pmtiles\""
+	@echo "  make run ARGS=\"--verbose $(SWISSIMAGE_DIR)/ o.pmtiles\""

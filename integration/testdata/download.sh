@@ -42,6 +42,10 @@ ESA_GAMMA0_DIR="$SCRIPT_DIR/esaworldcover-gamma0"
 ESA_GAMMA0_URL="https://esa-worldcover-s1.s3.eu-central-1.amazonaws.com/vvvhratio/2021/N00/ESA_WorldCover_10m_2021_v200_N00E009_S1VVVHratio.tif"
 ESA_GAMMA0_FILE="ESA_WorldCover_10m_2021_v200_N00E009_S1VVVHratio.tif"
 
+# --- swisstopo SWISSIMAGE DOP10 (8-bit RGB, EPSG:2056 LV95, 10cm, ~36 tiles) ---
+SWISSIMAGE_DIR="$SCRIPT_DIR/swissimage"
+SWISSIMAGE_CSV="$SWISSIMAGE_DIR/ch.swisstopo.swissimage-dop10-ecyElhwd.csv"
+
 download_file() {
     local url="$1"
     local output="$2"
@@ -82,6 +86,18 @@ download_file "$ESA_RGBNIR_URL" "$ESA_RGBNIR_DIR/$ESA_RGBNIR_FILE" "ESA WorldCov
 download_file "$ESA_NDVI_URL" "$ESA_NDVI_DIR/$ESA_NDVI_FILE" "ESA WorldCover S2 NDVI (N00 E009)"
 download_file "$ESA_SWIR_URL" "$ESA_SWIR_DIR/$ESA_SWIR_FILE" "ESA WorldCover S2 SWIR (N00 E009)"
 download_file "$ESA_GAMMA0_URL" "$ESA_GAMMA0_DIR/$ESA_GAMMA0_FILE" "ESA WorldCover S1 Gamma0 VV/VH ratio (N00 E009)"
+
+# Download SWISSIMAGE DOP10 tiles (from URL list)
+if [ -f "$SWISSIMAGE_CSV" ]; then
+    mkdir -p "$SWISSIMAGE_DIR"
+    while IFS= read -r url || [ -n "$url" ]; do
+        [ -z "$url" ] && continue
+        filename="$(basename "$url")"
+        download_file "$url" "$SWISSIMAGE_DIR/$filename" "SWISSIMAGE DOP10 $filename"
+    done < "$SWISSIMAGE_CSV"
+else
+    echo "⚠ SWISSIMAGE CSV not found: $SWISSIMAGE_CSV (skipping)"
+fi
 
 echo ""
 echo "All test data ready in: $SCRIPT_DIR"

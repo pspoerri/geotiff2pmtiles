@@ -44,9 +44,10 @@ internal/
 integration/
   helpers_test.go                 Synthetic GeoTIFF writer, pipeline runners, PMTiles validation
   synthetic_test.go               12 end-to-end tests using generated GeoTIFFs
-  satellite_test.go               Tests using real satellite COGs (skipped if data absent)
+  satellite_*_test.go             Per-dataset tests using real COGs (skipped if data absent)
   testdata/
-    download.sh                   Script to fetch real satellite test data
+    download.sh                   Script to fetch real satellite/raster test data
+    swissimage/                   swisstopo SWISSIMAGE DOP10 (8-bit RGB, EPSG:2056 LV95)
 ```
 
 ## Pipeline
