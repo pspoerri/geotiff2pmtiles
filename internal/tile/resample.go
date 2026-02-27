@@ -4,11 +4,38 @@ import (
 	"image"
 	"math"
 	"strconv"
+	"sync"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
 	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
 	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
+
+// lonLatPool recycles paired longitude/latitude arrays used by renderTile and
+// renderTileTerrarium. Each pool entry is a single []float64 of length
+// 2*tileSize — the first half holds longitudes, the second latitudes.
+// Pooling eliminates two make([]float64, tileSize) allocations per tile and
+// the associated zero-initialization cost.
+var lonLatPool sync.Pool
+
+// getLonLat returns a pooled (lons, lats, backing) triple for the given tile
+// size. backing must be passed to putLonLat after use.
+func getLonLat(tileSize int) (lons, lats, backing []float64) {
+	if raw := lonLatPool.Get(); raw != nil {
+		s := raw.([]float64)
+		if len(s) == tileSize*2 {
+			return s[:tileSize], s[tileSize:], s
+		}
+		// Wrong size (shouldn't happen once the pool is warm): discard.
+	}
+	s := make([]float64, tileSize*2)
+	return s[:tileSize], s[tileSize:], s
+}
+
+// putLonLat returns the backing slice to the pool.
+func putLonLat(backing []float64) {
+	lonLatPool.Put(backing)
+}
 
 // sourceInfo caches per-source metadata used during rendering and prefetching.
 type sourceInfo struct {
@@ -128,8 +155,8 @@ func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Proje
 	// Precompute lon per column (linear with pixel X) and lat per row
 	// (non-linear in Mercator, but independent of X). This reduces
 	// expensive PixelToLonLat trig from tileSize² to 2×tileSize calls.
-	lons := make([]float64, tileSize)
-	lats := make([]float64, tileSize)
+	// Use pooled slices to avoid per-tile allocation and zero-init cost.
+	lons, lats, llBacking := getLonLat(tileSize)
 	for px := 0; px < tileSize; px++ {
 		lons[px], _ = coord.PixelToLonLat(z, tx, ty, tileSize, float64(px)+0.5, 0)
 	}
@@ -159,6 +186,8 @@ func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Proje
 			}
 		}
 	}
+
+	putLonLat(llBacking)
 
 	if !hasData {
 		PutRGBA(img)
@@ -194,13 +223,13 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 
 		switch mode {
 		case ResamplingNearest, ResamplingMode:
-			rr, gg, bb, aa, err = nearestSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
+			rr, gg, bb, aa, err = nearestSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
 		case ResamplingLanczos:
 			rr, gg, bb, aa, err = lanczosSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
 		case ResamplingBicubic:
 			rr, gg, bb, aa, err = bicubicSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
 		default:
-			rr, gg, bb, aa, err = bilinearSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
+			rr, gg, bb, aa, err = bilinearSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
 		}
 
 		if err != nil {
@@ -219,11 +248,12 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 // the rounded pixel coordinate so it never exceeds the valid range.
 // Without clamping, Floor(fx+0.5) can produce imgW when fx >= imgW-0.5,
 // reading from the zero-padded overhang of the last COG tile.
-func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
+// tw and th are the source tile dimensions (pre-computed by prepareTileSources).
+func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
 	px := clamp(int(math.Floor(fx+0.5)), 0, imgW-1)
 	py := clamp(int(math.Floor(fy+0.5)), 0, imgH-1)
 
-	p, err := readPixelCached(src, level, px, py, cache)
+	p, err := readPixelCached(src, level, px, py, tw, th, cache)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
@@ -237,7 +267,8 @@ func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH 
 //
 // Optimized to do at most 2 cache lookups (instead of 4): pixels in the same
 // source tile are extracted directly from the already-fetched image.
-func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
+// tw and th are the source tile dimensions (pre-computed by prepareTileSources).
+func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
 	x0 := int(math.Floor(fx))
 	y0 := int(math.Floor(fy))
 	x1 := x0 + 1
@@ -252,10 +283,6 @@ func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH
 	dy := fy - math.Floor(fy)
 
 	// Pre-compute tile coordinates for all four corners.
-	ifd := src.IFDTileSize(level)
-	tw := ifd[0]
-	th := ifd[1]
-
 	col0, row0 := x0/tw, y0/th
 	col1, row1 := x1/tw, y1/th
 
@@ -1197,11 +1224,8 @@ func pixelFromImage(tile image.Image, x, y int) [4]uint8 {
 }
 
 // readPixelCached reads a single pixel using the tile cache.
-func readPixelCached(src *cog.Reader, level, px, py int, cache *cog.TileCache) ([4]uint8, error) {
-	ifd := src.IFDTileSize(level)
-	tw := ifd[0]
-	th := ifd[1]
-
+// tw and th are the source tile dimensions (pre-computed by prepareTileSources).
+func readPixelCached(src *cog.Reader, level, px, py, tw, th int, cache *cog.TileCache) ([4]uint8, error) {
 	col := px / tw
 	row := py / th
 	localX := px % tw
@@ -1378,8 +1402,8 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj co
 	}
 
 	// Precompute lon per column and lat per row to avoid per-pixel trig.
-	lons := make([]float64, tileSize)
-	lats := make([]float64, tileSize)
+	// Use pooled slices to avoid per-tile allocation and zero-init cost.
+	lons, lats, llBacking := getLonLat(tileSize)
 	for px := 0; px < tileSize; px++ {
 		lons[px], _ = coord.PixelToLonLat(z, tx, ty, tileSize, float64(px)+0.5, 0)
 	}
@@ -1399,6 +1423,8 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj co
 			// nodata pixels remain transparent (zero RGBA)
 		}
 	}
+
+	putLonLat(llBacking)
 
 	if !hasData {
 		PutRGBA(img)

@@ -637,35 +637,59 @@ func downsampleQuadrantTerrariumBicubic(dst *image.RGBA, src *image.RGBA, dstOff
 // produce each output pixel. This is equivalent to bilinear downsampling.
 // Pixels with alpha == 0 are treated as nodata and excluded from RGB averaging
 // so they don't bleed dark colors into the result.
+//
+// Uses direct Pix slice access to avoid image.RGBAAt/SetRGBA bounds checks.
+// Clamping is omitted: for half = tileSize/2, sx+1 = 2*dx+1 ≤ tileSize-1 and
+// sy+1 = 2*dy+1 ≤ tileSize-1, so all coordinates are always within bounds.
 func downsampleQuadrantBilinear(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
+	srcPix := src.Pix
+	dstPix := dst.Pix
+	srcStride := src.Stride
+	dstStride := dst.Stride
 	for dy := 0; dy < half; dy++ {
+		srcRow0 := (dy * 2) * srcStride
+		srcRow1 := (dy*2 + 1) * srcStride
+		dstRowOff := (dstOffY + dy) * dstStride
 		for dx := 0; dx < half; dx++ {
-			// Map destination pixel to a 2x2 block in the source.
-			sx := dx * 2
-			sy := dy * 2
+			sx4 := dx * 8 // sx=dx*2, sx*4=dx*8
+			off00 := srcRow0 + sx4
+			off10 := off00 + 4
+			off01 := srcRow1 + sx4
+			off11 := off01 + 4
 
-			// Read the 2x2 source block, clamping to source bounds.
-			p00 := srcPixel(src, sx, sy, tileSize)
-			p10 := srcPixel(src, sx+1, sy, tileSize)
-			p01 := srcPixel(src, sx, sy+1, tileSize)
-			p11 := srcPixel(src, sx+1, sy+1, tileSize)
-
-			pixels := [4]color.RGBA{p00, p10, p01, p11}
+			a00 := srcPix[off00+3]
+			a10 := srcPix[off10+3]
+			a01 := srcPix[off01+3]
+			a11 := srcPix[off11+3]
 
 			// Alpha: straight average of all 4 (nodata contributes 0).
-			aSum := uint16(p00.A) + uint16(p10.A) + uint16(p01.A) + uint16(p11.A)
-			a := (aSum + 2) / 4
+			a := uint8((uint16(a00) + uint16(a10) + uint16(a01) + uint16(a11) + 2) / 4)
 
 			// RGB: average only pixels with non-zero alpha.
 			var rSum, gSum, bSum uint16
 			var count uint16
-			for _, p := range pixels {
-				if p.A == 0 {
-					continue
-				}
-				rSum += uint16(p.R)
-				gSum += uint16(p.G)
-				bSum += uint16(p.B)
+			if a00 != 0 {
+				rSum += uint16(srcPix[off00])
+				gSum += uint16(srcPix[off00+1])
+				bSum += uint16(srcPix[off00+2])
+				count++
+			}
+			if a10 != 0 {
+				rSum += uint16(srcPix[off10])
+				gSum += uint16(srcPix[off10+1])
+				bSum += uint16(srcPix[off10+2])
+				count++
+			}
+			if a01 != 0 {
+				rSum += uint16(srcPix[off01])
+				gSum += uint16(srcPix[off01+1])
+				bSum += uint16(srcPix[off01+2])
+				count++
+			}
+			if a11 != 0 {
+				rSum += uint16(srcPix[off11])
+				gSum += uint16(srcPix[off11+1])
+				bSum += uint16(srcPix[off11+2])
 				count++
 			}
 
@@ -673,13 +697,11 @@ func downsampleQuadrantBilinear(dst *image.RGBA, src *image.RGBA, dstOffX, dstOf
 				continue // all nodata — leave transparent
 			}
 
-			r := (rSum + count/2) / count
-			g := (gSum + count/2) / count
-			b := (bSum + count/2) / count
-
-			dst.SetRGBA(dstOffX+dx, dstOffY+dy, color.RGBA{
-				R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a),
-			})
+			dstOff := dstRowOff + (dstOffX+dx)*4
+			dstPix[dstOff] = uint8((rSum + count/2) / count)
+			dstPix[dstOff+1] = uint8((gSum + count/2) / count)
+			dstPix[dstOff+2] = uint8((bSum + count/2) / count)
+			dstPix[dstOff+3] = a
 		}
 	}
 }
@@ -803,18 +825,35 @@ func downsampleQuadrantBicubic(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 // source block. Ties are broken by taking the first value encountered
 // (top-left bias). Designed for categorical/classified rasters where
 // interpolated values are meaningless.
+//
+// Uses direct Pix slice access to avoid image.RGBAAt/SetRGBA bounds checks.
 func downsampleQuadrantMode(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
+	srcPix := src.Pix
+	dstPix := dst.Pix
+	srcStride := src.Stride
+	dstStride := dst.Stride
 	for dy := 0; dy < half; dy++ {
+		srcRow0 := (dy * 2) * srcStride
+		srcRow1 := (dy*2 + 1) * srcStride
+		dstRowOff := (dstOffY + dy) * dstStride
 		for dx := 0; dx < half; dx++ {
-			sx := dx * 2
-			sy := dy * 2
+			sx4 := dx * 8
+			off00 := srcRow0 + sx4
+			off10 := off00 + 4
+			off01 := srcRow1 + sx4
+			off11 := off01 + 4
 
-			p00 := srcPixel(src, sx, sy, tileSize)
-			p10 := srcPixel(src, sx+1, sy, tileSize)
-			p01 := srcPixel(src, sx, sy+1, tileSize)
-			p11 := srcPixel(src, sx+1, sy+1, tileSize)
+			p00 := color.RGBA{srcPix[off00], srcPix[off00+1], srcPix[off00+2], srcPix[off00+3]}
+			p10 := color.RGBA{srcPix[off10], srcPix[off10+1], srcPix[off10+2], srcPix[off10+3]}
+			p01 := color.RGBA{srcPix[off01], srcPix[off01+1], srcPix[off01+2], srcPix[off01+3]}
+			p11 := color.RGBA{srcPix[off11], srcPix[off11+1], srcPix[off11+2], srcPix[off11+3]}
 
-			dst.SetRGBA(dstOffX+dx, dstOffY+dy, modeRGBA(p00, p10, p01, p11))
+			result := modeRGBA(p00, p10, p01, p11)
+			dstOff := dstRowOff + (dstOffX+dx)*4
+			dstPix[dstOff] = result.R
+			dstPix[dstOff+1] = result.G
+			dstPix[dstOff+2] = result.B
+			dstPix[dstOff+3] = result.A
 		}
 	}
 }
@@ -862,13 +901,25 @@ func modeRGBA(a, b, c, d color.RGBA) color.RGBA {
 }
 
 // downsampleQuadrantNearest picks the top-left pixel from each 2x2 block.
+// Uses direct Pix slice access to avoid image.RGBAAt bounds checks and
+// SetRGBA bounds checks. Clamping is omitted: for half = tileSize/2, sx =
+// 2*dx ≤ tileSize-2 and sy = 2*dy ≤ tileSize-2, so coordinates are always
+// within bounds.
 func downsampleQuadrantNearest(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
+	srcPix := src.Pix
+	dstPix := dst.Pix
+	srcStride := src.Stride
+	dstStride := dst.Stride
 	for dy := 0; dy < half; dy++ {
+		srcRowOff := (dy * 2) * srcStride
+		dstRowOff := (dstOffY + dy) * dstStride
 		for dx := 0; dx < half; dx++ {
-			sx := dx * 2
-			sy := dy * 2
-			p := srcPixel(src, sx, sy, tileSize)
-			dst.SetRGBA(dstOffX+dx, dstOffY+dy, p)
+			srcOff := srcRowOff + dx*8 // sx=dx*2, sx*4=dx*8
+			dstOff := dstRowOff + (dstOffX+dx)*4
+			dstPix[dstOff] = srcPix[srcOff]
+			dstPix[dstOff+1] = srcPix[srcOff+1]
+			dstPix[dstOff+2] = srcPix[srcOff+2]
+			dstPix[dstOff+3] = srcPix[srcOff+3]
 		}
 	}
 }
