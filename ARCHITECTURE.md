@@ -92,7 +92,7 @@ positions within bounds that have no data.
 - Continuous disk spilling via dedicated I/O goroutine with configurable memory backpressure (auto ~90% of RAM)
 - Uniform tiles (single color) stored as 4 bytes, never spilled to disk
 - `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers instead of allocating/GC'ing per tile
-- Single-band nodata pixels decoded as transparent (alpha=0) so resampling/downsampling automatically excludes them
+- Nodata pixels (all bands equal to GDAL_NODATA tag value) decoded as transparent (alpha=0) for single-band and multi-band/16-bit data; stored in `BandConfig.HasNodata`/`Nodata`, auto-detected from GeoTIFF, overridable with `--nodata`
 - Source fallthrough on nodata: transparent (alpha=0) samples are skipped and the next source is tried, preventing holes in one source from blocking valid data in another
 - PMTiles writer uses temp file for tile data (only directory entries in memory)
 - Pyramid downsampling avoids redundant source reads for lower zoom levels

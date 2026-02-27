@@ -26,7 +26,7 @@ const (
 	RescaleLog                       // Logarithmic mapping from [min,max] → [0,255]
 )
 
-// BandConfig controls band selection, alpha handling, and rescaling for multi-band GeoTIFFs.
+// BandConfig controls band selection, alpha handling, rescaling, and nodata for multi-band GeoTIFFs.
 // Zero value produces identical behavior to the legacy code path (bands 1,2,3; auto alpha for spp≥4; no rescaling).
 type BandConfig struct {
 	Bands      [3]int      // 1-indexed input band → R,G,B output. Zero value = default (1,2,3)
@@ -34,6 +34,31 @@ type BandConfig struct {
 	Rescale    RescaleMode // Rescaling mode
 	RescaleMin float64     // Input value range minimum
 	RescaleMax float64     // Input value range maximum
+	HasNodata  bool        // if true, pixels with all bands == Nodata are decoded as transparent (alpha=0)
+	Nodata     float64     // raw (pre-rescale) nodata value; valid when HasNodata is true
+}
+
+// String returns a human-readable summary of the band configuration.
+func (cfg BandConfig) String() string {
+	bands := cfg.Bands
+	if bands == ([3]int{}) {
+		bands = [3]int{1, 2, 3}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "bands %d,%d,%d", bands[0], bands[1], bands[2])
+	switch cfg.Rescale {
+	case RescaleLinear:
+		fmt.Fprintf(&b, ", rescale linear [%.0f, %.0f]", cfg.RescaleMin, cfg.RescaleMax)
+	case RescaleLog:
+		fmt.Fprintf(&b, ", rescale log [%.0f, %.0f]", cfg.RescaleMin, cfg.RescaleMax)
+	}
+	if cfg.AlphaBand > 0 {
+		fmt.Fprintf(&b, ", alpha band %d", cfg.AlphaBand)
+	}
+	if cfg.HasNodata {
+		fmt.Fprintf(&b, ", nodata %.0f", cfg.Nodata)
+	}
+	return b.String()
 }
 
 // Bounds represents geographic bounds in WGS84.
@@ -724,6 +749,22 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 		}
 	}
 
+	// General-path nodata: prefer BandConfig, fall back to IFD tag.
+	// Used for multi-band or 16-bit data not handled by the legacy path.
+	var genHasNodata bool
+	var genNodataU16 uint16
+	if !useLegacyNodata {
+		if cfg.HasNodata {
+			genHasNodata = true
+			genNodataU16 = uint16(cfg.Nodata)
+		} else if nd := r.ifds[0].NoData; nd != "" {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64); err == nil && v >= 0 && v <= 65535 && v == math.Floor(v) {
+				genHasNodata = true
+				genNodataU16 = uint16(v)
+			}
+		}
+	}
+
 	// Build rescaler. For 16-bit data with no explicit rescaling (e.g. coginfo
 	// or debug tools using zero-value BandConfig), fall back to linear 0-65535
 	// so values are at least visible rather than uint8-truncated.
@@ -797,6 +838,26 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			}
 			if spp > 2 && bandB < spp {
 				bV = readSample(pixelOff, bandB)
+			}
+
+			// Nodata check: if all file bands equal the nodata value, emit transparent.
+			// Only applies when there is no explicit alpha band (alpha=0 already handles
+			// transparency for files with an alpha channel).
+			if genHasNodata && effectiveAlpha < 0 {
+				isNodata := true
+				for b := 0; b < spp; b++ {
+					if readSample(pixelOff, b) != genNodataU16 {
+						isNodata = false
+						break
+					}
+				}
+				if isNodata {
+					pix[pixIdx+0] = 0
+					pix[pixIdx+1] = 0
+					pix[pixIdx+2] = 0
+					pix[pixIdx+3] = 0
+					continue
+				}
 			}
 
 			// Alpha.
@@ -1457,6 +1518,14 @@ func (r *Reader) DetectPreset() (Preset, bool) {
 		Rescale:    RescaleLinear,
 		RescaleMin: rescaleMin,
 		RescaleMax: rescaleMax,
+	}
+
+	// Include nodata from the GeoTIFF tag so the preset is self-contained.
+	if nd := r.ifds[0].NoData; nd != "" {
+		if v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64); err == nil && v >= 0 && v <= 65535 && v == math.Floor(v) {
+			cfg.HasNodata = true
+			cfg.Nodata = v
+		}
 	}
 
 	return Preset{Name: name, BandCfg: cfg}, true

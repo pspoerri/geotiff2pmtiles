@@ -113,6 +113,7 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--alpha-band`  | `auto`        | Alpha band: `auto` (band 4 for 8-bit spp>=4), `-1` (none), or 1-indexed band |
 | `--rescale`     | `auto`        | Rescale mode: `auto`, `linear`, `log`, `none` (auto requires `--rescale-range` for 16-bit) |
 | `--rescale-range` |             | Input value range `min,max` for rescaling (required for 16-bit data) |
+| `--nodata`      |               | Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set) |
 | `--verbose`     | `false`       | Verbose progress output                            |
 | `--version`     |               | Print version and exit                             |
 | `--cpuprofile`  |               | Write CPU profile to file                          |
