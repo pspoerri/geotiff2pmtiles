@@ -41,6 +41,12 @@ internal/
     reader.go                       PMTiles v3 reader (header, directory, tile data, metadata)
     header.go                       Header serialization/deserialization (127 bytes)
     directory.go                    Hilbert-curve tile IDs, directory serialization/deserialization
+integration/
+  helpers_test.go                 Synthetic GeoTIFF writer, pipeline runners, PMTiles validation
+  synthetic_test.go               12 end-to-end tests using generated GeoTIFFs
+  satellite_test.go               Tests using real satellite COGs (skipped if data absent)
+  testdata/
+    download.sh                   Script to fetch real satellite test data
 ```
 
 ## Pipeline

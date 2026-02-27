@@ -27,8 +27,21 @@ TILE_SIZE  ?= 512
 CONCURRENT ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 MEM_LIMIT  ?= 0
 
+# Integration testdata directories (each dataset in its own folder for CLI input)
+TESTDATA_DIR     := integration/testdata
+COPERNICUS_DIR   := $(TESTDATA_DIR)/copernicus
+NATURALEARTH_DIR := $(TESTDATA_DIR)/naturalearth
+ESAWORLDCOVER_DIR       := $(TESTDATA_DIR)/esaworldcover
+ESAWORLDCOVER_NDVI_DIR  := $(TESTDATA_DIR)/esaworldcover-ndvi
+ESAWORLDCOVER_SWIR_DIR  := $(TESTDATA_DIR)/esaworldcover-swir
+ESAWORLDCOVER_GAMMA0_DIR := $(TESTDATA_DIR)/esaworldcover-gamma0
+
 .PHONY: all build build-transform build-all install \
         test test-race test-cover bench \
+        test-integration test-integration-download test-integration-real test-integration-all \
+        test-integration-copernicus test-integration-naturalearth \
+        test-integration-esaworldcover test-integration-esaworldcover-ndvi \
+        test-integration-esaworldcover-swir test-integration-esaworldcover-gamma0 \
         lint fmt vet tidy check \
         clean clean-all \
         run demo demo-all demo-full-disk demo-profile pprof-cpu pprof-mem \
@@ -37,6 +50,8 @@ MEM_LIMIT  ?= 0
         demo-tfw demo-tfw-full-disk \
         demo-tfw-jpeg demo-tfw-png demo-tfw-webp \
         demo-tfw-full-disk-jpeg demo-tfw-full-disk-png demo-tfw-full-disk-webp \
+        demo-copernicus demo-esaworldcover demo-esaworldcover-ndvi \
+        demo-esaworldcover-swir demo-esaworldcover-gamma0 \
         demo-transform demo-transform-reencode demo-transform-rebuild \
         cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-all \
         help
@@ -82,6 +97,45 @@ test-cover:
 bench:
 	$(GO) test $(GOFLAGS) -bench=. -benchmem ./...
 
+## test-integration: Run synthetic integration tests (no download needed)
+test-integration:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 120s -v ./integration/
+
+## test-integration-download: Download real satellite test data
+test-integration-download:
+	bash integration/testdata/download.sh
+
+## test-integration-real: Run all integration tests (synthetic + real satellite data)
+test-integration-real:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v ./integration/
+
+## test-integration-copernicus: Run Copernicus DEM integration test (float32 → terrarium)
+test-integration-copernicus:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestCopernicus ./integration/
+
+## test-integration-naturalearth: Run Natural Earth integration test (8-bit RGB + TFW → JPEG)
+test-integration-naturalearth:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestNaturalEarth ./integration/
+
+## test-integration-esaworldcover: Run ESA WorldCover RGBNIR integration test (16-bit RGBNIR → PNG)
+test-integration-esaworldcover:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run 'TestESAWorldCover(Preset|Pipeline)$$' ./integration/
+
+## test-integration-esaworldcover-ndvi: Run ESA WorldCover NDVI integration test (single-band → grayscale PNG)
+test-integration-esaworldcover-ndvi:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestESAWorldCoverNDVI ./integration/
+
+## test-integration-esaworldcover-swir: Run ESA WorldCover SWIR integration test (single-band → grayscale PNG)
+test-integration-esaworldcover-swir:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestESAWorldCoverSWIR ./integration/
+
+## test-integration-esaworldcover-gamma0: Run ESA WorldCover Gamma0 integration test (SAR VV/VH → PNG)
+test-integration-esaworldcover-gamma0:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestESAWorldCoverGamma0 ./integration/
+
+## test-integration-all: Download data and run all integration tests
+test-integration-all: test-integration-download test-integration-real
+
 # ---------- Code quality ----------
 
 ## fmt: Format all Go source files
@@ -110,11 +164,13 @@ check: fmt vet test
 run: build
 	./$(OUTPUT) $(ARGS)
 
-## demo-all: Run all demos (all formats, full-disk, TFW, and transform)
+## demo-all: Run all demos (all formats, full-disk, TFW, Copernicus, ESA WorldCover, and transform)
 demo-all: demo-jpeg demo-png demo-webp \
           demo-full-disk-jpeg demo-full-disk-png demo-full-disk-webp \
           demo-tfw-jpeg demo-tfw-png demo-tfw-webp \
           demo-tfw-full-disk-jpeg demo-tfw-full-disk-png demo-tfw-full-disk-webp \
+          demo-copernicus \
+          demo-esaworldcover demo-esaworldcover-ndvi demo-esaworldcover-swir demo-esaworldcover-gamma0 \
           demo-transform demo-transform-reencode demo-transform-rebuild
 
 ## demo: Build and run a demonstration with the sample data directory
@@ -199,7 +255,7 @@ demo-tfw: build
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \
 		--concurrency $(CONCURRENT) \
-		data_tfw/ $(BUILD_DIR)/demo-tfw-$(FORMAT).pmtiles
+		$(NATURALEARTH_DIR)/ $(BUILD_DIR)/demo-tfw-$(FORMAT).pmtiles
 
 ## demo-tfw-full-disk: TFW demo with aggressive disk spilling (1 MB memory limit)
 demo-tfw-full-disk: build
@@ -209,7 +265,7 @@ demo-tfw-full-disk: build
 		--tile-size $(TILE_SIZE) \
 		--concurrency $(CONCURRENT) \
 		--mem-limit 1 \
-		data_tfw/ $(BUILD_DIR)/demo-tfw-full-disk-$(FORMAT).pmtiles
+		$(NATURALEARTH_DIR)/ $(BUILD_DIR)/demo-tfw-full-disk-$(FORMAT).pmtiles
 
 ## demo-tfw-jpeg: TFW demo with JPEG encoding
 demo-tfw-jpeg: FORMAT=jpeg
@@ -234,6 +290,59 @@ demo-tfw-full-disk-png: demo-tfw-full-disk
 ## demo-tfw-full-disk-webp: TFW full-disk mode with WebP
 demo-tfw-full-disk-webp: FORMAT=webp
 demo-tfw-full-disk-webp: demo-tfw-full-disk
+
+# ---------- Copernicus DEM Demo (float32 → terrarium) ----------
+
+## demo-copernicus: Demo with Copernicus DEM (float32 → terrarium PNG)
+demo-copernicus: build
+	./$(OUTPUT) \
+		--format terrarium \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom 10 \
+		--concurrency $(CONCURRENT) \
+		$(COPERNICUS_DIR)/ $(BUILD_DIR)/demo-copernicus-terrarium.pmtiles
+
+# ---------- ESA WorldCover Demo (16-bit RGBNIR → PNG) ----------
+
+## demo-esaworldcover: Demo with ESA WorldCover S2 RGBNIR (16-bit 4-band → PNG with auto-detect)
+demo-esaworldcover: build
+	./$(OUTPUT) \
+		--format $(FORMAT) \
+		--quality $(QUALITY) \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom 9 \
+		--concurrency $(CONCURRENT) \
+		$(ESAWORLDCOVER_DIR)/ $(BUILD_DIR)/demo-esaworldcover-$(FORMAT).pmtiles
+
+## demo-esaworldcover-ndvi: Demo with ESA WorldCover NDVI (3-band p90/p50/p10 composite → PNG)
+demo-esaworldcover-ndvi: build
+	./$(OUTPUT) \
+		--format png \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom 9 \
+		--concurrency $(CONCURRENT) \
+		$(ESAWORLDCOVER_NDVI_DIR)/ $(BUILD_DIR)/demo-esaworldcover-ndvi.pmtiles
+
+## demo-esaworldcover-swir: Demo with ESA WorldCover SWIR (2-band B11/B12 composite → PNG)
+demo-esaworldcover-swir: build
+	./$(OUTPUT) \
+		--format png \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom 9 \
+		--bands 1,2,1 \
+		--alpha-band -1 \
+		--concurrency $(CONCURRENT) \
+		$(ESAWORLDCOVER_SWIR_DIR)/ $(BUILD_DIR)/demo-esaworldcover-swir.pmtiles
+
+## demo-esaworldcover-gamma0: Demo with ESA WorldCover S1 Gamma0 VV/VH ratio (SAR → PNG)
+demo-esaworldcover-gamma0: build
+	./$(OUTPUT) \
+		--format png \
+		--tile-size $(TILE_SIZE) \
+		--max-zoom 9 \
+		--alpha-band -1 \
+		--concurrency $(CONCURRENT) \
+		$(ESAWORLDCOVER_GAMMA0_DIR)/ $(BUILD_DIR)/demo-esaworldcover-gamma0.pmtiles
 
 # ---------- PMTiles Transform Demo ----------
 
@@ -339,6 +448,11 @@ help:
 	@echo "  make demo-full-disk-webp              Full disk + WebP encoding"
 	@echo "  make demo-tfw                         Run demo with TFW world-file data"
 	@echo "  make demo-tfw-webp                    TFW demo with WebP"
+	@echo "  make demo-copernicus                  Copernicus DEM demo (terrarium)"
+	@echo "  make demo-esaworldcover               ESA WorldCover RGBNIR demo"
+	@echo "  make demo-esaworldcover-ndvi          ESA WorldCover NDVI demo"
+	@echo "  make demo-esaworldcover-swir          ESA WorldCover SWIR demo"
+	@echo "  make demo-esaworldcover-gamma0        ESA WorldCover Gamma0 SAR demo"
 	@echo "  make demo-transform                   Transform demo (passthrough)"
 	@echo "  make demo-transform-reencode          Transform demo (WebP → PNG)"
 	@echo "  make demo-transform-rebuild           Transform demo (rebuild pyramid)"

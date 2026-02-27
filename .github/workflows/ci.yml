@@ -6,6 +6,7 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -36,8 +37,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test
-        run: go test -race -count=1 ./...
+      - name: Unit tests
+        run: go test -race -count=1 ./internal/...
+
+      - name: Integration tests (synthetic)
+        run: go test -race -count=1 -timeout 120s -v ./integration/
 
       - name: Verify module tidiness
         run: |
@@ -115,6 +119,40 @@ jobs:
           name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
           retention-days: 14
+
+  integration-real:
+    name: Integration (real satellite data)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libwebp-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Cache satellite data
+        uses: actions/cache@v4
+        with:
+          path: |
+            integration/testdata/copernicus/*.tif
+            integration/testdata/naturalearth/*.tif
+            integration/testdata/naturalearth/*.tfw
+            integration/testdata/naturalearth/*.zip
+            integration/testdata/esaworldcover/*.tif
+            integration/testdata/esaworldcover-ndvi/*.tif
+            integration/testdata/esaworldcover-swir/*.tif
+            integration/testdata/esaworldcover-gamma0/*.tif
+          key: satellite-data-${{ hashFiles('integration/testdata/download.sh') }}
+
+      - name: Download satellite data
+        run: bash integration/testdata/download.sh
+
+      - name: Run real data tests
+        run: go test -race -count=1 -timeout 600s -v ./integration/
 
   release:
     name: Release
