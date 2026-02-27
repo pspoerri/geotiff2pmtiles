@@ -314,3 +314,13 @@ scale is found, defaults to 0-10000 (the most common reflectance quantification)
 The CLI tries auto-detection in `parseBandConfig` only when `--rescale auto` (default),
 16-bit data, no explicit `--rescale-range`, and no explicit `--bands` override. Explicit
 flags always take precedence.
+
+## Integration test plausibility checks
+
+Satellite integration tests use a shared `assertPlausiblePMTiles` helper that validates
+8 properties of every PMTiles output: zoom range, tile type, geographic bounds (within
+tolerance), center point containment, tile count minimums and non-decreasing growth
+across zooms, first-tile image decoding, clustering flag, and metadata key presence.
+Each dataset defines a `plausibilityExpectation` with approximate bounds and tolerances.
+This catches regressions that simple "tile count > 0" checks would miss — e.g. bounds
+shifted by a projection bug, missing metadata keys, or broken tile encoding.

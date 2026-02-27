@@ -42,7 +42,7 @@ internal/
     header.go                       Header serialization/deserialization (127 bytes)
     directory.go                    Hilbert-curve tile IDs, directory serialization/deserialization
 integration/
-  helpers_test.go                 Synthetic GeoTIFF writer, pipeline runners, PMTiles validation
+  helpers_test.go                 Synthetic GeoTIFF writer, pipeline runners, PMTiles validation, plausibility checks
   synthetic_test.go               12 end-to-end tests using generated GeoTIFFs
   satellite_*_test.go             Per-dataset tests using real COGs (skipped if data absent)
   testdata/

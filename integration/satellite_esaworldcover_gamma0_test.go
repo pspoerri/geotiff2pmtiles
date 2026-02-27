@@ -83,19 +83,15 @@ func TestESAWorldCoverGamma0Pipeline(t *testing.T) {
 		Concurrency: runtime.NumCPU(),
 	})
 
-	result := validatePMTiles(t, outPath)
-	if result.TileCount == 0 {
-		t.Error("expected tiles from ESA WorldCover Gamma0")
-	}
-	if result.Header.TileType != pmtiles.TileTypePNG {
-		t.Errorf("expected PNG tile type, got %d", result.Header.TileType)
-	}
-
-	for z := 7; z <= 9; z++ {
-		if result.ZoomCounts[z] == 0 {
-			t.Errorf("expected tiles at zoom %d, got 0", z)
-		}
-	}
-
-	t.Logf("ESA WorldCover Gamma0: %d tiles across zoom 7-9", result.TileCount)
+	assertPlausiblePMTiles(t, outPath, plausibilityExpectation{
+		MinZoom:       7,
+		MaxZoom:       9,
+		TileType:      pmtiles.TileTypePNG,
+		MinLon:        9,
+		MaxLon:        10,
+		MinLat:        0,
+		MaxLat:        1,
+		BoundsTol:     2,
+		MinTotalTiles: 5,
+	})
 }
