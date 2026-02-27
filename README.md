@@ -7,7 +7,7 @@ For more information on the PMTiles format, see the [PMTiles documentation](http
 
 You can visualize generated PMTiles files at [pmtiles.io](https://pmtiles.io/).
 
-Sample input data (swisstopo SWISSIMAGE DOP10) is downloaded via `make test-integration-download` into `integration/testdata/swissimage/`.
+Real satellite and raster test data is downloaded via `make test-integration-download` into `integration/testdata/`. Seven datasets are available: Copernicus DEM (float32), Natural Earth (8-bit RGB + TFW), ESA WorldCover S2 RGBNIR / NDVI / SWIR, ESA WorldCover S1 SAR gamma0, and swisstopo SWISSIMAGE DOP10 (EPSG:2056 mosaic).
 
 
 ## Features
@@ -290,9 +290,33 @@ O(n) Mercator projection, direct pixel buffer writes, and YCbCr fast paths.
 End-to-end tests exercise the full pipeline with synthetic and real satellite data:
 
 ```bash
-make test-integration            # Synthetic tests (~8s)
-make test-integration-download   # Download real satellite data (~210 MB)
+make test-integration            # Synthetic tests only (~8s, no download needed)
+make test-integration-download   # Download all real satellite data (~1.2 GB total)
 make test-integration-all        # Download + run all tests
+```
+
+Seven real-data datasets are used, each exercising a different input type:
+
+| Dataset | Size | EPSG | Type | Description |
+|---------|------|------|------|-------------|
+| `copernicus/` | ~8 MB | 4326 | Float32 | Copernicus DEM GLO-30 — 30m elevation tile (Swiss Alps) |
+| `naturalearth/` | ~200 MB | 4326 | 8-bit RGB + TFW | Natural Earth hypsometric tints (global, TFW sidecar) |
+| `esaworldcover/` | ~455 MB | 4326 | 16-bit 4-band | ESA WorldCover S2 RGBNIR composite (Sentinel-2) |
+| `esaworldcover-ndvi/` | ~168 MB | 4326 | 8-bit 3-band | ESA WorldCover S2 NDVI percentiles (p10/p50/p90) |
+| `esaworldcover-swir/` | ~20 MB | 4326 | 8-bit 2-band | ESA WorldCover S2 SWIR composite (B11/B12) |
+| `esaworldcover-gamma0/` | ~346 MB | 4326 | 16-bit 3-band | ESA WorldCover S1 SAR gamma0 VV/VH ratio |
+| `swissimage/` | varies | 2056 | 8-bit RGB | swisstopo SWISSIMAGE DOP10 — 10cm orthophoto mosaic (LV95) |
+
+Per-dataset test targets:
+
+```bash
+make test-integration-copernicus           # Float32 DEM → terrarium PNG
+make test-integration-naturalearth         # 8-bit RGB + TFW → JPEG
+make test-integration-esaworldcover        # 16-bit 4-band RGBNIR → PNG (preset + pipeline tests)
+make test-integration-esaworldcover-ndvi   # 8-bit 3-band NDVI → grayscale PNG
+make test-integration-esaworldcover-swir   # 8-bit 2-band SWIR → grayscale PNG
+make test-integration-esaworldcover-gamma0 # 16-bit 3-band SAR → PNG
+make test-integration-swissimage           # 8-bit RGB EPSG:2056 mosaic → JPEG
 ```
 
 ### Profiling
