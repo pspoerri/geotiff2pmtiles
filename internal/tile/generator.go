@@ -151,6 +151,24 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 
 	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64
 
+	// Pre-encode the fill-color tile once so identical fill tiles across all
+	// zoom levels reuse the same encoded bytes, skipping repeated encoder calls.
+	// For uniform tiles, DiskTileStore.Put ignores encoded bytes (stores compact
+	// TileData), so this cache is only used for WriteTile.
+	// The slice is read-only after creation and safe for concurrent access.
+	var (
+		fillTileShared  *TileData // shared uniform fill tile (immutable, safe to share)
+		fillColorCached []byte    // pre-encoded bytes for the fill tile
+	)
+	if cfg.FillColor != nil {
+		fillTileShared = newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+		var encErr error
+		fillColorCached, encErr = cfg.Encoder.Encode(fillTileShared.AsImage())
+		if encErr != nil {
+			return Stats{}, fmt.Errorf("encoding fill color tile: %w", encErr)
+		}
+	}
+
 	// Process zoom levels from highest to lowest (pyramid approach).
 	for z := cfg.MaxZoom; z >= cfg.MinZoom; z-- {
 		tiles := coord.TilesInBounds(z,
@@ -260,19 +278,20 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							tr := store.Get(childZ, 2*x+1, 2*y)
 							bl := store.Get(childZ, 2*x, 2*y+1)
 							br := store.Get(childZ, 2*x+1, 2*y+1)
-							if cfg.FillColor != nil {
-								fillTile := newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+							if fillTileShared != nil {
+								// Reuse the shared fill tile instead of allocating
+								// a new uniform TileData per nil child.
 								if tl == nil {
-									tl = fillTile
+									tl = fillTileShared
 								}
 								if tr == nil {
-									tr = fillTile
+									tr = fillTileShared
 								}
 								if bl == nil {
-									bl = fillTile
+									bl = fillTileShared
 								}
 								if br == nil {
-									br = fillTile
+									br = fillTileShared
 								}
 							}
 							if cfg.IsTerrarium {
@@ -294,15 +313,23 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							grayCount.Add(1)
 						}
 
-						// Encode first so we can reuse the encoded bytes for
-						// both the output and the disk tile store.
-						data, err := cfg.Encoder.Encode(td.AsImage())
-						if err != nil {
-							select {
-							case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
-							default:
+						// Encode the tile. Uniform fill-color tiles reuse
+						// pre-encoded bytes to avoid redundant encoder calls;
+						// the PMTiles writer deduplicates identical content anyway,
+						// but skipping re-encoding saves CPU for sparse datasets.
+						var data []byte
+						if fillColorCached != nil && td.IsUniform() && td.Color() == *cfg.FillColor {
+							data = fillColorCached
+						} else {
+							var err error
+							data, err = cfg.Encoder.Encode(td.AsImage())
+							if err != nil {
+								select {
+								case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
+								default:
+								}
+								return
 							}
-							return
 						}
 
 						if err := writer.WriteTile(z, x, y, data); err != nil {

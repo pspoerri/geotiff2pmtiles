@@ -1,6 +1,7 @@
 package tile
 
 import (
+	"encoding/binary"
 	"image"
 	"image/color"
 )
@@ -164,14 +165,27 @@ func (t *TileData) At(x, y int) color.Color {
 // Returns the color and true if uniform, or zero-value and false otherwise.
 // The scan is sequential over the Pix slice (cache-friendly) and short-circuits
 // on the first mismatch, so non-uniform tiles bail out almost immediately.
+//
+// Reads 8 bytes (2 pixels) per iteration using binary.LittleEndian.Uint64,
+// reducing comparisons 8× vs the naive per-byte approach and enabling the
+// compiler to emit efficient load instructions.
 func detectUniform(img *image.RGBA) (color.RGBA, bool) {
 	pix := img.Pix
 	if len(pix) < 4 {
 		return color.RGBA{}, false
 	}
 	r, g, b, a := pix[0], pix[1], pix[2], pix[3]
-	for i := 4; i < len(pix); i += 4 {
-		if pix[i] != r || pix[i+1] != g || pix[i+2] != b || pix[i+3] != a {
+	want32 := binary.LittleEndian.Uint32(pix)
+	want64 := uint64(want32) | uint64(want32)<<32
+	n := len(pix)
+	i := 4
+	for ; i+7 < n; i += 8 {
+		if binary.LittleEndian.Uint64(pix[i:]) != want64 {
+			return color.RGBA{}, false
+		}
+	}
+	for ; i+3 < n; i += 4 {
+		if binary.LittleEndian.Uint32(pix[i:]) != want32 {
 			return color.RGBA{}, false
 		}
 	}
