@@ -6,11 +6,14 @@ import (
 
 // AutoZoomRange computes appropriate min/max zoom levels based on source data.
 // pixelSizeMeters is the source ground resolution in meters.
-func AutoZoomRange(pixelSizeMeters float64, centerLat float64, tileSize int) (minZoom, maxZoom int) {
+// The min zoom is the highest zoom level at which the entire image fits in a
+// single tile, so the output always has a useful overview.
+func AutoZoomRange(pixelSizeMeters float64, centerLat float64, tileSize int,
+	minLon, minLat, maxLon, maxLat float64) (minZoom, maxZoom int) {
 	maxZoom = coord.MaxZoomForResolution(pixelSizeMeters, centerLat, tileSize)
-	minZoom = maxZoom - 6
-	if minZoom < 0 {
-		minZoom = 0
+	minZoom = coord.MinZoomForSingleTile(minLon, minLat, maxLon, maxLat)
+	if minZoom > maxZoom {
+		minZoom = maxZoom
 	}
 	return
 }

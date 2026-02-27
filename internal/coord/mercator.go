@@ -167,6 +167,21 @@ func MaxZoomForResolution(pixelSizeMeters float64, centerLat float64, tileSize i
 	return iz
 }
 
+// MinZoomForSingleTile returns the highest zoom level at which all tiles
+// covering the given WGS84 bounding box fit within a single tile.
+// At this zoom level the entire image can be seen in one tile without panning.
+// Returns 0 if the bounds span multiple tiles even at zoom 1.
+func MinZoomForSingleTile(minLon, minLat, maxLon, maxLat float64) int {
+	for z := 1; z <= 28; z++ {
+		minTX, minTY := LonLatToTile(minLon, maxLat, z)
+		maxTX, maxTY := LonLatToTile(maxLon, minLat, z)
+		if minTX != maxTX || minTY != maxTY {
+			return z - 1
+		}
+	}
+	return 28 // extremely small or point region
+}
+
 // TilesInBounds returns all tile coordinates at the given zoom level that intersect the given WGS84 bounds.
 func TilesInBounds(zoom int, minLon, minLat, maxLon, maxLat float64) [][3]int {
 	minTX, minTY := LonLatToTile(minLon, maxLat, zoom) // note: maxLat -> minTY
