@@ -334,9 +334,7 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 		return nil, nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
 	}
 
-	if ifd.Predictor == 2 {
-		undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
-	}
+	applyPredictor(ifd, decompressed, int(ifd.TileWidth), r.bo)
 	return decompressed, ifd, nil
 }
 
@@ -391,22 +389,41 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 		return nil, ifd, nil
 	}
 
-	if ifd.Predictor == 2 {
-		undoHorizontalDifferencing(combined, int(ifd.Width), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
-	}
+	applyPredictor(ifd, combined, int(ifd.Width), r.bo)
 	return combined, ifd, nil
+}
+
+// applyPredictor reverses TIFF predictor encoding on decompressed data.
+func applyPredictor(ifd *IFD, data []byte, width int, bo binary.ByteOrder) {
+	switch ifd.Predictor {
+	case 2:
+		undoHorizontalDifferencing(data, width, int(ifd.SamplesPerPixel), ifd.bytesPerSample(), bo)
+	case 3:
+		undoFloatingPointPredictor(data, width, int(ifd.SamplesPerPixel), ifd.bytesPerSample())
+	}
 }
 
 // undoHorizontalDifferencing reverses TIFF predictor=2 (horizontal differencing).
 // Each sample is stored as the difference from the previous sample in the same row.
 // This accumulates the deltas to recover the original values.
-// For 16-bit data (bytesPerSample=2), deltas are uint16 values read/written via bo.
+// For multi-byte data, deltas are accumulated at the sample width.
 func undoHorizontalDifferencing(data []byte, width, samplesPerPixel, bytesPerSample int, bo binary.ByteOrder) {
 	rowBytes := width * samplesPerPixel * bytesPerSample
-	if bytesPerSample == 2 {
+	switch bytesPerSample {
+	case 4:
 		for off := 0; off+rowBytes <= len(data); off += rowBytes {
 			row := data[off : off+rowBytes]
-			// Start at the second pixel (first pixel is stored as-is).
+			for x := samplesPerPixel; x < width*samplesPerPixel; x++ {
+				byteOff := x * 4
+				prevOff := (x - samplesPerPixel) * 4
+				cur := bo.Uint32(row[byteOff : byteOff+4])
+				prev := bo.Uint32(row[prevOff : prevOff+4])
+				bo.PutUint32(row[byteOff:byteOff+4], cur+prev)
+			}
+		}
+	case 2:
+		for off := 0; off+rowBytes <= len(data); off += rowBytes {
+			row := data[off : off+rowBytes]
 			for x := samplesPerPixel; x < width*samplesPerPixel; x++ {
 				byteOff := x * 2
 				prevOff := (x - samplesPerPixel) * 2
@@ -415,14 +432,43 @@ func undoHorizontalDifferencing(data []byte, width, samplesPerPixel, bytesPerSam
 				bo.PutUint16(row[byteOff:byteOff+2], cur+prev)
 			}
 		}
-		return
+	default:
+		// 8-bit path.
+		for off := 0; off+rowBytes <= len(data); off += rowBytes {
+			row := data[off : off+rowBytes]
+			for x := samplesPerPixel; x < rowBytes; x++ {
+				row[x] += row[x-samplesPerPixel]
+			}
+		}
 	}
-	// 8-bit path (unchanged).
+}
+
+// undoFloatingPointPredictor reverses TIFF predictor=3 (floating-point predictor).
+// Predictor=3 first byte-shuffles sample bytes (grouping by byte position across
+// all samples), then applies byte-level horizontal differencing.
+// To reverse: (1) undo byte differencing, (2) unshuffle bytes.
+func undoFloatingPointPredictor(data []byte, width, samplesPerPixel, bytesPerSample int) {
+	rowBytes := width * samplesPerPixel * bytesPerSample
+	tmp := make([]byte, rowBytes)
+
 	for off := 0; off+rowBytes <= len(data); off += rowBytes {
 		row := data[off : off+rowBytes]
-		for x := samplesPerPixel; x < rowBytes; x++ {
-			row[x] += row[x-samplesPerPixel]
+
+		// Step 1: Undo byte-level horizontal differencing.
+		for i := 1; i < rowBytes; i++ {
+			row[i] += row[i-1]
 		}
+
+		// Step 2: Byte-unshuffle.
+		// Encoded layout: all byte-0 of all samples, then all byte-1, etc.
+		// Target layout: sample-0 bytes together, sample-1 bytes together, etc.
+		sampleCount := width * samplesPerPixel
+		for s := 0; s < sampleCount; s++ {
+			for b := 0; b < bytesPerSample; b++ {
+				tmp[s*bytesPerSample+b] = row[b*sampleCount+s]
+			}
+		}
+		copy(row, tmp)
 	}
 }
 
@@ -534,10 +580,10 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 	case 7: // JPEG
 		return r.decodeJPEGTile(ifd, data)
 	case 1: // No compression
-		if ifd.Predictor == 2 {
+		if ifd.Predictor == 2 || ifd.Predictor == 3 {
 			buf := make([]byte, len(data))
 			copy(buf, data)
-			undoHorizontalDifferencing(buf, int(ifd.TileWidth), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
+			applyPredictor(ifd, buf, int(ifd.TileWidth), r.bo)
 			return r.decodeRawTile(ifd, buf)
 		}
 		return r.decodeRawTile(ifd, data)
@@ -546,18 +592,14 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decompressing deflate tile: %w", err)
 		}
-		if ifd.Predictor == 2 {
-			undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
-		}
+		applyPredictor(ifd, decompressed, int(ifd.TileWidth), r.bo)
 		return r.decodeRawTile(ifd, decompressed)
 	case 5: // LZW
 		decompressed, err := decompressLZW(data)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing LZW tile: %w", err)
 		}
-		if ifd.Predictor == 2 {
-			undoHorizontalDifferencing(decompressed, int(ifd.TileWidth), int(ifd.SamplesPerPixel), ifd.bytesPerSample(), r.bo)
-		}
+		applyPredictor(ifd, decompressed, int(ifd.TileWidth), r.bo)
 		return r.decodeRawTile(ifd, decompressed)
 	default:
 		return nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"image"
 	"image/color"
+	"math"
 	"testing"
 )
 
@@ -71,6 +72,73 @@ func TestUndoHorizontalDifferencing16BitMultiSample(t *testing.T) {
 		got := bo.Uint16(data[i*2 : i*2+2])
 		if got != want[i] {
 			t.Errorf("sample %d: got %d, want %d", i, got, want[i])
+		}
+	}
+}
+
+func TestUndoHorizontalDifferencing32Bit(t *testing.T) {
+	bo := binary.LittleEndian
+	// 3 pixels wide, 1 sample per pixel (32-bit).
+	// pixel0=1000, delta1=500, delta2=200
+	// Expected: 1000, 1500, 1700
+	data := make([]byte, 12)
+	bo.PutUint32(data[0:4], 1000)
+	bo.PutUint32(data[4:8], 500)
+	bo.PutUint32(data[8:12], 200)
+
+	undoHorizontalDifferencing(data, 3, 1, 4, bo)
+
+	got := []uint32{
+		bo.Uint32(data[0:4]),
+		bo.Uint32(data[4:8]),
+		bo.Uint32(data[8:12]),
+	}
+	want := []uint32{1000, 1500, 1700}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("sample %d: got %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func TestUndoFloatingPointPredictor(t *testing.T) {
+	bo := binary.LittleEndian
+	// 3 pixels wide, 1 sample per pixel, float32 (4 bytes per sample).
+	// Original float values: 1.0, 2.0, 3.0
+	// Step 1 (encode): byte-shuffle each row — group all byte-0, byte-1, byte-2, byte-3.
+	// Step 2 (encode): byte-level horizontal differencing.
+	// To create test data, we reverse the process.
+
+	origFloats := []float32{1.0, 2.0, 3.0}
+	origBytes := make([]byte, 12)
+	for i, f := range origFloats {
+		bo.PutUint32(origBytes[i*4:i*4+4], math.Float32bits(f))
+	}
+
+	// Byte-shuffle: group by byte position.
+	shuffled := make([]byte, 12)
+	for s := 0; s < 3; s++ {
+		for b := 0; b < 4; b++ {
+			shuffled[b*3+s] = origBytes[s*4+b]
+		}
+	}
+
+	// Byte-level differencing.
+	encoded := make([]byte, 12)
+	encoded[0] = shuffled[0]
+	for i := 1; i < 12; i++ {
+		encoded[i] = shuffled[i] - shuffled[i-1]
+	}
+
+	// Now undo.
+	undoFloatingPointPredictor(encoded, 3, 1, 4)
+
+	// Verify we get the original float values back.
+	for i, want := range origFloats {
+		bits := bo.Uint32(encoded[i*4 : i*4+4])
+		got := math.Float32frombits(bits)
+		if got != want {
+			t.Errorf("pixel %d: got %v, want %v", i, got, want)
 		}
 	}
 }
