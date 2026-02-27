@@ -33,6 +33,31 @@ func main() {
 	minX, minY, maxX, maxY := r.BoundsInCRS()
 	fmt.Printf("Bounds (CRS): X=[%f, %f], Y=[%f, %f]\n", minX, maxX, minY, maxY)
 
+	// Print GDAL metadata if present.
+	if md := r.GDALMeta(); md != nil {
+		fmt.Printf("\nGDAL Metadata:\n")
+		for k, v := range md.Items {
+			fmt.Printf("  %s: %s\n", k, v)
+		}
+		for sample, items := range md.BandItems {
+			for k, v := range items {
+				fmt.Printf("  [band %d] %s: %s\n", sample, k, v)
+			}
+		}
+	}
+
+	// Print auto-detected preset if available.
+	if preset, ok := r.DetectPreset(); ok {
+		fmt.Printf("\nDetected preset: %s\n", preset.Name)
+		if preset.Format != "" {
+			fmt.Printf("  Format: %s\n", preset.Format)
+		}
+		if preset.BandCfg.Rescale != cog.RescaleNone {
+			fmt.Printf("  Bands: %d,%d,%d\n", preset.BandCfg.Bands[0], preset.BandCfg.Bands[1], preset.BandCfg.Bands[2])
+			fmt.Printf("  Rescale: linear [%.0f, %.0f]\n", preset.BandCfg.RescaleMin, preset.BandCfg.RescaleMax)
+		}
+	}
+
 	// Try reading a tile at each IFD level to check compression support
 	for level := 0; level < r.IFDCount(); level++ {
 		ts := r.IFDTileSize(level)

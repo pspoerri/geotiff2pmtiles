@@ -411,6 +411,361 @@ func TestIFDBytesPerSample(t *testing.T) {
 	}
 }
 
+func TestParseGDALMetadata(t *testing.T) {
+	xmlStr := `<GDALMetadata>
+  <Item name="product_type">Sentinel-2 median L2A (RGBNIR) composite</Item>
+  <Item name="bands">Band 1: B04 (Red), Band 2: B03 (Green), Band 3: B02 (Blue), Band 4: B08 (Infrared)</Item>
+  <Item name="SCALE" sample="0" role="scale">0.000100000000000000005</Item>
+  <Item name="description">ESA WorldCover S2 RGBNIR 10m v200</Item>
+</GDALMetadata>`
+
+	result := parseGDALMetadataXML(xmlStr)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Dataset-level items (no sample attribute).
+	wantItems := map[string]string{
+		"product_type": "Sentinel-2 median L2A (RGBNIR) composite",
+		"bands":        "Band 1: B04 (Red), Band 2: B03 (Green), Band 3: B02 (Blue), Band 4: B08 (Infrared)",
+		"description":  "ESA WorldCover S2 RGBNIR 10m v200",
+	}
+	for key, want := range wantItems {
+		got, ok := result.Items[key]
+		if !ok {
+			t.Errorf("missing dataset-level key %q", key)
+			continue
+		}
+		if got != want {
+			t.Errorf("key %q: got %q, want %q", key, got, want)
+		}
+	}
+
+	// Per-band items (sample="0").
+	band0, ok := result.BandItems[0]
+	if !ok {
+		t.Fatal("missing band 0 items")
+	}
+	if got := band0["SCALE"]; got != "0.000100000000000000005" {
+		t.Errorf("band 0 SCALE = %q, want %q", got, "0.000100000000000000005")
+	}
+}
+
+func TestParseGDALMetadataPerBand(t *testing.T) {
+	// GDAL-standard per-band DESCRIPTION items (e.g. from GEE exports or gdal_translate).
+	xmlStr := `<GDALMetadata>
+  <Item name="DESCRIPTION" sample="0" role="description">Red</Item>
+  <Item name="DESCRIPTION" sample="1" role="description">Green</Item>
+  <Item name="DESCRIPTION" sample="2" role="description">Blue</Item>
+  <Item name="DESCRIPTION" sample="3" role="description">NIR</Item>
+  <Item name="SCALE" sample="0" role="scale">0.0001</Item>
+  <Item name="OFFSET" sample="0" role="offset">0</Item>
+</GDALMetadata>`
+
+	result := parseGDALMetadataXML(xmlStr)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	// Should have no dataset-level items.
+	if len(result.Items) != 0 {
+		t.Errorf("expected 0 dataset-level items, got %d", len(result.Items))
+	}
+
+	// Should have 4 bands.
+	if len(result.BandItems) != 4 {
+		t.Errorf("expected 4 bands, got %d", len(result.BandItems))
+	}
+
+	wantDescs := []string{"Red", "Green", "Blue", "NIR"}
+	for i, want := range wantDescs {
+		got := result.BandItems[i]["DESCRIPTION"]
+		if got != want {
+			t.Errorf("band %d DESCRIPTION = %q, want %q", i, got, want)
+		}
+	}
+
+	if got := result.BandItems[0]["SCALE"]; got != "0.0001" {
+		t.Errorf("band 0 SCALE = %q, want %q", got, "0.0001")
+	}
+}
+
+func TestParseGDALMetadataEmpty(t *testing.T) {
+	result := parseGDALMetadataXML("")
+	if result != nil {
+		t.Errorf("expected nil for empty string")
+	}
+
+	result2 := parseGDALMetadataXML("<GDALMetadata></GDALMetadata>")
+	if result2 != nil {
+		t.Errorf("expected nil for empty root")
+	}
+}
+
+func TestDetectPresetFromBandsString(t *testing.T) {
+	// Dataset-level "bands" item (e.g. ESA WorldCover S2 RGBNIR).
+	// No per-band DESCRIPTION — roles extracted from "Band N: BXX (Role)" format.
+	r := &Reader{
+		bo: binary.LittleEndian,
+		ifds: []IFD{{
+			BitsPerSample:   []uint16{16, 16, 16, 16},
+			SamplesPerPixel: 4,
+			GDALMetadata: &GDALMeta{
+				Items: map[string]string{
+					"bands": "Band 1: B04 (Red), Band 2: B03 (Green), Band 3: B02 (Blue), Band 4: B08 (Infrared)",
+				},
+				BandItems: map[int]map[string]string{
+					0: {"SCALE": "0.000100000000000000005"},
+				},
+			},
+		}},
+	}
+
+	preset, ok := r.DetectPreset()
+	if !ok {
+		t.Fatal("expected preset to be detected from bands string")
+	}
+	if preset.Name != "multispectral-rgbnir" {
+		t.Errorf("name = %q, want %q", preset.Name, "multispectral-rgbnir")
+	}
+	// Red=1, Green=2, Blue=3 (matching band numbers in the string).
+	if preset.BandCfg.Bands != [3]int{1, 2, 3} {
+		t.Errorf("bands = %v, want [1,2,3]", preset.BandCfg.Bands)
+	}
+	if preset.BandCfg.AlphaBand != -1 {
+		t.Errorf("alpha band = %d, want -1", preset.BandCfg.AlphaBand)
+	}
+	if preset.BandCfg.Rescale != RescaleLinear {
+		t.Errorf("rescale = %d, want RescaleLinear", preset.BandCfg.Rescale)
+	}
+	if preset.BandCfg.RescaleMax != 10000 {
+		t.Errorf("rescale max = %.0f, want 10000", preset.BandCfg.RescaleMax)
+	}
+}
+
+func TestDetectPresetFromBandsStringReordered(t *testing.T) {
+	// Reordered bands: Blue first.
+	r := &Reader{
+		bo: binary.LittleEndian,
+		ifds: []IFD{{
+			BitsPerSample:   []uint16{16, 16, 16, 16},
+			SamplesPerPixel: 4,
+			GDALMetadata: &GDALMeta{
+				Items: map[string]string{
+					"bands": "Band 1: B02 (Blue), Band 2: B03 (Green), Band 3: B04 (Red), Band 4: B08 (Infrared)",
+				},
+				BandItems: map[int]map[string]string{
+					0: {"SCALE": "0.0001"},
+				},
+			},
+		}},
+	}
+
+	preset, ok := r.DetectPreset()
+	if !ok {
+		t.Fatal("expected preset to be detected")
+	}
+	// Red=band3, Green=band2, Blue=band1.
+	if preset.BandCfg.Bands != [3]int{3, 2, 1} {
+		t.Errorf("bands = %v, want [3,2,1]", preset.BandCfg.Bands)
+	}
+}
+
+func TestDetectPresetGDALStandardDescriptions(t *testing.T) {
+	// GDAL-standard per-band DESCRIPTION items (e.g. GEE export, PlanetScope).
+	r := &Reader{
+		bo: binary.LittleEndian,
+		ifds: []IFD{{
+			BitsPerSample:   []uint16{16, 16, 16, 16},
+			SamplesPerPixel: 4,
+			GDALMetadata: &GDALMeta{
+				Items: map[string]string{},
+				BandItems: map[int]map[string]string{
+					0: {"DESCRIPTION": "Blue", "SCALE": "0.0001"},
+					1: {"DESCRIPTION": "Green"},
+					2: {"DESCRIPTION": "Red"},
+					3: {"DESCRIPTION": "NIR"},
+				},
+			},
+		}},
+	}
+
+	preset, ok := r.DetectPreset()
+	if !ok {
+		t.Fatal("expected preset to be detected from GDAL band descriptions")
+	}
+	if preset.Name != "multispectral-rgbnir" {
+		t.Errorf("name = %q, want %q", preset.Name, "multispectral-rgbnir")
+	}
+	// Blue=band1(sample0), Green=band2(sample1), Red=band3(sample2), NIR=band4(sample3)
+	// So: R=3, G=2, B=1
+	if preset.BandCfg.Bands != [3]int{3, 2, 1} {
+		t.Errorf("bands = %v, want [3,2,1]", preset.BandCfg.Bands)
+	}
+	if preset.BandCfg.RescaleMax != 10000 {
+		t.Errorf("rescale max = %.0f, want 10000", preset.BandCfg.RescaleMax)
+	}
+}
+
+func TestDetectPresetGDALStandardRGBOnly(t *testing.T) {
+	// 3-band RGB with GDAL descriptions, no NIR.
+	r := &Reader{
+		bo: binary.LittleEndian,
+		ifds: []IFD{{
+			BitsPerSample:   []uint16{16, 16, 16},
+			SamplesPerPixel: 3,
+			GDALMetadata: &GDALMeta{
+				Items: map[string]string{},
+				BandItems: map[int]map[string]string{
+					0: {"DESCRIPTION": "Red", "SCALE": "0.0001"},
+					1: {"DESCRIPTION": "Green"},
+					2: {"DESCRIPTION": "Blue"},
+				},
+			},
+		}},
+	}
+
+	preset, ok := r.DetectPreset()
+	if !ok {
+		t.Fatal("expected preset")
+	}
+	if preset.Name != "multispectral-rgb" {
+		t.Errorf("name = %q, want %q", preset.Name, "multispectral-rgb")
+	}
+	if preset.BandCfg.Bands != [3]int{1, 2, 3} {
+		t.Errorf("bands = %v, want [1,2,3]", preset.BandCfg.Bands)
+	}
+}
+
+func TestDetectPresetWithOffset(t *testing.T) {
+	// Landsat-style: scale=0.0000275, offset=-0.2 (per-band metadata).
+	r := &Reader{
+		bo: binary.LittleEndian,
+		ifds: []IFD{{
+			BitsPerSample:   []uint16{16, 16, 16},
+			SamplesPerPixel: 3,
+			GDALMetadata: &GDALMeta{
+				Items: map[string]string{},
+				BandItems: map[int]map[string]string{
+					0: {"DESCRIPTION": "Red", "SCALE": "0.0000275", "OFFSET": "-0.2"},
+					1: {"DESCRIPTION": "Green"},
+					2: {"DESCRIPTION": "Blue"},
+				},
+			},
+		}},
+	}
+
+	preset, ok := r.DetectPreset()
+	if !ok {
+		t.Fatal("expected preset")
+	}
+	// 1/0.0000275 ≈ 36364, -(-0.2)/0.0000275 ≈ 7273.
+	if preset.BandCfg.RescaleMin != 7273 {
+		t.Errorf("rescale min = %.0f, want 7273", preset.BandCfg.RescaleMin)
+	}
+	if preset.BandCfg.RescaleMax != 36364 {
+		t.Errorf("rescale max = %.0f, want 36364", preset.BandCfg.RescaleMax)
+	}
+}
+
+func TestDetectPresetFloatTerrarium(t *testing.T) {
+	// Float32 data → terrarium preset.
+	r := &Reader{
+		bo: binary.LittleEndian,
+		ifds: []IFD{{
+			BitsPerSample:   []uint16{32},
+			SamplesPerPixel: 1,
+			SampleFormat:    []uint16{3}, // IEEE floating point
+		}},
+	}
+
+	preset, ok := r.DetectPreset()
+	if !ok {
+		t.Fatal("expected preset for float data")
+	}
+	if preset.Name != "float-terrarium" {
+		t.Errorf("name = %q, want %q", preset.Name, "float-terrarium")
+	}
+	if preset.Format != "terrarium" {
+		t.Errorf("format = %q, want %q", preset.Format, "terrarium")
+	}
+}
+
+func TestDetectPresetNone(t *testing.T) {
+	// 8-bit RGB, no GDAL metadata → no preset.
+	r := &Reader{
+		bo: binary.LittleEndian,
+		ifds: []IFD{{
+			BitsPerSample:   []uint16{8, 8, 8},
+			SamplesPerPixel: 3,
+		}},
+	}
+	_, ok := r.DetectPreset()
+	if ok {
+		t.Error("expected no preset for 8-bit RGB without GDAL metadata")
+	}
+}
+
+func TestDetectPresetInsufficientBands(t *testing.T) {
+	// GDAL metadata present but only 2 bands described (no Blue).
+	r := &Reader{
+		bo: binary.LittleEndian,
+		ifds: []IFD{{
+			BitsPerSample:   []uint16{16, 16},
+			SamplesPerPixel: 2,
+			GDALMetadata: &GDALMeta{
+				Items: map[string]string{},
+				BandItems: map[int]map[string]string{
+					0: {"DESCRIPTION": "Red"},
+					1: {"DESCRIPTION": "Green"},
+				},
+			},
+		}},
+	}
+	_, ok := r.DetectPreset()
+	if ok {
+		t.Error("expected no preset when Blue band is missing")
+	}
+}
+
+func TestDetectPresetRealFile(t *testing.T) {
+	// Validate against the actual ESA WorldCover S2 RGBNIR file if present.
+	path := "../../data2/ESA_WorldCover_10m_2021_v200_N00E009_S2RGBNIR.tif"
+	r, err := Open(path)
+	if err != nil {
+		t.Skipf("skipping: %v", err)
+	}
+	defer r.Close()
+
+	// Verify GDAL metadata was parsed.
+	md := r.GDALMeta()
+	if md == nil {
+		t.Fatal("expected GDAL metadata")
+	}
+	if got := md.Items["bands"]; got == "" {
+		t.Error("expected non-empty 'bands' item")
+	}
+
+	// Verify auto-detection works.
+	preset, ok := r.DetectPreset()
+	if !ok {
+		t.Fatal("expected preset to be detected")
+	}
+	if preset.Name != "multispectral-rgbnir" {
+		t.Errorf("name = %q, want %q", preset.Name, "multispectral-rgbnir")
+	}
+	// ESA WorldCover: Band 1=Red, Band 2=Green, Band 3=Blue, Band 4=NIR.
+	if preset.BandCfg.Bands != [3]int{1, 2, 3} {
+		t.Errorf("bands = %v, want [1,2,3]", preset.BandCfg.Bands)
+	}
+	if preset.BandCfg.RescaleMax != 10000 {
+		t.Errorf("rescale max = %.0f, want 10000", preset.BandCfg.RescaleMax)
+	}
+	if preset.BandCfg.RescaleMin != 0 {
+		t.Errorf("rescale min = %.0f, want 0", preset.BandCfg.RescaleMin)
+	}
+}
+
 func assertPixel(t *testing.T, img *image.RGBA, x, y int, want color.RGBA) {
 	t.Helper()
 	got := img.RGBAAt(x, y)
@@ -418,4 +773,3 @@ func assertPixel(t *testing.T, img *image.RGBA, x, y int, want color.RGBA) {
 		t.Errorf("pixel(%d,%d) = %v, want %v", x, y, got, want)
 	}
 }
-

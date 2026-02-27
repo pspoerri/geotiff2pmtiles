@@ -18,7 +18,7 @@ A second sample directory `data_tfw/` supports plain TIFFs with TFW sidecar file
 - **Native WebP**: WebP encoding/decoding via native libwebp (CGo), eliminating WASM overhead for 3-5x faster encodes
 - **Multiple encodings**: JPEG, PNG, WebP, and Terrarium (for elevation/DEM data)
 - **Auto zoom detection**: Calculates maximum zoom level from source resolution
-- **Auto float detection**: Automatically selects Terrarium encoding for float GeoTIFF input (elevation data)
+- **Auto-detection**: Automatically detects data type and configures processing — float GeoTIFFs get Terrarium encoding for elevation/DEM data; multi-band satellite GeoTIFFs with GDAL band descriptions get automatic band ordering and rescale range. Works with Sentinel-2, PlanetScope, Google Earth Engine exports, HLS, and any GDAL-created multi-band GeoTIFF — no manual flags needed
 - **Coverage gap detection**: Warns about geographic holes in input file coverage
 - **Parallel processing**: Concurrent tile generation with configurable worker pool and Hilbert-curve batch scheduling for spatial locality
 - **PMTiles v3**: Writes spec-compliant archives with Hilbert-curve tile ordering
@@ -161,6 +161,13 @@ Elevation data (auto-detects float GeoTIFF and selects Terrarium encoding):
 ./geotiff2pmtiles --verbose dem/ elevation.pmtiles
 ```
 
+Multi-band satellite data (auto-detected — no band/rescale flags needed):
+
+```bash
+./geotiff2pmtiles --format png data2/ rgbnir.pmtiles
+# Auto-detected: multispectral-rgbnir (bands 1,2,3, rescale linear [0, 10000])
+```
+
 RGBNIR satellite data with log rescaling and NIR as alpha:
 
 ```bash
@@ -173,6 +180,13 @@ RGBNIR false-color composite (NIR-R-G):
 ```bash
 ./geotiff2pmtiles --bands 4,1,2 --alpha-band -1 --rescale linear \
   --rescale-range 0,8000 --format webp data2/ falsecolor.pmtiles
+```
+
+NIR as alpha (vegetation opaque, water/urban transparent — useful as overlay):
+
+```bash
+./geotiff2pmtiles --alpha-band 4 --rescale linear \
+  --rescale-range 0,10000 --format png --type overlay data2/ nir-alpha.pmtiles
 ```
 
 Convert a plain TIFF with TFW world file (global Natural Earth data):

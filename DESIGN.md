@@ -272,3 +272,45 @@ size by reading and decoding one tile from the max zoom level and using its imag
 dimensions. If no tile can be decoded (e.g. all empty), it falls back to 256. This
 ensures 512px archives stay 512px when rebuilding with `--resampling lanczos` instead
 of inadvertently reducing to 256.
+
+## Preset auto-detection
+
+`DetectPreset()` examines the GeoTIFF structure and GDAL metadata (tag 42112) to
+auto-configure processing. It returns a `Preset` with a name, optional format
+override, and optional `BandConfig`.
+
+**Float detection**: If the sample format is IEEE floating point (SampleFormat=3),
+returns the `float-terrarium` preset with `Format: "terrarium"`. The CLI applies
+this format override when using the default format (jpeg), replacing the previous
+inline float detection logic.
+
+**GDAL_METADATA parsing**: TIFF tag 42112 contains an XML blob with `<Item>` elements.
+Items have a `name` attribute and optional `sample` (0-indexed band) and `role`
+attributes. The XML is parsed into `GDALMeta` with two levels: `Items` (dataset-level)
+and `BandItems` (per-band, keyed by sample index).
+
+**Multi-band detection** auto-configures band mapping and rescaling from two sources of
+band descriptions:
+
+1. **Per-band DESCRIPTION items** — `<Item name="DESCRIPTION" sample="N">` values
+   containing color role keywords (red, green, blue, nir, near-infrared, infrared).
+   This is the GDAL standard and works with any GDAL-created multi-band GeoTIFF:
+   Google Earth Engine exports, PlanetScope, HLS, gdal_translate output, etc.
+
+2. **Dataset-level "bands" string** — fallback for files that use a `bands` item
+   containing `"Band N: BXX (Role)"` entries (e.g. ESA WorldCover composites).
+   Roles are matched through the same keyword table as per-band DESCRIPTION items.
+
+Strategy 1 is tried first; if it finds Red+Green+Blue, detection succeeds. Otherwise
+strategy 2 is attempted. This avoids any product-specific hardcoding — detection is
+purely driven by the band descriptions present in the GeoTIFF.
+
+Scale/offset detection checks per-band `SCALE`/`OFFSET` items first (sample 0), then
+falls back to dataset-level items. The rescale range is derived as `[min, max]` where
+`max = round(1/scale)` and `min = round(-offset/scale)` when offset is negative (e.g.
+Landsat Collection 2: scale=0.0000275, offset=-0.2 → range [7273, 36364]). When no
+scale is found, defaults to 0-10000 (the most common reflectance quantification).
+
+The CLI tries auto-detection in `parseBandConfig` only when `--rescale auto` (default),
+16-bit data, no explicit `--rescale-range`, and no explicit `--bands` override. Explicit
+flags always take precedence.
