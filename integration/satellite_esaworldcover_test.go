@@ -59,6 +59,12 @@ func TestESAWorldCoverPreset(t *testing.T) {
 	if preset.BandCfg.RescaleMin != 0 {
 		t.Errorf("rescale min = %.0f, want 0", preset.BandCfg.RescaleMin)
 	}
+	if !preset.BandCfg.HasNodata {
+		t.Error("expected HasNodata to be true")
+	}
+	if preset.BandCfg.Nodata != 0 {
+		t.Errorf("nodata = %.0f, want 0", preset.BandCfg.Nodata)
+	}
 }
 
 // TestESAWorldCoverPipeline runs the full GeoTIFF→PMTiles pipeline on the

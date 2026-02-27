@@ -50,6 +50,7 @@ func main() {
 		alphaBandStr string
 		rescaleStr   string
 		rescaleRange string
+		nodataStr    string
 	)
 
 	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium")
@@ -72,6 +73,7 @@ func main() {
 	flag.StringVar(&alphaBandStr, "alpha-band", "auto", "1-indexed band for alpha (0=auto: band 4 for 8-bit spp>=4; -1=force no alpha)")
 	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, log, linear, none (auto: requires --rescale-range for 16-bit)")
 	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (required for 16-bit data)")
+	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -218,6 +220,26 @@ func main() {
 	if err != nil {
 		log.Fatalf("Band config: %v", err)
 	}
+
+	// Apply nodata: CLI override takes precedence, then preset/IFD auto-detection.
+	if nodataStr != "" {
+		v, err := strconv.ParseFloat(strings.TrimSpace(nodataStr), 64)
+		if err != nil || v < 0 || v > 65535 || v != math.Floor(v) {
+			log.Fatalf("--nodata: must be a non-negative integer ≤ 65535, got %q", nodataStr)
+		}
+		bandCfg.HasNodata = true
+		bandCfg.Nodata = v
+	} else if !bandCfg.HasNodata {
+		// Auto-detect from the first source file if not already set by preset.
+		if nd := sources[0].NoData(); nd != "" {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64); err == nil && v >= 0 && v <= 65535 && v == math.Floor(v) {
+				bandCfg.HasNodata = true
+				bandCfg.Nodata = v
+			}
+		}
+	}
+
+	log.Printf("Band config: %s", bandCfg)
 	for _, src := range sources {
 		src.SetBandConfig(bandCfg)
 	}
@@ -559,10 +581,7 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, fi
 			if rescaleRange == "" {
 				// Try auto-detection from GDAL metadata before erroring.
 				if preset, ok := firstSrc.DetectPreset(); ok && !bandsExplicit {
-					log.Printf("Auto-detected: %s (bands %d,%d,%d, rescale linear [%.0f, %.0f])",
-						preset.Name,
-						preset.BandCfg.Bands[0], preset.BandCfg.Bands[1], preset.BandCfg.Bands[2],
-						preset.BandCfg.RescaleMin, preset.BandCfg.RescaleMax)
+					log.Printf("Auto-detected: %s (%s)", preset.Name, preset.BandCfg)
 					return preset.BandCfg, nil
 				}
 				return cfg, fmt.Errorf("16-bit GeoTIFF detected: --rescale-range min,max is required\n" +

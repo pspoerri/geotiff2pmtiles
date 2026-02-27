@@ -75,16 +75,24 @@ calls, at ~3.25s cumulative CPU it was still worth eliminating.
 
 ## Nodata handling for image (non-float) data
 
-For single-band GeoTIFF data (e.g. ESA WorldCover land cover classifications), pixels
-matching the GDAL_NODATA value are decoded as transparent (alpha=0) instead of opaque
-black (alpha=255). This is handled in `decodeRawTile` by parsing the nodata string
-from the first IFD and comparing each pixel against it. Only applied for spp≤2
-(single-band and gray+alpha) since multi-band nodata semantics are more complex.
-The nodata value must be an integer in [0, 255] to qualify. This ensures all downstream
-code (resampling, downsampling, encoding) automatically treats nodata areas as
-transparent — bilinear/Lanczos/bicubic already exclude alpha=0 pixels from RGB
-interpolation, and `sampleFromTileSources` skips fully transparent results to try the
-next source (see below).
+Pixels matching the GDAL_NODATA value are decoded as transparent (alpha=0) so downstream
+resampling, downsampling, and encoding automatically treat them as empty.
+
+**Legacy path** (spp≤2, 8-bit, default BandConfig): nodata parsed from the GDAL_NODATA
+tag (IFD field, integer in [0,255]); single-band sets alpha=0 for matching pixels,
+gray+alpha also overrides the alpha channel.
+
+**General path** (multi-band or 16-bit, including presets): nodata is stored in
+`BandConfig.HasNodata`/`BandConfig.Nodata`. `DetectPreset()` automatically populates
+these from the GDAL_NODATA tag (integer in [0,65535]) so the preset is self-contained.
+The `--nodata` CLI flag overrides the auto-detected value. In the pixel loop, all `spp`
+file bands are compared to the raw nodata value before rescaling; if all match, the pixel
+is emitted as (0,0,0,0). Only applied when there is no dedicated alpha band
+(`effectiveAlpha < 0`), since an alpha band already encodes transparency directly.
+
+All downstream code (bilinear/Lanczos/bicubic resampling, mode downsampling,
+`sampleFromTileSources`) excludes alpha=0 pixels from interpolation and voting, and
+tries the next source on fully-transparent results (see below).
 
 ## Nodata-aware source fallthrough
 
