@@ -195,18 +195,22 @@ Fixed by adding `imgW`/`imgH` parameters and clamping `px`/`py` to
 `[0, imgW-1]`/`[0, imgH-1]`, matching the approach already used by the
 bilinear, bicubic, and Lanczos sampling functions.
 
-## Horizontal differencing predictor
+## TIFF predictor support
 
-LZW and Deflate compressed TIFFs may use a horizontal differencing predictor
-(predictor=2) which stores each sample as the delta from the previous sample in the
-same row. After decompression, the predictor is reversed by accumulating the deltas
-row-by-row. This applies to both tile-based and strip-based reads. Without this step,
-pixel values are raw deltas, producing garbled imagery.
+LZW and Deflate compressed TIFFs may use predictors to improve compression. After
+decompression, the predictor encoding is reversed before interpreting pixel values.
 
-For 16-bit data (bytesPerSample=2), deltas are uint16 values that must be read and
-written using the TIFF byte order rather than single-byte accumulation. The function
-accepts `bytesPerSample` and `binary.ByteOrder` to dispatch between 8-bit and 16-bit
-paths.
+**Predictor=2** (horizontal differencing) stores each sample as the delta from the
+previous sample in the same row. Accumulating the deltas row-by-row recovers the
+original values. Supported for 8-bit, 16-bit, and 32-bit data, with multi-byte deltas
+accumulated at the sample width using the TIFF byte order.
+
+**Predictor=3** (floating-point predictor) is the standard for float32/float64 data
+compressed with Deflate or LZW (GDAL default). It first byte-shuffles each row so
+all byte-0 of all samples are grouped together, then byte-1, etc., then applies
+byte-level horizontal differencing. Reversing it: (1) undo byte differencing by
+accumulating bytes, (2) unshuffle to restore each sample's bytes to contiguous order.
+Without this, float tile data appears as garbled values producing banding artifacts.
 
 ## BandConfig: band reordering, alpha, and rescaling
 

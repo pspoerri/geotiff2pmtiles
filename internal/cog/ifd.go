@@ -92,10 +92,10 @@ type GDALMeta struct {
 	BandItems map[int]map[string]string // per-band: sample (0-indexed) → name → value
 }
 
-// bytesPerSample returns the number of bytes per sample (1 for 8-bit, 2 for 16-bit).
+// bytesPerSample returns the number of bytes per sample based on BitsPerSample.
 func (ifd *IFD) bytesPerSample() int {
-	if len(ifd.BitsPerSample) > 0 && ifd.BitsPerSample[0] == 16 {
-		return 2
+	if len(ifd.BitsPerSample) > 0 {
+		return int(ifd.BitsPerSample[0]) / 8
 	}
 	return 1
 }
