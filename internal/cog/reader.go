@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -1347,6 +1348,183 @@ func (r *Reader) BitsPerSample() int {
 // SamplesPerPixel returns the samples per pixel of the first IFD.
 func (r *Reader) SamplesPerPixel() int {
 	return int(r.ifds[0].SamplesPerPixel)
+}
+
+// GDALMeta returns the parsed GDAL_METADATA from tag 42112.
+// Returns nil if the tag was not present.
+func (r *Reader) GDALMeta() *GDALMeta {
+	return r.ifds[0].GDALMetadata
+}
+
+// Preset describes auto-detected settings derived from the GeoTIFF.
+type Preset struct {
+	Name    string     // e.g. "multispectral-rgbnir", "float-terrarium"
+	BandCfg BandConfig // fully configured bands, rescale, alpha (zero value for float)
+	Format  string     // suggested output format ("terrarium", ""), empty = no override
+}
+
+// bandRoleKeywords maps canonical color roles to GDAL band DESCRIPTION keywords.
+// Matching is case-insensitive. The first keyword match wins for each role.
+var bandRoleKeywords = map[string][]string{
+	"red":   {"red"},
+	"green": {"green"},
+	"blue":  {"blue"},
+	"nir":   {"nir", "near-infrared", "near infrared", "infrared"},
+}
+
+// bandItemRe matches "Band N: BXX (Role)" in a dataset-level "bands" string.
+var bandItemRe = regexp.MustCompile(`Band\s+(\d+):\s+\S+\s+\((\w+)\)`)
+
+// DetectPreset examines the GeoTIFF structure and GDAL metadata to return a Preset.
+// Detection covers:
+//   - Float data (elevation/DEM) → terrarium format
+//   - Multi-band with band descriptions → auto band mapping + rescaling
+func (r *Reader) DetectPreset() (Preset, bool) {
+	// Float data → terrarium encoding.
+	if r.IsFloat() {
+		return Preset{Name: "float-terrarium", Format: "terrarium"}, true
+	}
+
+	// Multi-band with GDAL metadata → auto band mapping + rescaling.
+	md := r.GDALMeta()
+	if md == nil {
+		return Preset{}, false
+	}
+
+	roleToFileBand := r.detectBandRoles(md)
+
+	redBand, okR := roleToFileBand["red"]
+	greenBand, okG := roleToFileBand["green"]
+	blueBand, okB := roleToFileBand["blue"]
+	if !okR || !okG || !okB {
+		return Preset{}, false
+	}
+
+	rescaleMin, rescaleMax := r.detectScale(md)
+
+	name := "multispectral"
+	if _, hasNIR := roleToFileBand["nir"]; hasNIR {
+		name += "-rgbnir"
+	} else {
+		name += "-rgb"
+	}
+
+	cfg := BandConfig{
+		Bands:      [3]int{redBand, greenBand, blueBand},
+		AlphaBand:  -1,
+		Rescale:    RescaleLinear,
+		RescaleMin: rescaleMin,
+		RescaleMax: rescaleMax,
+	}
+
+	return Preset{Name: name, BandCfg: cfg}, true
+}
+
+// detectBandRoles maps color roles (red, green, blue, nir) to 1-indexed file bands
+// by examining GDAL metadata. Checks per-band DESCRIPTION items first, then falls
+// back to parsing a dataset-level "bands" string.
+func (r *Reader) detectBandRoles(md *GDALMeta) map[string]int {
+	roleToFileBand := make(map[string]int)
+
+	// Strategy 1: per-band DESCRIPTION items.
+	for sample, items := range md.BandItems {
+		desc := strings.ToLower(strings.TrimSpace(items["DESCRIPTION"]))
+		if desc == "" {
+			continue
+		}
+		for role, keywords := range bandRoleKeywords {
+			if _, exists := roleToFileBand[role]; exists {
+				continue
+			}
+			for _, kw := range keywords {
+				if strings.Contains(desc, kw) {
+					roleToFileBand[role] = sample + 1
+					break
+				}
+			}
+		}
+	}
+
+	// If we found at least RGB, we're done.
+	if _, okR := roleToFileBand["red"]; okR {
+		if _, okG := roleToFileBand["green"]; okG {
+			if _, okB := roleToFileBand["blue"]; okB {
+				return roleToFileBand
+			}
+		}
+	}
+
+	// Strategy 2: dataset-level "bands" string, e.g.
+	// "Band 1: B04 (Red), Band 2: B03 (Green), Band 3: B02 (Blue), Band 4: B08 (Infrared)"
+	if bandsStr := md.Items["bands"]; bandsStr != "" {
+		matches := bandItemRe.FindAllStringSubmatch(bandsStr, -1)
+		for _, m := range matches {
+			bandIdx, _ := strconv.Atoi(m[1])
+			role := strings.ToLower(m[2])
+			// Map the role through our keyword table.
+			for canonRole, keywords := range bandRoleKeywords {
+				if _, exists := roleToFileBand[canonRole]; exists {
+					continue
+				}
+				for _, kw := range keywords {
+					if strings.Contains(role, kw) {
+						roleToFileBand[canonRole] = bandIdx
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return roleToFileBand
+}
+
+// detectScale reads SCALE and OFFSET from GDAL metadata and returns the rescale
+// range [min, max] for mapping to [0, 255]. Checks per-band items first (sample 0),
+// then dataset-level items.
+func (r *Reader) detectScale(md *GDALMeta) (float64, float64) {
+	var scaleStr, offsetStr string
+
+	// Per-band SCALE/OFFSET (sample 0) take precedence.
+	if items, ok := md.BandItems[0]; ok {
+		scaleStr = items["SCALE"]
+		offsetStr = items["OFFSET"]
+	}
+	// Fall back to dataset-level.
+	if scaleStr == "" {
+		scaleStr = md.Items["SCALE"]
+	}
+	if offsetStr == "" {
+		offsetStr = md.Items["OFFSET"]
+	}
+
+	if scaleStr == "" {
+		return 0, 10000 // sensible default for reflectance data
+	}
+
+	scale, err := strconv.ParseFloat(strings.TrimSpace(scaleStr), 64)
+	if err != nil || scale <= 0 {
+		return 0, 10000
+	}
+
+	maxVal := math.Round(1.0 / scale) // e.g. 0.0001 → 10000
+
+	var offset float64
+	if offsetStr != "" {
+		if v, err := strconv.ParseFloat(strings.TrimSpace(offsetStr), 64); err == nil {
+			offset = v
+		}
+	}
+
+	// Offset adjusts the min value: reflectance = (DN + offset) * scale
+	// So DN range for [0, 1] reflectance is [-offset/scale, (1-offset*scale)/scale]
+	// Simplified: min = -offset/scale (if offset < 0, e.g. Landsat: offset=-0.2, scale=0.0000275)
+	minVal := 0.0
+	if offset < 0 {
+		minVal = math.Round(-offset / scale)
+	}
+
+	return minVal, maxVal
 }
 
 // buildRescaler returns a function that maps uint16 input values to uint8 output.

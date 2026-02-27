@@ -2,9 +2,12 @@ package cog
 
 import (
 	"encoding/binary"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"math"
+	"strconv"
+	"strings"
 )
 
 // TIFF tag IDs.
@@ -31,6 +34,7 @@ const (
 	tagGeoKeyDirectoryTag = 34735
 	tagGeoDoubleParamsTag = 34736
 	tagGeoAsciiParamsTag  = 34737
+	tagGDALMetadata       = 42112
 	tagGDAL_NODATA        = 42113
 )
 
@@ -78,6 +82,14 @@ type IFD struct {
 	GeoDoubleParams []float64
 	GeoAsciiParams  string
 	NoData          string
+	GDALMetadata    *GDALMeta // parsed GDAL_METADATA XML (tag 42112), nil if absent
+}
+
+// GDALMeta holds parsed GDAL_METADATA XML items from tag 42112.
+// Dataset-level items go in Items; per-band items (with sample=N) go in BandItems.
+type GDALMeta struct {
+	Items     map[string]string         // dataset-level: name → value
+	BandItems map[int]map[string]string // per-band: sample (0-indexed) → name → value
 }
 
 // bytesPerSample returns the number of bytes per sample (1 for 8-bit, 2 for 16-bit).
@@ -352,10 +364,68 @@ func buildIFD(entries []tiffEntry, bo binary.ByteOrder) IFD {
 			ifd.NoData = s
 		case tagGeoAsciiParamsTag:
 			ifd.GeoAsciiParams = string(e.Value[:e.Count])
+		case tagGDALMetadata:
+			s := string(e.Value[:e.Count])
+			for len(s) > 0 && s[len(s)-1] == 0 {
+				s = s[:len(s)-1]
+			}
+			ifd.GDALMetadata = parseGDALMetadataXML(s)
 		}
 	}
 
 	return ifd
+}
+
+// parseGDALMetadataXML extracts <Item name="key" sample="N">value</Item> pairs
+// from the GDAL_METADATA XML tag (tag 42112). Items with a sample attribute are
+// stored as per-band metadata; items without are dataset-level.
+func parseGDALMetadataXML(xmlStr string) *GDALMeta {
+	meta := &GDALMeta{
+		Items:     make(map[string]string),
+		BandItems: make(map[int]map[string]string),
+	}
+	decoder := xml.NewDecoder(strings.NewReader(xmlStr))
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			break
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok || se.Name.Local != "Item" {
+			continue
+		}
+		var name string
+		sample := -1
+		for _, attr := range se.Attr {
+			switch attr.Name.Local {
+			case "name":
+				name = attr.Value
+			case "sample":
+				if v, err := strconv.Atoi(attr.Value); err == nil {
+					sample = v
+				}
+			}
+		}
+		if name == "" {
+			continue
+		}
+		var value string
+		if err := decoder.DecodeElement(&value, &se); err != nil {
+			continue
+		}
+		if sample >= 0 {
+			if meta.BandItems[sample] == nil {
+				meta.BandItems[sample] = make(map[string]string)
+			}
+			meta.BandItems[sample][name] = value
+		} else {
+			meta.Items[name] = value
+		}
+	}
+	if len(meta.Items) == 0 && len(meta.BandItems) == 0 {
+		return nil
+	}
+	return meta
 }
 
 func getUint16Val(e tiffEntry, bo binary.ByteOrder) uint16 {

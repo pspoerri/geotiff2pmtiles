@@ -194,6 +194,25 @@ func main() {
 		}
 	}
 
+	// Auto-detect preset from GeoTIFF structure and GDAL metadata.
+	// Apply format override (e.g. terrarium for float data) before band config
+	// parsing so that the format is settled before we proceed.
+	if preset, ok := sources[0].DetectPreset(); ok {
+		if preset.Format != "" && format == "jpeg" {
+			format = preset.Format
+			log.Printf("Auto-detected: %s (format: %s)", preset.Name, format)
+			enc, err = encode.NewEncoder(format, quality)
+			if err != nil {
+				log.Fatalf("Encoder: %v", err)
+			}
+		}
+	}
+
+	// Validate terrarium requires float input.
+	if format == "terrarium" && !sources[0].IsFloat() {
+		log.Fatal("Terrarium format requires float GeoTIFF input (elevation data)")
+	}
+
 	// Parse band config.
 	bandCfg, err := parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange, sources[0])
 	if err != nil {
@@ -201,26 +220,6 @@ func main() {
 	}
 	for _, src := range sources {
 		src.SetBandConfig(bandCfg)
-	}
-
-	// Auto-detect float GeoTIFFs and suggest terrarium format.
-	isFloat := sources[0].IsFloat()
-	if isFloat {
-		if verbose {
-			log.Printf("Detected float GeoTIFF data (elevation/DEM)")
-		}
-		if format == "jpeg" {
-			// Auto-switch to terrarium for float data when using the default format.
-			format = "terrarium"
-			log.Printf("Auto-selected terrarium encoding for float GeoTIFF data")
-			enc, err = encode.NewEncoder(format, quality)
-			if err != nil {
-				log.Fatalf("Encoder: %v", err)
-			}
-		}
-	}
-	if format == "terrarium" && !isFloat {
-		log.Fatal("Terrarium format requires float GeoTIFF input (elevation data)")
 	}
 
 	// Compute merged bounds in WGS84.
@@ -548,10 +547,19 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, fi
 
 	// Parse --rescale and --rescale-range.
 	is16 := firstSrc.BitsPerSample() == 16
+	bandsExplicit := bandsStr != "1,2,3"
 	switch rescaleStr {
 	case "auto":
 		if is16 {
 			if rescaleRange == "" {
+				// Try auto-detection from GDAL metadata before erroring.
+				if preset, ok := firstSrc.DetectPreset(); ok && !bandsExplicit {
+					log.Printf("Auto-detected: %s (bands %d,%d,%d, rescale linear [%.0f, %.0f])",
+						preset.Name,
+						preset.BandCfg.Bands[0], preset.BandCfg.Bands[1], preset.BandCfg.Bands[2],
+						preset.BandCfg.RescaleMin, preset.BandCfg.RescaleMax)
+					return preset.BandCfg, nil
+				}
 				return cfg, fmt.Errorf("16-bit GeoTIFF detected: --rescale-range min,max is required\n" +
 					"  Hint: use gdalinfo or inspect the data to find the value range.\n" +
 					"  Example: --rescale linear --rescale-range 0,5000")
