@@ -5,6 +5,72 @@ import (
 	"testing"
 )
 
+// --- gamma LUTs ---
+
+func TestBuildGammaLUTs_NilCases(t *testing.T) {
+	// Disabled when gamma <= 0 or == 1.0.
+	for _, g := range []float64{0, -1, 1.0} {
+		if luts := buildGammaLUTs(g); luts != nil {
+			t.Errorf("buildGammaLUTs(%v) = non-nil, want nil", g)
+		}
+	}
+}
+
+func TestBuildGammaLUTs_NonNil(t *testing.T) {
+	luts := buildGammaLUTs(2.2)
+	if luts == nil {
+		t.Fatal("buildGammaLUTs(2.2) = nil, want non-nil")
+	}
+}
+
+func TestGammaLUTs_EncodeBounds(t *testing.T) {
+	luts := buildGammaLUTs(2.2)
+	if luts == nil {
+		t.Fatal("buildGammaLUTs(2.2) = nil")
+	}
+	// Endpoints must be exact.
+	if v := luts.encode(0); v != 0 {
+		t.Errorf("encode(0) = %d, want 0", v)
+	}
+	if v := luts.encode(255); v != 255 {
+		t.Errorf("encode(255) = %d, want 255", v)
+	}
+	// Negative and overflow clamp.
+	if v := luts.encode(-10); v != 0 {
+		t.Errorf("encode(-10) = %d, want 0", v)
+	}
+	if v := luts.encode(300); v != 255 {
+		t.Errorf("encode(300) = %d, want 255", v)
+	}
+}
+
+func TestGammaLUTs_EncodeBrightensMidtones(t *testing.T) {
+	// With gamma > 1, encode(v) = v^(1/gamma)*255 should produce
+	// brighter (higher) output for midtone inputs.
+	luts := buildGammaLUTs(2.2)
+	if luts == nil {
+		t.Fatal("buildGammaLUTs(2.2) = nil")
+	}
+	mid := luts.encode(128)
+	if mid <= 128 {
+		t.Errorf("encode(128) = %d, want > 128 (gamma encode should brighten midtones)", mid)
+	}
+}
+
+func TestGammaLUTs_EncodeMonotonic(t *testing.T) {
+	luts := buildGammaLUTs(2.2)
+	if luts == nil {
+		t.Fatal("buildGammaLUTs(2.2) = nil")
+	}
+	// The encode table must be monotonically non-decreasing.
+	for i := 1; i < gammaEncodeSize; i++ {
+		if luts.toGamma[i] < luts.toGamma[i-1] {
+			t.Fatalf("toGamma[%d]=%d < toGamma[%d]=%d: not monotonic",
+				i, luts.toGamma[i], i-1, luts.toGamma[i-1])
+		}
+	}
+}
+
 // --- clamp ---
 
 func TestClamp(t *testing.T) {

@@ -37,6 +37,7 @@ type TransformConfig struct {
 	Encoder          encode.Encoder
 	SourceFormat     string // format of input tiles (for decoding)
 	Resampling       Resampling
+	ResamplingGamma  float64 // power-law gamma for resampling interpolation (1.0 = disabled)
 	Mode             TransformMode
 	FillColor        *color.RGBA
 	Bounds           [4]float32 // MinLon, MinLat, MaxLon, MaxLat

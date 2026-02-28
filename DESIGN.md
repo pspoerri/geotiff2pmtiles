@@ -1,5 +1,21 @@
 # Design Decisions
 
+## Resampling gamma correction
+
+When converting from dB-space (e.g. SAR backscatter) to RGB for display, the resulting
+pixel values can appear too dark because dB values concentrate in the lower end of the
+byte range. The `--resampling-gamma` flag applies a power-law gamma encode to the
+interpolated output: `output = (interpolated/255)^(1/gamma) * 255`. This brightens
+midtones and improves visual contrast without altering the interpolation kernel itself.
+
+Only the encode step is applied — there is no decode of source pixels. This keeps the
+accumulation arithmetic unchanged and avoids an extra LUT lookup per pixel per channel
+in the inner loop. The encode table uses 4096 entries for sub-byte precision.
+
+Alpha is never gamma-corrected (it is linear by definition). Nearest/mode resampling
+and Terrarium (elevation) paths skip gamma entirely. The default gamma of 1.0 produces
+bit-identical output to the previous behavior.
+
 ## Startup settings display
 
 Always print the effective configuration (format, tile size, zoom range, resampling,

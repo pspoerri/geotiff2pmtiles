@@ -28,23 +28,24 @@ var (
 
 func main() {
 	var (
-		format      string
-		quality     int
-		minZoom     int
-		maxZoom     int
-		showVersion bool
-		tileSize    int
-		concurrency int
-		verbose     bool
-		resampling  string
-		cpuProfile  string
-		memProfile  string
-		memLimitMB  int
-		noSpill     bool
-		fillColor   string
-		rebuild     bool
-		attribution string
-		layerType   string
+		format          string
+		quality         int
+		minZoom         int
+		maxZoom         int
+		showVersion     bool
+		tileSize        int
+		concurrency     int
+		verbose         bool
+		resampling      string
+		cpuProfile      string
+		memProfile      string
+		memLimitMB      int
+		noSpill         bool
+		fillColor       string
+		rebuild         bool
+		attribution     string
+		layerType       string
+		resamplingGamma float64
 	)
 
 	flag.StringVar(&format, "format", "", "Target tile encoding: jpeg, png, webp (default: keep source format)")
@@ -54,6 +55,7 @@ func main() {
 	flag.IntVar(&tileSize, "tile-size", -1, "Output tile size in pixels (default: keep source)")
 	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers")
 	flag.StringVar(&resampling, "resampling", "bicubic", "Interpolation method: lanczos, bicubic, bilinear, nearest, mode")
+	flag.Float64Var(&resamplingGamma, "resampling-gamma", 1.0, "Gamma correction for resampling output encoding (1.0 = disabled, typical 1.5-2.2 for dB-space to RGB)")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "Write CPU profile to file")
@@ -250,7 +252,11 @@ func main() {
 	fmt.Printf("  %-14s %d – %d (source: %d – %d)\n", "Zoom:",
 		minZoom, maxZoom, srcHeader.MinZoom, srcHeader.MaxZoom)
 	if mode == tile.TransformRebuild {
-		fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
+		if resamplingGamma != 1.0 {
+			fmt.Printf("  %-14s %s (gamma %.2g)\n", "Resampling:", resampling, resamplingGamma)
+		} else {
+			fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
+		}
 	}
 	fmt.Printf("  %-14s %d\n", "Concurrency:", concurrency)
 	if fc != nil {
@@ -277,6 +283,7 @@ func main() {
 		Encoder:          enc,
 		SourceFormat:     srcFormat,
 		Resampling:       resamplingMode,
+		ResamplingGamma:  resamplingGamma,
 		Mode:             mode,
 		FillColor:        fc,
 		Bounds:           bounds,
@@ -286,7 +293,7 @@ func main() {
 
 	// Build description with processing steps prepended to source description.
 	description := buildTransformDescription(srcDescription, srcHeader, mode, srcFormat, format, quality,
-		tileSize, minZoom, maxZoom, resampling, fc)
+		tileSize, minZoom, maxZoom, resampling, resamplingGamma, fc)
 
 	// Create PMTiles writer.
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
@@ -407,7 +414,7 @@ func parseHexColor(s string) (color.RGBA, error) {
 
 func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 	mode tile.TransformMode, srcFormat, targetFormat string, quality int,
-	tileSize, minZoom, maxZoom int, resampling string, fc *color.RGBA) string {
+	tileSize, minZoom, maxZoom int, resampling string, resamplingGamma float64, fc *color.RGBA) string {
 
 	var b strings.Builder
 
@@ -442,7 +449,11 @@ func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 	}
 
 	if mode == tile.TransformRebuild {
-		b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
+		if resamplingGamma != 1.0 {
+			b.WriteString(fmt.Sprintf("  Resampling: %s (gamma %.2g)\n", resampling, resamplingGamma))
+		} else {
+			b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
+		}
 	}
 
 	if fc != nil {
