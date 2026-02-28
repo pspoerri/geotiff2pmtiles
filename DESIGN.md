@@ -361,6 +361,21 @@ The fill tile is pre-encoded once before the zoom loop (matching the pattern in
 `generator.go`) and a shared immutable `fillTileShared` TileData replaces per-position
 allocations for nil-child substitution during downsampling.
 
+## Root directory 16 KiB budget
+
+The PMTiles v3 spec requires the header (127 bytes) plus root directory to fit within
+a single 16 KiB initial HTTP fetch. Web viewers like pmtiles.io fetch the first 16,384
+bytes, parse the header, and decompress the root directory from the remaining bytes. If
+the root directory is larger, the gzip stream is truncated and decompression fails with
+a "stream end" error.
+
+Previously `buildDirectory` only checked the entry count (≤16,384 entries → flat root).
+With realistic Hilbert-curve tile IDs and varying tile sizes, even a few thousand entries
+can compress to >16 KiB. The fix: serialize the root directory first, check the
+compressed size against the budget (16,384 − 127 = 16,257 bytes), and fall through to
+leaf directories if exceeded. This guarantees compatibility with all PMTiles v3 readers
+regardless of dataset size.
+
 ## Integration test plausibility checks
 
 Satellite integration tests use a shared `assertPlausiblePMTiles` helper that validates

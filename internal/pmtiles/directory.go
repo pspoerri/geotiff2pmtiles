@@ -71,15 +71,25 @@ func buildDirectory(entries []Entry) (rootDir []byte, leafDirs []byte, err error
 	// Optimize run lengths: consecutive tile IDs with contiguous data can share an entry.
 	optimized := optimizeRunLengths(entries)
 
-	// If entries fit in a single root directory, no leaf directories needed.
-	const maxRootEntries = 16384
+	// The PMTiles v3 spec requires the header (127 bytes) + root directory to fit within
+	// a single 16 KiB initial fetch so HTTP range-request clients (like pmtiles.io) can
+	// bootstrap without a second round-trip. If the root directory exceeds this budget,
+	// we must split into leaf directories.
+	const maxRootBytes = 16384 - HeaderSize // 16257 bytes available for the root directory
 
-	if len(optimized) <= maxRootEntries {
+	// Try a flat root directory first when the entry count is reasonable.
+	if len(optimized) <= 16384 {
 		rootDir, err = serializeDirectory(optimized)
-		return rootDir, nil, err
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(rootDir) <= maxRootBytes {
+			return rootDir, nil, nil
+		}
+		// Compressed root dir exceeds 16 KiB budget; fall through to leaf directories.
 	}
 
-	// Otherwise, split into leaf directories.
+	// Split into leaf directories.
 	leafSize := 4096
 	numLeaves := (len(optimized) + leafSize - 1) / leafSize
 
