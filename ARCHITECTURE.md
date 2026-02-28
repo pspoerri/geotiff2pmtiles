@@ -84,6 +84,11 @@ rebuild, transparent pixels in decoded tiles and nil-child quadrants in downsamp
 tiles become the fill color. Additionally, solid-color tiles are generated for tile
 positions within bounds that have no data.
 
+For sparse datasets, rebuild tracks which positions contain real (non-fill) data and
+propagates upward through zoom levels. Only real positions go through the expensive
+downsample/encode pipeline; all-fill positions get pre-encoded bytes written directly,
+skipping DiskTileStore overhead entirely.
+
 ## Memory Efficiency
 
 - Memory-mapped file access (no full-image decode)
