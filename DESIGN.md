@@ -343,6 +343,24 @@ The CLI tries auto-detection in `parseBandConfig` only when `--rescale auto` (de
 16-bit data, no explicit `--rescale-range`, and no explicit `--bands` override. Explicit
 flags always take precedence.
 
+## Transform rebuild: sparse fill optimization
+
+When `pmtransform --rebuild --fill-color` processes sparse datasets, most tile
+positions in bounds contain no source data and produce identical fill tiles. Rather
+than processing every position through the full downsample → encode → store pipeline,
+positions are partitioned into "real" (need decode/downsample/encode) and "fill" (write
+pre-encoded bytes directly).
+
+At max zoom, source tiles are "real" and all others get pre-encoded fill bytes written
+directly. At lower zooms, a parent is "real" iff at least one of its 4 children was real
+— propagated upward via a `realPositions` set. This reduces the expensive path from
+O(positions_in_bounds) to O(real_positions) per zoom level, and fill tiles never enter
+the DiskTileStore (avoiding 128 bytes of map overhead per entry).
+
+The fill tile is pre-encoded once before the zoom loop (matching the pattern in
+`generator.go`) and a shared immutable `fillTileShared` TileData replaces per-position
+allocations for nil-child substitution during downsampling.
+
 ## Integration test plausibility checks
 
 Satellite integration tests use a shared `assertPlausiblePMTiles` helper that validates

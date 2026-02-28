@@ -314,35 +314,122 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 		}
 	}
 
+	// Pre-encode the fill tile once so identical fill tiles across all
+	// zoom levels reuse the same encoded bytes, skipping repeated encoder
+	// calls and avoiding DiskTileStore overhead for fill positions.
+	var (
+		fillTileShared *TileData // shared uniform fill tile (immutable, safe to share)
+		fillEncoded    []byte    // pre-encoded bytes for the fill tile
+	)
+	if cfg.FillColor != nil {
+		fillTileShared = newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+		var encErr error
+		fillEncoded, encErr = cfg.Encoder.Encode(fillTileShared.AsImage())
+		if encErr != nil {
+			return Stats{}, fmt.Errorf("encoding fill color tile: %w", encErr)
+		}
+	}
+
+	// Track positions with real (non-fill) data at each zoom level.
+	// A parent position is "real" iff at least one of its 4 children was real.
+	// All-fill parents are written directly with pre-encoded bytes, skipping
+	// the expensive downsample → encode → store pipeline.
+	var realPositions map[[2]int]bool
+
 	for z := effectiveMaxZoom; z >= cfg.MinZoom; z-- {
 		isMaxZoom := (z == effectiveMaxZoom)
 
-		var tiles [][3]int
+		// Partition tiles into realTiles (need decode/downsample/encode)
+		// and fill tiles (write pre-encoded bytes directly).
+		var realTiles [][3]int
+		var nFillTiles int64
+
 		if isMaxZoom && cfg.FillColor == nil {
-			tiles = reader.TilesAtZoom(z)
+			// No fill — only process existing source tiles.
+			realTiles = reader.TilesAtZoom(z)
+		} else if cfg.FillColor != nil {
+			allTiles := coord.TilesInBounds(z,
+				float64(cfg.Bounds[0]), float64(cfg.Bounds[1]),
+				float64(cfg.Bounds[2]), float64(cfg.Bounds[3]))
+
+			if isMaxZoom {
+				// Source tiles need full decode/encode; all others get
+				// pre-encoded fill bytes written directly.
+				realPositions = make(map[[2]int]bool, len(sourceTilesAtMax))
+				for pos := range sourceTilesAtMax {
+					realPositions[pos] = true
+				}
+				realTiles = make([][3]int, 0, len(sourceTilesAtMax))
+				for _, t := range allTiles {
+					if sourceTilesAtMax[[2]int{t[1], t[2]}] {
+						realTiles = append(realTiles, t)
+					} else {
+						if err := writer.WriteTile(t[0], t[1], t[2], fillEncoded); err != nil {
+							return Stats{}, fmt.Errorf("writing fill tile z%d/%d/%d: %w", t[0], t[1], t[2], err)
+						}
+						nFillTiles++
+					}
+				}
+			} else {
+				// A parent needs downsampling iff at least one child has real data.
+				nextReal := make(map[[2]int]bool)
+				for _, t := range allTiles {
+					x, y := t[1], t[2]
+					if realPositions[[2]int{2 * x, 2 * y}] ||
+						realPositions[[2]int{2*x + 1, 2 * y}] ||
+						realPositions[[2]int{2 * x, 2*y + 1}] ||
+						realPositions[[2]int{2*x + 1, 2*y + 1}] {
+						realTiles = append(realTiles, t)
+						nextReal[[2]int{x, y}] = true
+					} else {
+						if err := writer.WriteTile(t[0], t[1], t[2], fillEncoded); err != nil {
+							return Stats{}, fmt.Errorf("writing fill tile z%d/%d/%d: %w", t[0], t[1], t[2], err)
+						}
+						nFillTiles++
+					}
+				}
+				realPositions = nextReal
+			}
+
+			// Account for fill tiles in stats.
+			if nFillTiles > 0 {
+				tileCount.Add(nFillTiles)
+				uniformCount.Add(nFillTiles)
+				totalBytes.Add(nFillTiles * int64(len(fillEncoded)))
+			}
 		} else {
-			// Enumerate all positions from bounds. At max zoom with fill,
-			// this ensures gaps get fill tiles directly. At lower zooms,
-			// this allows downsampling even where the source had gaps.
-			tiles = coord.TilesInBounds(z,
+			// No fill, lower zoom — enumerate all positions from bounds.
+			realTiles = coord.TilesInBounds(z,
 				float64(cfg.Bounds[0]), float64(cfg.Bounds[1]),
 				float64(cfg.Bounds[2]), float64(cfg.Bounds[3]))
 		}
 
-		if len(tiles) == 0 {
+		if len(realTiles) == 0 && nFillTiles == 0 {
 			continue
 		}
 
+		totalAtZoom := int64(len(realTiles)) + nFillTiles
 		if cfg.Verbose {
-			log.Printf("Zoom %d: %d tiles to process", z, len(tiles))
+			if nFillTiles > 0 {
+				log.Printf("Zoom %d: %d tiles to process (%d real, %d fill)", z, totalAtZoom, len(realTiles), nFillTiles)
+			} else {
+				log.Printf("Zoom %d: %d tiles to process", z, totalAtZoom)
+			}
 		}
 
-		coord.SortTilesByHilbert(tiles)
+		pb := newProgressBar(fmt.Sprintf("Zoom %2d", z), totalAtZoom)
+		// Advance progress for fill tiles already written.
+		pb.processed.Add(nFillTiles)
 
-		pb := newProgressBar(fmt.Sprintf("Zoom %2d", z), int64(len(tiles)))
+		if len(realTiles) == 0 {
+			pb.Finish()
+			continue
+		}
+
+		coord.SortTilesByHilbert(realTiles)
 
 		nextStore := NewDiskTileStore(DiskTileStoreConfig{
-			InitialCapacity:  len(tiles),
+			InitialCapacity:  len(realTiles),
 			TileSize:         cfg.TileSize,
 			TempDir:          cfg.OutputDir,
 			MemoryLimitBytes: memLimit,
@@ -350,7 +437,7 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 			Verbose:          cfg.Verbose,
 		})
 
-		nTiles := len(tiles)
+		nTiles := len(realTiles)
 		nWorkers := cfg.Concurrency
 		if nWorkers > nTiles {
 			nWorkers = nTiles
@@ -374,7 +461,7 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 				if end > nTiles {
 					end = nTiles
 				}
-				batchCh <- tiles[i:end]
+				batchCh <- realTiles[i:end]
 			}
 			close(batchCh)
 		}()
@@ -390,8 +477,8 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 						var td *TileData
 
 						if isMaxZoom {
-							// When fill is set, check whether this position has
-							// a source tile or should be filled.
+							// All tiles in realTiles have source data when fill
+							// is active (fill-only positions already written).
 							hasSource := sourceTilesAtMax == nil || sourceTilesAtMax[[2]int{x, y}]
 							if hasSource {
 								rawData, err := reader.ReadTile(z, x, y)
@@ -419,7 +506,7 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 								}
 							}
 							if td == nil && cfg.FillColor != nil {
-								td = newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+								td = fillTileShared
 							}
 						} else {
 							childZ := z + 1
@@ -427,21 +514,20 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 							tr := store.Get(childZ, 2*x+1, 2*y)
 							bl := store.Get(childZ, 2*x, 2*y+1)
 							br := store.Get(childZ, 2*x+1, 2*y+1)
-							// Color transform at source: substitute nil children with fill tiles
-							// so downsample operates on 4 tiles; no transform in downsample path.
-							if cfg.FillColor != nil {
-								fillTile := newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+							// Substitute nil children with the shared fill tile
+							// so downsample operates on 4 tiles.
+							if fillTileShared != nil {
 								if tl == nil {
-									tl = fillTile
+									tl = fillTileShared
 								}
 								if tr == nil {
-									tr = fillTile
+									tr = fillTileShared
 								}
 								if bl == nil {
-									bl = fillTile
+									bl = fillTileShared
 								}
 								if br == nil {
-									br = fillTile
+									br = fillTileShared
 								}
 							}
 							td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
@@ -459,13 +545,21 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 							grayCount.Add(1)
 						}
 
-						data, err := cfg.Encoder.Encode(td.AsImage())
-						if err != nil {
-							select {
-							case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
-							default:
+						// Use pre-encoded fill bytes for uniform fill tiles
+						// to skip redundant encoder calls.
+						var data []byte
+						if fillEncoded != nil && td == fillTileShared {
+							data = fillEncoded
+						} else {
+							var err error
+							data, err = cfg.Encoder.Encode(td.AsImage())
+							if err != nil {
+								select {
+								case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
+								default:
+								}
+								return
 							}
-							return
 						}
 
 						if err := writer.WriteTile(z, x, y, data); err != nil {
@@ -480,7 +574,9 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 							nextStore.Put(z, x, y, td, data)
 						}
 
-						td.Release()
+						if td != fillTileShared {
+							td.Release()
+						}
 
 						tileCount.Add(1)
 						totalBytes.Add(int64(len(data)))
@@ -513,9 +609,6 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 	}
 
 	store.Close()
-
-	// No fillEmptyTiles needed: when FillColor is set, all positions
-	// (including gaps) are handled inline during the zoom loop above.
 
 	return Stats{
 		TileCount:    tileCount.Load(),
