@@ -454,6 +454,7 @@ type transformConfig struct {
 	Resampling  string
 	Rebuild     bool
 	Concurrency int
+	FillColor   *color.RGBA
 }
 
 // runTransform executes the PMTiles transform pipeline and returns the output path.
@@ -519,6 +520,8 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 		mode = tile.TransformRebuild
 	} else if formatChanged {
 		mode = tile.TransformReencode
+	} else if cfg.FillColor != nil {
+		mode = tile.TransformReencode
 	}
 
 	bounds := [4]float32{srcHeader.MinLon, srcHeader.MinLat, srcHeader.MaxLon, srcHeader.MaxLat}
@@ -533,6 +536,7 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 		SourceFormat: srcFormat,
 		Resampling:   resamplingMode,
 		Mode:         mode,
+		FillColor:    cfg.FillColor,
 		Bounds:       bounds,
 		OutputDir:    outputDir,
 	}
