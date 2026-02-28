@@ -122,7 +122,7 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 
 ### Examples
 
-Convert a directory of GeoTIFFs with auto zoom detection:
+Convert a directory of GeoTIFFs with auto zoom detection (scans subfolders recursively):
 
 ```bash
 ./geotiff2pmtiles --verbose integration/testdata/swissimage/ output.pmtiles

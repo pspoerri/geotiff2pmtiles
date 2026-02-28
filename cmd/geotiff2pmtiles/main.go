@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"image/color"
+	"io/fs"
 	"log"
 	"math"
 	"os"
@@ -79,7 +80,8 @@ func main() {
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
-		fmt.Fprintf(os.Stderr, "Convert GeoTIFF/COG files to a PMTiles v3 archive.\n\n")
+		fmt.Fprintf(os.Stderr, "Convert GeoTIFF/COG files to a PMTiles v3 archive.\n")
+		fmt.Fprintf(os.Stderr, "Directories are scanned recursively for .tif/.tiff files.\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
@@ -391,6 +393,7 @@ func main() {
 }
 
 // collectTIFFs resolves input paths to a list of .tif files.
+// Directories are walked recursively to find TIFF files in subfolders.
 func collectTIFFs(paths []string) ([]string, error) {
 	var result []string
 	for _, p := range paths {
@@ -399,14 +402,17 @@ func collectTIFFs(paths []string) ([]string, error) {
 			return nil, fmt.Errorf("stat %s: %w", p, err)
 		}
 		if info.IsDir() {
-			entries, err := os.ReadDir(p)
-			if err != nil {
-				return nil, fmt.Errorf("readdir %s: %w", p, err)
-			}
-			for _, e := range entries {
-				if !e.IsDir() && isTIFF(e.Name()) {
-					result = append(result, filepath.Join(p, e.Name()))
+			err := filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
 				}
+				if !d.IsDir() && isTIFF(d.Name()) {
+					result = append(result, path)
+				}
+				return nil
+			})
+			if err != nil {
+				return nil, fmt.Errorf("walk %s: %w", p, err)
 			}
 		} else if isTIFF(p) {
 			result = append(result, p)
