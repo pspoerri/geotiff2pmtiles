@@ -40,7 +40,7 @@ internal/
     writer.go                       PMTiles v3 two-pass writer with tile clustering and metadata
     reader.go                       PMTiles v3 reader (header, directory, tile data, metadata)
     header.go                       Header serialization/deserialization (127 bytes)
-    directory.go                    Hilbert-curve tile IDs, directory serialization/deserialization
+    directory.go                    Hilbert-curve tile IDs, directory serialization/deserialization, 16 KiB root budget enforcement
 integration/
   helpers_test.go                 Synthetic GeoTIFF writer, pipeline runners, PMTiles validation, plausibility checks
   synthetic_test.go               12 end-to-end tests using generated GeoTIFFs

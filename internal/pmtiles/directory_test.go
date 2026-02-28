@@ -275,6 +275,68 @@ func TestXYToHilbert_Exhaustive_Z3(t *testing.T) {
 	}
 }
 
+func TestBuildDirectory_RootDirFitsIn16KiB(t *testing.T) {
+	// Generate tiles at zoom 10 with realistic Hilbert-curve tile IDs and
+	// varying lengths. Even 5 000 such entries compress to ~37 KiB, well
+	// above the 16 KiB initial-fetch budget. The builder must split into
+	// leaf directories so the root stays within budget.
+	const numEntries = 5000
+	entries := make([]Entry, numEntries)
+	var offset uint64
+	n := 1 << 10 // zoom-10 grid
+	for i := range entries {
+		x := (i * 7) % n // pseudo-random scatter across grid
+		y := (i * 13) % n
+		entries[i] = Entry{
+			TileID:    ZXYToTileID(10, x, y),
+			Offset:    offset,
+			Length:    uint32(200 + (i*997)%50000), // varying lengths defeat run-length merging
+			RunLength: 1,
+		}
+		offset += uint64(entries[i].Length)
+	}
+
+	rootDir, leafDirs, err := buildDirectory(entries)
+	if err != nil {
+		t.Fatalf("buildDirectory: %v", err)
+	}
+
+	const maxRootBytes = 16384 - HeaderSize
+	if len(rootDir) > maxRootBytes {
+		t.Errorf("root directory %d bytes exceeds %d-byte budget (should use leaf dirs)",
+			len(rootDir), maxRootBytes)
+	}
+
+	if len(leafDirs) == 0 {
+		t.Error("expected leaf directories for entries that exceed 16 KiB root budget")
+	}
+
+	// Verify root directory deserializes and contains only leaf pointers (RunLength == 0).
+	rootEntries, err := DeserializeDirectory(rootDir)
+	if err != nil {
+		t.Fatalf("deserialize root: %v", err)
+	}
+	for i, e := range rootEntries {
+		if e.RunLength != 0 {
+			t.Errorf("root entry %d: expected RunLength=0 (leaf pointer), got %d", i, e.RunLength)
+		}
+	}
+
+	// Verify all tiles are reachable: deserialize every leaf directory and count entries.
+	var totalLeafEntries int
+	for _, re := range rootEntries {
+		leafData := leafDirs[re.Offset : re.Offset+uint64(re.Length)]
+		leafEntries, err := DeserializeDirectory(leafData)
+		if err != nil {
+			t.Fatalf("deserialize leaf at offset %d: %v", re.Offset, err)
+		}
+		totalLeafEntries += len(leafEntries)
+	}
+	if totalLeafEntries < numEntries/2 {
+		t.Errorf("leaf directories contain only %d entries, expected at least %d", totalLeafEntries, numEntries/2)
+	}
+}
+
 // Helper functions for test.
 
 func decompressGzipT(t *testing.T, data []byte) []byte {
