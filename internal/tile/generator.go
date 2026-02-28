@@ -75,6 +75,7 @@ type Config struct {
 	Encoder          encode.Encoder
 	Bounds           cog.Bounds
 	Resampling       Resampling
+	ResamplingGamma  float64     // power-law gamma for resampling interpolation (1.0 = disabled)
 	IsTerrarium      bool        // true for float GeoTIFF → Terrarium encoding
 	FillColor        *color.RGBA // when set, transparent/nodata pixels → fill color; missing tiles → solid fill
 	MemoryLimitBytes int64       // max tile store memory before disk spilling (0 = auto)
@@ -150,6 +151,13 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 	defer store.Close()
 
 	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64
+
+	// Build gamma lookup tables for resampling interpolation.
+	// nil when gamma correction is disabled (gamma == 1.0 or terrarium mode).
+	var resamplingLUTs *gammaLUTs
+	if !cfg.IsTerrarium {
+		resamplingLUTs = buildGammaLUTs(cfg.ResamplingGamma)
+	}
 
 	// Pre-encode the fill-color tile once so identical fill tiles across all
 	// zoom levels reuse the same encoded bytes, skipping repeated encoder calls.
@@ -262,7 +270,7 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							if cfg.IsTerrarium {
 								img = renderTileTerrarium(z, x, y, cfg.TileSize, srcInfos, proj, floatCache, cfg.Resampling)
 							} else {
-								img = renderTile(z, x, y, cfg.TileSize, srcInfos, proj, cogCache, cfg.Resampling)
+								img = renderTile(z, x, y, cfg.TileSize, srcInfos, proj, cogCache, cfg.Resampling, resamplingLUTs)
 							}
 							if img != nil {
 								if cfg.FillColor != nil {

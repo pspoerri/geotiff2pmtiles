@@ -22,7 +22,7 @@ internal/
   tile/
     generator.go                    Parallel tile generation pipeline (GeoTIFF sources)
     transform.go                    PMTiles transform pipeline (passthrough/re-encode/rebuild)
-    resample.go                     Lanczos/bicubic/bilinear/nearest/mode interpolation + reprojection (LUT-accelerated)
+    resample.go                     Lanczos/bicubic/bilinear/nearest/mode interpolation + reprojection (LUT-accelerated, optional gamma encode)
     downsample.go                   Pyramid downsampling for lower zoom levels
     diskstore.go                    Disk-backed tile store with memory backpressure
     rgbapool.go                     sync.Pool for *image.RGBA reuse (keyed by dimensions)

@@ -319,6 +319,7 @@ example-esaworldcover: build test-integration-download
 		--format $(FORMAT) \
 		--quality $(QUALITY) \
 		--tile-size $(TILE_SIZE) \
+		--resampling-gamma 1.8 \
 		--concurrency $(CONCURRENT) \
 		$(ESAWORLDCOVER_DIR)/ $(BUILD_DIR)/example-esaworldcover-$(FORMAT).pmtiles
 

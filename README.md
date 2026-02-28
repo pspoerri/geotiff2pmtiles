@@ -104,6 +104,7 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--tile-size`   | `256`         | Output tile size in pixels                         |
 | `--concurrency` | `NumCPU`      | Number of parallel workers                         |
 | `--resampling`  | `bicubic`     | Interpolation method: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
+| `--resampling-gamma` | `1.0`    | Gamma correction for resampling output encoding (1.0 = disabled, typical 1.5–2.2 for dB-space to RGB) |
 | `--mem-limit`   | auto          | Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM) |
 | `--no-spill`    | `false`       | Disable disk spilling (keep all tiles in memory)   |
 | `--fill-color`  | `0,0,0,0`     | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` (default: transparent) |

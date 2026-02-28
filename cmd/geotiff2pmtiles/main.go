@@ -30,27 +30,28 @@ var (
 
 func main() {
 	var (
-		format       string
-		quality      int
-		minZoom      int
-		maxZoom      int
-		showVersion  bool
-		tileSize     int
-		concurrency  int
-		verbose      bool
-		resampling   string
-		cpuProfile   string
-		memProfile   string
-		memLimitMB   int
-		noSpill      bool
-		fillColor    string
-		attribution  string
-		layerType    string
-		bandsStr     string
-		alphaBandStr string
-		rescaleStr   string
-		rescaleRange string
-		nodataStr    string
+		format          string
+		quality         int
+		minZoom         int
+		maxZoom         int
+		showVersion     bool
+		tileSize        int
+		concurrency     int
+		verbose         bool
+		resampling      string
+		cpuProfile      string
+		memProfile      string
+		memLimitMB      int
+		noSpill         bool
+		fillColor       string
+		attribution     string
+		layerType       string
+		bandsStr        string
+		alphaBandStr    string
+		rescaleStr      string
+		rescaleRange    string
+		nodataStr       string
+		resamplingGamma float64
 	)
 
 	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium")
@@ -60,6 +61,7 @@ func main() {
 	flag.IntVar(&tileSize, "tile-size", 256, "Output tile size in pixels")
 	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers")
 	flag.StringVar(&resampling, "resampling", "bicubic", "Interpolation method: lanczos, bicubic, bilinear, nearest, mode")
+	flag.Float64Var(&resamplingGamma, "resampling-gamma", 1.0, "Gamma correction for resampling output encoding (1.0 = disabled, typical 1.5-2.2 for dB-space to RGB)")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "Write CPU profile to file")
@@ -291,7 +293,11 @@ func main() {
 	}
 	fmt.Printf("  %-14s %dpx\n", "Tile size:", tileSize)
 	fmt.Printf("  %-14s %d – %d (auto-max: %d)\n", "Zoom:", minZoom, maxZoom, autoMax)
-	fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
+	if resamplingGamma != 1.0 {
+		fmt.Printf("  %-14s %s (gamma %.2g)\n", "Resampling:", resampling, resamplingGamma)
+	} else {
+		fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
+	}
 	fmt.Printf("  %-14s %d\n", "Concurrency:", concurrency)
 	if fc != nil {
 		fmt.Printf("  %-14s rgba(%d,%d,%d,%d)\n", "Fill color:", fc.R, fc.G, fc.B, fc.A)
@@ -334,6 +340,7 @@ func main() {
 		Encoder:          enc,
 		Bounds:           mergedBounds,
 		Resampling:       resamplingMode,
+		ResamplingGamma:  resamplingGamma,
 		IsTerrarium:      format == "terrarium",
 		FillColor:        fc,
 		MemoryLimitBytes: memoryLimitBytes,
@@ -341,7 +348,7 @@ func main() {
 	}
 
 	// Build description for PMTiles metadata.
-	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling, fc, bandCfg)
+	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling, resamplingGamma, fc, bandCfg)
 
 	// Create PMTiles writer.
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
@@ -414,7 +421,7 @@ func isTIFF(name string) bool {
 }
 
 func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog.CoverageGap,
-	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string, fc *color.RGBA, bandCfg cog.BandConfig) string {
+	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string, resamplingGamma float64, fc *color.RGBA, bandCfg cog.BandConfig) string {
 
 	var b strings.Builder
 
@@ -427,7 +434,11 @@ func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog
 	}
 	b.WriteString(fmt.Sprintf("  Tile size: %dpx\n", tileSize))
 	b.WriteString(fmt.Sprintf("  Zoom: %d - %d\n", minZoom, maxZoom))
-	b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
+	if resamplingGamma != 1.0 {
+		b.WriteString(fmt.Sprintf("  Resampling: %s (gamma %.2g)\n", resampling, resamplingGamma))
+	} else {
+		b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
+	}
 	if fc != nil {
 		b.WriteString(fmt.Sprintf("  Fill color: rgba(%d,%d,%d,%d)\n", fc.R, fc.G, fc.B, fc.A))
 	}

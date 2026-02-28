@@ -137,7 +137,7 @@ func tileCRSBounds(z, tx, ty int, proj coord.Projection) (minX, minY, maxX, maxY
 // and latitude per row. In web Mercator tiles, longitude is perfectly linear
 // with pixel X and latitude depends only on pixel Y, so we reduce trig calls
 // from O(tileSize²) to O(tileSize).
-func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.TileCache, mode Resampling) *image.RGBA {
+func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.TileCache, mode Resampling, luts *gammaLUTs) *image.RGBA {
 	// Pre-compute the output pixel size in CRS units for selecting the best overview level.
 	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
 	outputResMeters := coord.ResolutionAtLat(midLat, z, tileSize)
@@ -175,7 +175,7 @@ func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Proje
 			// Convert precomputed WGS84 to source CRS.
 			srcX, srcY := proj.FromWGS84(lons[px], lat)
 
-			r, g, b, a, found := sampleFromTileSources(tileSrcs, srcX, srcY, cache, mode)
+			r, g, b, a, found := sampleFromTileSources(tileSrcs, srcX, srcY, cache, mode, luts)
 			if found {
 				off := rowOff + px*4
 				img.Pix[off+0] = r
@@ -200,7 +200,7 @@ func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Proje
 // sampleFromTileSources tries each pre-filtered tile source to sample a pixel
 // at the given CRS coordinates. Uses pre-computed overview levels and dimensions
 // to avoid redundant per-pixel computation.
-func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.TileCache, mode Resampling) (r, g, b, a uint8, found bool) {
+func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.TileCache, mode Resampling, luts *gammaLUTs) (r, g, b, a uint8, found bool) {
 	for i := range sources {
 		src := &sources[i]
 
@@ -225,11 +225,11 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 		case ResamplingNearest, ResamplingMode:
 			rr, gg, bb, aa, err = nearestSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
 		case ResamplingLanczos:
-			rr, gg, bb, aa, err = lanczosSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
+			rr, gg, bb, aa, err = lanczosSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache, luts)
 		case ResamplingBicubic:
-			rr, gg, bb, aa, err = bicubicSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
+			rr, gg, bb, aa, err = bicubicSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache, luts)
 		default:
-			rr, gg, bb, aa, err = bilinearSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
+			rr, gg, bb, aa, err = bilinearSampleCached(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache, luts)
 		}
 
 		if err != nil {
@@ -268,7 +268,7 @@ func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 // Optimized to do at most 2 cache lookups (instead of 4): pixels in the same
 // source tile are extracted directly from the already-fetched image.
 // tw and th are the source tile dimensions (pre-computed by prepareTileSources).
-func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
+func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	x0 := int(math.Floor(fx))
 	y0 := int(math.Floor(fy))
 	x1 := x0 + 1
@@ -385,6 +385,9 @@ func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH
 	gVal := (w00*float64(p00[1]) + w10*float64(p10[1]) + w01*float64(p01[1]) + w11*float64(p11[1])) / wSum
 	bVal := (w00*float64(p00[2]) + w10*float64(p10[2]) + w01*float64(p01[2]) + w11*float64(p11[2])) / wSum
 
+	if luts != nil {
+		return luts.encode(rVal), luts.encode(gVal), luts.encode(bVal), clampByte(aVal), nil
+	}
 	return clampByte(rVal), clampByte(gVal), clampByte(bVal), clampByte(aVal), nil
 }
 
@@ -403,7 +406,7 @@ func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH
 // When all 36 pixels fall within a single YCbCr tile (the common case for JPEG
 // COGs), a specialized fast path avoids per-pixel type assertions and method
 // calls, inlining YCbCr offset computation and RGB conversion directly.
-func lanczosSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
+func lanczosSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	const a = 3
 	const n = 2 * a
 
@@ -444,21 +447,21 @@ func lanczosSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 
 		// Try YCbCr fast path (most common for JPEG COGs).
 		if ycbcr, ok := tile.(*image.YCbCr); ok {
-			return lanczosAccumYCbCr(ycbcr, wxArr, wyArr, localX, localY)
+			return lanczosAccumYCbCr(ycbcr, wxArr, wyArr, localX, localY, luts)
 		}
 
 		// Try NYCbCrA fast path (JPEG with alpha).
 		if nycbcra, ok := tile.(*image.NYCbCrA); ok {
-			return lanczosAccumNYCbCrA(nycbcra, wxArr, wyArr, localX, localY)
+			return lanczosAccumNYCbCrA(nycbcra, wxArr, wyArr, localX, localY, luts)
 		}
 
 		// Try RGBA fast path (PNG tiles).
 		if rgba, ok := tile.(*image.RGBA); ok {
-			return lanczosAccumRGBA(rgba, wxArr, wyArr, localX, localY)
+			return lanczosAccumRGBA(rgba, wxArr, wyArr, localX, localY, luts)
 		}
 
 		// Generic fallback for single tile.
-		return lanczosAccumGeneric(tile, wxArr, wyArr, localX, localY)
+		return lanczosAccumGeneric(tile, wxArr, wyArr, localX, localY, luts)
 	}
 
 	// Multi-tile path: fetch the unique tiles (at most 2×2 = 4).
@@ -520,13 +523,16 @@ func lanczosSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
+	}
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
 }
 
 // lanczosAccumYCbCr is the hot inner loop for Lanczos-3 on YCbCr tiles.
 // Type assertion and stride lookups happen once; per-pixel work is pure
 // integer arithmetic with no interface dispatch.
-func lanczosAccumYCbCr(img *image.YCbCr, wxArr, wyArr [6]float64, lx, ly [6]int) (uint8, uint8, uint8, uint8, error) {
+func lanczosAccumYCbCr(img *image.YCbCr, wxArr, wyArr [6]float64, lx, ly [6]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	yStride := img.YStride
 	cStride := img.CStride
 	ratio := img.SubsampleRatio
@@ -604,11 +610,14 @@ func lanczosAccumYCbCr(img *image.YCbCr, wxArr, wyArr [6]float64, lx, ly [6]int)
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wTotal), luts.encode(gSum / wTotal), luts.encode(bSum / wTotal), 255, nil
+	}
 	return clampByte(rSum / wTotal), clampByte(gSum / wTotal), clampByte(bSum / wTotal), 255, nil
 }
 
 // lanczosAccumNYCbCrA is the hot inner loop for Lanczos-3 on NYCbCrA tiles.
-func lanczosAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [6]float64, lx, ly [6]int) (uint8, uint8, uint8, uint8, error) {
+func lanczosAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [6]float64, lx, ly [6]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	yStride := img.YStride
 	cStride := img.CStride
 	aStride := img.AStride
@@ -696,11 +705,14 @@ func lanczosAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [6]float64, lx, ly [6]
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
+	}
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
 }
 
 // lanczosAccumRGBA is the hot inner loop for Lanczos-3 on RGBA tiles.
-func lanczosAccumRGBA(img *image.RGBA, wxArr, wyArr [6]float64, lx, ly [6]int) (uint8, uint8, uint8, uint8, error) {
+func lanczosAccumRGBA(img *image.RGBA, wxArr, wyArr [6]float64, lx, ly [6]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	pix := img.Pix
 	stride := img.Stride
 
@@ -736,11 +748,14 @@ func lanczosAccumRGBA(img *image.RGBA, wxArr, wyArr [6]float64, lx, ly [6]int) (
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
+	}
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
 }
 
 // lanczosAccumGeneric is a fallback for rare tile types using the image.Image interface.
-func lanczosAccumGeneric(tile image.Image, wxArr, wyArr [6]float64, lx, ly [6]int) (uint8, uint8, uint8, uint8, error) {
+func lanczosAccumGeneric(tile image.Image, wxArr, wyArr [6]float64, lx, ly [6]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
 
 	for ky := 0; ky < 6; ky++ {
@@ -770,6 +785,9 @@ func lanczosAccumGeneric(tile image.Image, wxArr, wyArr [6]float64, lx, ly [6]in
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
+	}
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
 }
 
@@ -778,7 +796,7 @@ func lanczosAccumGeneric(tile image.Image, wxArr, wyArr [6]float64, lx, ly [6]in
 // ringing than Lanczos-3. Pixels with alpha == 0 are excluded from RGB
 // interpolation. Optimized with batched tile fetches: the 4×4 neighborhood
 // spans at most 2×2 source tiles.
-func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
+func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	const n = 4
 
 	ix0 := int(math.Floor(fx)) - 1
@@ -811,15 +829,15 @@ func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 			return 0, 0, 0, 0, err
 		}
 		if ycbcr, ok := tile.(*image.YCbCr); ok {
-			return bicubicAccumYCbCr(ycbcr, wxArr, wyArr, localX, localY)
+			return bicubicAccumYCbCr(ycbcr, wxArr, wyArr, localX, localY, luts)
 		}
 		if nycbcra, ok := tile.(*image.NYCbCrA); ok {
-			return bicubicAccumNYCbCrA(nycbcra, wxArr, wyArr, localX, localY)
+			return bicubicAccumNYCbCrA(nycbcra, wxArr, wyArr, localX, localY, luts)
 		}
 		if rgba, ok := tile.(*image.RGBA); ok {
-			return bicubicAccumRGBA(rgba, wxArr, wyArr, localX, localY)
+			return bicubicAccumRGBA(rgba, wxArr, wyArr, localX, localY, luts)
 		}
-		return bicubicAccumGeneric(tile, wxArr, wyArr, localX, localY)
+		return bicubicAccumGeneric(tile, wxArr, wyArr, localX, localY, luts)
 	}
 
 	// Multi-tile path: fetch the unique tiles (at most 2×2 = 4).
@@ -877,11 +895,14 @@ func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
+	}
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
 }
 
 // bicubicAccumYCbCr is the inner loop for bicubic on YCbCr tiles.
-func bicubicAccumYCbCr(img *image.YCbCr, wxArr, wyArr [4]float64, lx, ly [4]int) (uint8, uint8, uint8, uint8, error) {
+func bicubicAccumYCbCr(img *image.YCbCr, wxArr, wyArr [4]float64, lx, ly [4]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	yStride := img.YStride
 	cStride := img.CStride
 	ratio := img.SubsampleRatio
@@ -959,11 +980,14 @@ func bicubicAccumYCbCr(img *image.YCbCr, wxArr, wyArr [4]float64, lx, ly [4]int)
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wTotal), luts.encode(gSum / wTotal), luts.encode(bSum / wTotal), 255, nil
+	}
 	return clampByte(rSum / wTotal), clampByte(gSum / wTotal), clampByte(bSum / wTotal), 255, nil
 }
 
 // bicubicAccumNYCbCrA is the inner loop for bicubic on NYCbCrA tiles.
-func bicubicAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [4]float64, lx, ly [4]int) (uint8, uint8, uint8, uint8, error) {
+func bicubicAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [4]float64, lx, ly [4]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	yStride := img.YStride
 	cStride := img.CStride
 	aStride := img.AStride
@@ -1051,11 +1075,14 @@ func bicubicAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [4]float64, lx, ly [4]
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
+	}
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
 }
 
 // bicubicAccumRGBA is the inner loop for bicubic on RGBA tiles.
-func bicubicAccumRGBA(img *image.RGBA, wxArr, wyArr [4]float64, lx, ly [4]int) (uint8, uint8, uint8, uint8, error) {
+func bicubicAccumRGBA(img *image.RGBA, wxArr, wyArr [4]float64, lx, ly [4]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	pix := img.Pix
 	stride := img.Stride
 
@@ -1091,11 +1118,14 @@ func bicubicAccumRGBA(img *image.RGBA, wxArr, wyArr [4]float64, lx, ly [4]int) (
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
+	}
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
 }
 
 // bicubicAccumGeneric is a fallback for rare tile types using the image.Image interface.
-func bicubicAccumGeneric(tile image.Image, wxArr, wyArr [4]float64, lx, ly [4]int) (uint8, uint8, uint8, uint8, error) {
+func bicubicAccumGeneric(tile image.Image, wxArr, wyArr [4]float64, lx, ly [4]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
 
 	for ky := 0; ky < 4; ky++ {
@@ -1125,6 +1155,9 @@ func bicubicAccumGeneric(tile image.Image, wxArr, wyArr [4]float64, lx, ly [4]in
 		return 0, 0, 0, 0, nil
 	}
 
+	if luts != nil {
+		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
+	}
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
 }
 
@@ -1366,6 +1399,48 @@ func bicubicLUT(x float64) float64 {
 	}
 	frac := pos - float64(idx)
 	return bicubicTable[idx]*(1-frac) + bicubicTable[idx+1]*frac
+}
+
+// gammaEncodeSize is the number of entries in the gamma encode table.
+// 4096 entries give ~0.06 precision per step, well below the uint8 quantization
+// threshold of ~0.5.
+const gammaEncodeSize = 4096
+
+// gammaLUTs holds a precomputed lookup table for power-law gamma encoding
+// applied after resampling interpolation. The interpolation itself operates
+// on the raw source pixel values (no decode step); the encode table maps
+// the interpolated [0..255] result to a gamma-corrected output byte.
+//
+// Alpha is never gamma-corrected — it is linear by definition.
+type gammaLUTs struct {
+	toGamma [gammaEncodeSize]uint8 // interpolated [0..gammaEncodeSize-1] → gamma-encoded uint8
+}
+
+// buildGammaLUTs creates a gamma encode lookup table for the given exponent.
+// Returns nil when gamma correction is disabled (gamma ≤ 0 or gamma == 1.0).
+func buildGammaLUTs(gamma float64) *gammaLUTs {
+	if gamma <= 0 || gamma == 1.0 {
+		return nil
+	}
+	luts := &gammaLUTs{}
+	invGamma := 1.0 / gamma
+	for i := 0; i < gammaEncodeSize; i++ {
+		luts.toGamma[i] = uint8(math.Round(math.Pow(float64(i)/float64(gammaEncodeSize-1), invGamma) * 255.0))
+	}
+	return luts
+}
+
+// encode converts an interpolated value (in [0..255] scale) to a
+// gamma-encoded byte via table lookup.
+func (g *gammaLUTs) encode(v float64) uint8 {
+	if v <= 0 {
+		return 0
+	}
+	if v >= 255 {
+		return 255
+	}
+	idx := int(v * float64(gammaEncodeSize-1) / 255.0)
+	return g.toGamma[idx]
 }
 
 // renderTileTerrarium renders a single web map tile from float GeoTIFF data,
