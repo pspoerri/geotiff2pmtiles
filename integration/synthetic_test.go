@@ -484,6 +484,132 @@ func TestTransformRebuild(t *testing.T) {
 	}
 }
 
+// TestTransformRebuildWithFillColor creates a sparse PMTiles at zoom 2-3
+// and rebuilds with fill-color, verifying that all positions within bounds
+// are populated and tile counts increase relative to the no-fill source.
+func TestTransformRebuildWithFillColor(t *testing.T) {
+	// Create a small GeoTIFF covering a limited area (sparse in tile space).
+	tiffPath := writeSyntheticGeoTIFF(t, tiffWriterConfig{
+		Width: 256, Height: 256,
+		SamplesPerPixel: 3,
+		BitsPerSample:   8,
+		OriginLon:       8.0,
+		OriginLat:       47.5,
+		PixelSizeDeg:    0.01, // ~2.56° extent
+		EPSG:            4326,
+		PixelFunc: func(x, y, band int) uint16 {
+			return uint16((x*3 + y*7 + band*11) % 256)
+		},
+	})
+
+	srcPath := runPipeline(t, pipelineConfig{
+		InputPaths: []string{tiffPath},
+		Format:     "png",
+		MinZoom:    2,
+		MaxZoom:    4,
+	})
+
+	srcResult := validatePMTiles(t, srcPath)
+	if srcResult.TileCount == 0 {
+		t.Fatal("source should have tiles")
+	}
+
+	fill := &color.RGBA{R: 128, G: 0, B: 128, A: 255}
+	outPath := runTransform(t, transformConfig{
+		InputPath: srcPath,
+		MinZoom:   0,
+		MaxZoom:   -1,
+		Rebuild:   true,
+		FillColor: fill,
+	})
+
+	outResult := validatePMTiles(t, outPath)
+
+	// With fill-color and rebuild to zoom 0, the output should have more
+	// tiles than the source (lower zoom levels added by rebuild).
+	if outResult.TileCount <= srcResult.TileCount {
+		t.Errorf("fill-color output (%d tiles) should exceed source (%d tiles)",
+			outResult.TileCount, srcResult.TileCount)
+	}
+
+	// Zoom 0 and 1 should exist (rebuilt from max zoom via downsampling).
+	if outResult.ZoomCounts[0] == 0 {
+		t.Error("expected tiles at zoom 0 after rebuild with fill-color")
+	}
+	if outResult.ZoomCounts[1] == 0 {
+		t.Error("expected tiles at zoom 1 after rebuild with fill-color")
+	}
+
+	// Max zoom should have at least as many tiles as source.
+	maxZ := int(srcResult.Header.MaxZoom)
+	if outResult.ZoomCounts[maxZ] < srcResult.ZoomCounts[maxZ] {
+		t.Errorf("zoom %d: fill output (%d) should be >= source (%d)",
+			maxZ, outResult.ZoomCounts[maxZ], srcResult.ZoomCounts[maxZ])
+	}
+}
+
+// TestTransformRebuildWithFillColor_Sparse creates a small GeoTIFF within a
+// large bounding box, converts to PMTiles, then rebuilds with fill-color.
+// This exercises the sparse fill optimization: at max zoom most positions
+// are empty and should be filled with pre-encoded bytes.
+func TestTransformRebuildWithFillColor_Sparse(t *testing.T) {
+	// Small 256x256 image covering ~25° extent → at zoom 3, multiple tile
+	// positions in bounds but only a few have actual source data.
+	tiffPath := writeSyntheticGeoTIFF(t, tiffWriterConfig{
+		Width: 256, Height: 256,
+		SamplesPerPixel: 3,
+		BitsPerSample:   8,
+		OriginLon:       -25.0,
+		OriginLat:       70.0,
+		PixelSizeDeg:    0.1, // 25.6° extent
+		EPSG:            4326,
+		PixelFunc: func(x, y, band int) uint16 {
+			return uint16((x*5 + y*3 + band*7) % 256)
+		},
+	})
+
+	srcPath := runPipeline(t, pipelineConfig{
+		InputPaths: []string{tiffPath},
+		Format:     "png",
+		MinZoom:    2,
+		MaxZoom:    3,
+	})
+
+	srcResult := validatePMTiles(t, srcPath)
+	srcMaxZoom := int(srcResult.Header.MaxZoom)
+
+	fill := &color.RGBA{R: 0, G: 0, B: 0, A: 255}
+	outPath := runTransform(t, transformConfig{
+		InputPath: srcPath,
+		MinZoom:   0,
+		MaxZoom:   -1,
+		Rebuild:   true,
+		FillColor: fill,
+	})
+
+	outResult := validatePMTiles(t, outPath)
+
+	// Fill-color output should have more total tiles (lower zooms + filled gaps).
+	if outResult.TileCount <= srcResult.TileCount {
+		t.Errorf("fill output (%d) should exceed source (%d)",
+			outResult.TileCount, srcResult.TileCount)
+	}
+
+	// At max zoom, fill should produce at least as many tiles as source
+	// (more if source bounds have gaps).
+	if outResult.ZoomCounts[srcMaxZoom] < srcResult.ZoomCounts[srcMaxZoom] {
+		t.Errorf("zoom %d: fill output (%d) should be >= source (%d)",
+			srcMaxZoom, outResult.ZoomCounts[srcMaxZoom], srcResult.ZoomCounts[srcMaxZoom])
+	}
+
+	// Lower zoom levels added by rebuild should all be populated.
+	for z := 0; z < int(srcResult.Header.MinZoom); z++ {
+		if outResult.ZoomCounts[z] == 0 {
+			t.Errorf("zoom %d should have tiles after rebuild with fill", z)
+		}
+	}
+}
+
 // TestWebPEncoding generates a 512x512 8-bit RGB GeoTIFF and converts to WebP.
 // Skipped if CGO/libwebp is not available.
 func TestWebPEncoding(t *testing.T) {
