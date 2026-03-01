@@ -580,6 +580,8 @@ type pmtilesResult struct {
 }
 
 // validatePMTiles opens and validates a PMTiles file, returning summary info.
+// It also verifies that the header + root directory fit within the 16 KiB
+// initial fetch budget required by pmtiles.io and other HTTP range-request clients.
 func validatePMTiles(t *testing.T, path string) pmtilesResult {
 	t.Helper()
 
@@ -590,6 +592,29 @@ func validatePMTiles(t *testing.T, path string) pmtilesResult {
 	defer reader.Close()
 
 	h := reader.Header()
+
+	// Validate 16 KiB root directory budget.
+	const maxInitialFetch = 16384
+	initialFetch := h.RootDirOffset + h.RootDirLength
+	if initialFetch > maxInitialFetch {
+		t.Errorf("validatePMTiles: header + root directory = %d bytes, exceeds %d-byte initial fetch budget",
+			initialFetch, maxInitialFetch)
+	}
+
+	// Validate section contiguity.
+	if h.RootDirOffset+h.RootDirLength != h.MetadataOffset {
+		t.Errorf("validatePMTiles: root dir end (%d) != metadata offset (%d)",
+			h.RootDirOffset+h.RootDirLength, h.MetadataOffset)
+	}
+	if h.MetadataOffset+h.MetadataLength != h.LeafDirOffset {
+		t.Errorf("validatePMTiles: metadata end (%d) != leaf dir offset (%d)",
+			h.MetadataOffset+h.MetadataLength, h.LeafDirOffset)
+	}
+	if h.LeafDirOffset+h.LeafDirLength != h.TileDataOffset {
+		t.Errorf("validatePMTiles: leaf dir end (%d) != tile data offset (%d)",
+			h.LeafDirOffset+h.LeafDirLength, h.TileDataOffset)
+	}
+
 	meta, err := reader.ReadMetadata()
 	if err != nil {
 		t.Fatalf("validatePMTiles: ReadMetadata: %v", err)

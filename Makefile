@@ -2,9 +2,11 @@
 
 BINARY           := geotiff2pmtiles
 BINARY_TRANSFORM := pmtransform
+BINARY_CHECK     := checkpmtiles
 MODULE           := github.com/pspoerri/geotiff2pmtiles
 CMD              := ./cmd/geotiff2pmtiles/
 CMD_TRANSFORM    := ./cmd/pmtransform/
+CMD_CHECK        := ./cmd/checkpmtiles/
 BUILD_DIR        := dist
 GO               := go
 GOFLAGS          :=
@@ -17,6 +19,7 @@ LDFLAGS    += -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildD
 
 OUTPUT           := $(BUILD_DIR)/$(BINARY)
 OUTPUT_TRANSFORM := $(BUILD_DIR)/$(BINARY_TRANSFORM)
+OUTPUT_CHECK     := $(BUILD_DIR)/$(BINARY_CHECK)
 
 # Default tile format and quality for example targets
 FORMAT     ?= webp
@@ -37,7 +40,7 @@ ESAWORLDCOVER_SWIR_DIR  := $(TESTDATA_DIR)/esaworldcover-swir
 ESAWORLDCOVER_GAMMA0_DIR := $(TESTDATA_DIR)/esaworldcover-gamma0
 SWISSIMAGE_DIR           := $(TESTDATA_DIR)/swissimage
 
-.PHONY: all build build-transform build-all install \
+.PHONY: all build build-transform build-check build-all install \
         test test-race test-cover bench \
         test-integration test-integration-download test-integration-real test-integration-all \
         test-integration-copernicus test-integration-naturalearth \
@@ -73,8 +76,12 @@ build: $(BUILD_DIR)
 build-transform: $(BUILD_DIR)
 	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_TRANSFORM) $(CMD_TRANSFORM)
 
-## build-all: Build both geotiff2pmtiles and pmtransform
-build-all: build build-transform
+## build-check: Compile checkpmtiles validation tool
+build-check: $(BUILD_DIR)
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_CHECK) $(CMD_CHECK)
+
+## build-all: Build geotiff2pmtiles, pmtransform, and checkpmtiles
+build-all: build build-transform build-check
 
 ## install: Install to $GOPATH/bin
 install:

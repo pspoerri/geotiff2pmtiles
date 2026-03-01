@@ -367,14 +367,18 @@ The PMTiles v3 spec requires the header (127 bytes) plus root directory to fit w
 a single 16 KiB initial HTTP fetch. Web viewers like pmtiles.io fetch the first 16,384
 bytes, parse the header, and decompress the root directory from the remaining bytes. If
 the root directory is larger, the gzip stream is truncated and decompression fails with
-a "stream end" error.
+a "stream end" or "extra bytes past the end" error.
 
-Previously `buildDirectory` only checked the entry count (≤16,384 entries → flat root).
-With realistic Hilbert-curve tile IDs and varying tile sizes, even a few thousand entries
-can compress to >16 KiB. The fix: serialize the root directory first, check the
-compressed size against the budget (16,384 − 127 = 16,257 bytes), and fall through to
-leaf directories if exceeded. This guarantees compatibility with all PMTiles v3 readers
-regardless of dataset size.
+`buildDirectory` first tries a flat root directory. If the compressed size exceeds the
+budget (16,384 − 127 = 16,257 bytes), entries are split into leaf directories. The
+leaf size starts at 4,096 entries; if the resulting root directory (containing leaf
+pointers) still exceeds the budget, the leaf size is increased by 20% and the split is
+retried until the root fits. This matches the reference go-pmtiles implementation and
+guarantees compatibility with all PMTiles v3 readers regardless of dataset size.
+
+For very large datasets (e.g. 60M+ tiles), the initial 4,096-entry leaves can produce
+~15,000 leaf pointers whose compressed root directory exceeds 16 KiB. The iterative
+growth resolves this by using larger leaves (fewer root entries) until the root fits.
 
 ## Integration test plausibility checks
 
