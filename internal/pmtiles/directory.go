@@ -62,7 +62,9 @@ func xyToHilbert(x, y, n uint64) uint64 {
 }
 
 // buildDirectory takes a sorted list of entries and produces a serialized, gzip-compressed directory.
-func buildDirectory(entries []Entry) (rootDir []byte, leafDirs []byte, err error) {
+// It returns the root directory, leaf directories, and the number of tile entries after run-length
+// optimization (for the header's NumTileEntries field).
+func buildDirectory(entries []Entry) (rootDir []byte, leafDirs []byte, numOptimized int, err error) {
 	// Sort entries by tile ID.
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].TileID < entries[j].TileID
@@ -70,6 +72,7 @@ func buildDirectory(entries []Entry) (rootDir []byte, leafDirs []byte, err error
 
 	// Optimize run lengths: consecutive tile IDs with contiguous data can share an entry.
 	optimized := optimizeRunLengths(entries)
+	numOptimized = len(optimized)
 
 	// The PMTiles v3 spec requires the header (127 bytes) + root directory to fit within
 	// a single 16 KiB initial fetch so HTTP range-request clients (like pmtiles.io) can
@@ -81,16 +84,40 @@ func buildDirectory(entries []Entry) (rootDir []byte, leafDirs []byte, err error
 	if len(optimized) <= 16384 {
 		rootDir, err = serializeDirectory(optimized)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		if len(rootDir) <= maxRootBytes {
-			return rootDir, nil, nil
+			return rootDir, nil, numOptimized, nil
 		}
 		// Compressed root dir exceeds 16 KiB budget; fall through to leaf directories.
 	}
 
-	// Split into leaf directories.
+	// Split into leaf directories, iteratively increasing leaf size until the
+	// root directory (containing only leaf pointers) fits within the 16 KiB budget.
+	// This follows the same approach as the reference go-pmtiles implementation.
 	leafSize := 4096
+
+	for {
+		rootDir, leafDirs, err = buildLeaves(optimized, leafSize)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if len(rootDir) <= maxRootBytes {
+			return rootDir, leafDirs, numOptimized, nil
+		}
+		// Root still too large; grow leaf size by 20% to reduce the number of leaves.
+		leafSize = leafSize * 6 / 5
+		if leafSize > len(optimized) {
+			// Safety: every entry in a single leaf — root has 1 entry.
+			return rootDir, leafDirs, numOptimized, nil
+		}
+	}
+}
+
+// buildLeaves splits optimized entries into leaf directories of the given size
+// and returns the serialized root directory (containing leaf pointers) and the
+// concatenated leaf directory bytes.
+func buildLeaves(optimized []Entry, leafSize int) (rootDir []byte, leafDirs []byte, err error) {
 	numLeaves := (len(optimized) + leafSize - 1) / leafSize
 
 	type leafInfo struct {

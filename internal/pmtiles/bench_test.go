@@ -50,7 +50,7 @@ func BenchmarkBuildDirectory_Small(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, _, _ = buildDirectory(entries)
+		_, _, _, _ = buildDirectory(entries)
 	}
 }
 
@@ -61,7 +61,7 @@ func BenchmarkBuildDirectory_Medium(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, _, _ = buildDirectory(entries)
+		_, _, _, _ = buildDirectory(entries)
 	}
 }
 
@@ -72,7 +72,7 @@ func BenchmarkBuildDirectory_Large(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, _, _ = buildDirectory(entries)
+		_, _, _, _ = buildDirectory(entries)
 	}
 }
 

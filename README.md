@@ -275,6 +275,16 @@ Low-level COG debugging (float detection, NoData values, raw IFD info, sample ti
 go run ./cmd/debug/ <file.tif>
 ```
 
+### checkpmtiles
+
+Validate a PMTiles v3 archive for structural correctness (16 KiB root directory budget,
+section contiguity, directory integrity). Works with local files and HTTP URLs:
+
+```bash
+go run ./cmd/checkpmtiles/ output.pmtiles
+go run ./cmd/checkpmtiles/ https://example.com/tiles.pmtiles
+```
+
 ## Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full project structure, pipeline description, memory efficiency details, and how to add new projections.

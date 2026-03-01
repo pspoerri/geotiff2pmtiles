@@ -4,6 +4,7 @@
 cmd/
   geotiff2pmtiles/main.go          CLI: GeoTIFF/COG → PMTiles conversion
   pmtransform/main.go              CLI: PMTiles → PMTiles transformation
+  checkpmtiles/main.go              PMTiles v3 archive validator (local + HTTP)
   coginfo/main.go                   COG metadata inspector
   debug/main.go                     Low-level COG debug utility
 internal/

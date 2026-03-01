@@ -150,7 +150,7 @@ func TestBuildDirectory_SmallSet(t *testing.T) {
 		offset += 100
 	}
 
-	rootDir, leafDirs, err := buildDirectory(entries)
+	rootDir, leafDirs, _, err := buildDirectory(entries)
 	if err != nil {
 		t.Fatalf("buildDirectory: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestBuildDirectory_RootDirFitsIn16KiB(t *testing.T) {
 		offset += uint64(entries[i].Length)
 	}
 
-	rootDir, leafDirs, err := buildDirectory(entries)
+	rootDir, leafDirs, _, err := buildDirectory(entries)
 	if err != nil {
 		t.Fatalf("buildDirectory: %v", err)
 	}
@@ -334,6 +334,67 @@ func TestBuildDirectory_RootDirFitsIn16KiB(t *testing.T) {
 	}
 	if totalLeafEntries < numEntries/2 {
 		t.Errorf("leaf directories contain only %d entries, expected at least %d", totalLeafEntries, numEntries/2)
+	}
+}
+
+func TestBuildDirectory_LargeSet_RootFitsIn16KiB(t *testing.T) {
+	// Generate a very large entry set (~60K entries with varying lengths) that
+	// requires the iterative leaf-size growth loop. With 60K entries and the
+	// initial leaf size of 4096, the root would have ~15 leaf pointers which
+	// is fine. But with random lengths that defeat run-length optimization,
+	// we need enough entries that the first attempt may not fit.
+	// Use 100K entries with extremely variable lengths to stress the builder.
+	const numEntries = 100000
+	entries := make([]Entry, numEntries)
+	var offset uint64
+	n := 1 << 12 // zoom-12 grid
+	for i := range entries {
+		x := (i * 7) % n
+		y := (i * 13) % n
+		entries[i] = Entry{
+			TileID:    ZXYToTileID(12, x, y),
+			Offset:    offset,
+			Length:    uint32(100 + (i*997)%100000),
+			RunLength: 1,
+		}
+		offset += uint64(entries[i].Length)
+	}
+
+	rootDir, leafDirs, numOpt, err := buildDirectory(entries)
+	if err != nil {
+		t.Fatalf("buildDirectory: %v", err)
+	}
+
+	const maxRootBytes = 16384 - HeaderSize
+	if len(rootDir) > maxRootBytes {
+		t.Errorf("root directory %d bytes exceeds %d-byte budget", len(rootDir), maxRootBytes)
+	}
+	if len(leafDirs) == 0 {
+		t.Error("expected leaf directories")
+	}
+	if numOpt <= 0 || numOpt > numEntries {
+		t.Errorf("numOptimized = %d, want in (0, %d]", numOpt, numEntries)
+	}
+
+	// Verify all leaf entries are reachable.
+	rootEntries, err := DeserializeDirectory(rootDir)
+	if err != nil {
+		t.Fatalf("deserialize root: %v", err)
+	}
+	var totalLeafEntries int
+	for _, re := range rootEntries {
+		if re.RunLength != 0 {
+			t.Errorf("root entry has RunLength=%d, want 0 (leaf pointer)", re.RunLength)
+		}
+		leafData := leafDirs[re.Offset : re.Offset+uint64(re.Length)]
+		le, err := DeserializeDirectory(leafData)
+		if err != nil {
+			t.Fatalf("deserialize leaf at offset %d: %v", re.Offset, err)
+		}
+		totalLeafEntries += len(le)
+	}
+	if totalLeafEntries != numOpt {
+		t.Errorf("total leaf entries = %d, want %d", totalLeafEntries, numOpt)
 	}
 }
 

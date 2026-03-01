@@ -143,7 +143,7 @@ func (w *Writer) Finalize() error {
 	}
 
 	// Build the directory.
-	rootDir, leafDirs, err := buildDirectory(w.entries)
+	rootDir, leafDirs, numTileEntries, err := buildDirectory(w.entries)
 	if err != nil {
 		return fmt.Errorf("building directory: %w", err)
 	}
@@ -175,7 +175,7 @@ func (w *Writer) Finalize() error {
 	w.header.TileDataOffset = tileDataOffset
 	w.header.TileDataLength = w.tmpOffset
 	w.header.NumAddressedTiles = uint64(len(w.entries))
-	w.header.NumTileEntries = uint64(len(w.entries))
+	w.header.NumTileEntries = uint64(numTileEntries)
 	w.header.NumTileContents = uint64(len(w.entries) - int(w.dedupHits))
 
 	// Write the final file.
