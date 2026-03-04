@@ -166,10 +166,10 @@ func main() {
 }
 
 type patchOptions struct {
-	showOnly    bool
-	verbose     bool
-	rebuildDirs bool
-	minZoom     optInt
+	showOnly     bool
+	verbose      bool
+	rebuildDirs  bool
+	minZoom      optInt
 	maxZoom      optInt
 	centerZoom   optInt
 	minLon       optFloat32
