@@ -143,7 +143,7 @@ func (w *Writer) Finalize() error {
 	}
 
 	// Build the directory.
-	rootDir, leafDirs, numTileEntries, err := buildDirectory(w.entries)
+	rootDir, leafDirs, numTileEntries, err := BuildDirectory(w.entries)
 	if err != nil {
 		return fmt.Errorf("building directory: %w", err)
 	}
