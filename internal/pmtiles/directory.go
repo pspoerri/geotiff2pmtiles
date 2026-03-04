@@ -64,7 +64,7 @@ func xyToHilbert(x, y, n uint64) uint64 {
 // buildDirectory takes a sorted list of entries and produces a serialized, gzip-compressed directory.
 // It returns the root directory, leaf directories, and the number of tile entries after run-length
 // optimization (for the header's NumTileEntries field).
-func buildDirectory(entries []Entry) (rootDir []byte, leafDirs []byte, numOptimized int, err error) {
+func BuildDirectory(entries []Entry) (rootDir []byte, leafDirs []byte, numOptimized int, err error) {
 	// Sort entries by tile ID.
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].TileID < entries[j].TileID

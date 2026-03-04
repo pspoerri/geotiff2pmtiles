@@ -3,10 +3,12 @@
 BINARY           := geotiff2pmtiles
 BINARY_TRANSFORM := pmtransform
 BINARY_CHECK     := checkpmtiles
+BINARY_HEADER    := pmheader
 MODULE           := github.com/pspoerri/geotiff2pmtiles
 CMD              := ./cmd/geotiff2pmtiles/
 CMD_TRANSFORM    := ./cmd/pmtransform/
 CMD_CHECK        := ./cmd/checkpmtiles/
+CMD_HEADER       := ./cmd/pmheader/
 BUILD_DIR        := dist
 GO               := go
 GOFLAGS          :=
@@ -20,6 +22,7 @@ LDFLAGS    += -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildD
 OUTPUT           := $(BUILD_DIR)/$(BINARY)
 OUTPUT_TRANSFORM := $(BUILD_DIR)/$(BINARY_TRANSFORM)
 OUTPUT_CHECK     := $(BUILD_DIR)/$(BINARY_CHECK)
+OUTPUT_HEADER    := $(BUILD_DIR)/$(BINARY_HEADER)
 
 # Default tile format and quality for example targets
 FORMAT     ?= webp
@@ -40,7 +43,7 @@ ESAWORLDCOVER_SWIR_DIR  := $(TESTDATA_DIR)/esaworldcover-swir
 ESAWORLDCOVER_GAMMA0_DIR := $(TESTDATA_DIR)/esaworldcover-gamma0
 SWISSIMAGE_DIR           := $(TESTDATA_DIR)/swissimage
 
-.PHONY: all build build-transform build-check build-all install \
+.PHONY: all build build-transform build-check build-header build-all install \
         test test-race test-cover bench \
         test-integration test-integration-download test-integration-real test-integration-all \
         test-integration-copernicus test-integration-naturalearth \
@@ -63,7 +66,7 @@ SWISSIMAGE_DIR           := $(TESTDATA_DIR)/swissimage
         help
 
 ## all: Build all binaries (default target)
-all: build build-transform
+all: build build-transform build-header
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -80,8 +83,12 @@ build-transform: $(BUILD_DIR)
 build-check: $(BUILD_DIR)
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_CHECK) $(CMD_CHECK)
 
-## build-all: Build geotiff2pmtiles, pmtransform, and checkpmtiles
-build-all: build build-transform build-check
+## build-header: Compile pmheader header-patching tool (no CGo required)
+build-header: $(BUILD_DIR)
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_HEADER) $(CMD_HEADER)
+
+## build-all: Build geotiff2pmtiles, pmtransform, checkpmtiles, and pmheader
+build-all: build build-transform build-check build-header
 
 ## install: Install to $GOPATH/bin
 install:
@@ -454,7 +461,8 @@ help:
 	@echo "Examples:"
 	@echo "  make build                           Build geotiff2pmtiles"
 	@echo "  make build-transform                 Build pmtransform"
-	@echo "  make build-all                       Build both binaries"
+	@echo "  make build-header                    Build pmheader"
+	@echo "  make build-all                       Build all binaries"
 	@echo "  make example-all                      Run every example target"
 	@echo "  make example-swissimage               SWISSIMAGE DOP10 example (LV95 mosaic)"
 	@echo "  make example-swissimage-png           SWISSIMAGE example with PNG"

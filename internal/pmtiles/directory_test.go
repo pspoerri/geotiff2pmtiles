@@ -150,7 +150,7 @@ func TestBuildDirectory_SmallSet(t *testing.T) {
 		offset += 100
 	}
 
-	rootDir, leafDirs, _, err := buildDirectory(entries)
+	rootDir, leafDirs, _, err := BuildDirectory(entries)
 	if err != nil {
 		t.Fatalf("buildDirectory: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestBuildDirectory_RootDirFitsIn16KiB(t *testing.T) {
 		offset += uint64(entries[i].Length)
 	}
 
-	rootDir, leafDirs, _, err := buildDirectory(entries)
+	rootDir, leafDirs, _, err := BuildDirectory(entries)
 	if err != nil {
 		t.Fatalf("buildDirectory: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestBuildDirectory_LargeSet_RootFitsIn16KiB(t *testing.T) {
 		offset += uint64(entries[i].Length)
 	}
 
-	rootDir, leafDirs, numOpt, err := buildDirectory(entries)
+	rootDir, leafDirs, numOpt, err := BuildDirectory(entries)
 	if err != nil {
 		t.Fatalf("buildDirectory: %v", err)
 	}
