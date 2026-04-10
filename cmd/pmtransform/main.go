@@ -321,9 +321,13 @@ func main() {
 	}
 
 	if verbose {
-		log.Printf("Processed %d tiles (%d uniform, %d empty) in %v",
-			stats.TileCount, stats.UniformTiles, stats.EmptyTiles,
+		log.Printf("Processed %d tiles (%d uniform, %d empty, %d skipped) in %v",
+			stats.TileCount, stats.UniformTiles, stats.EmptyTiles, stats.SkippedTiles,
 			time.Since(genStart).Round(time.Millisecond))
+	}
+
+	if stats.SkippedTiles > 0 {
+		log.Printf("Warning: %d corrupt tiles were skipped during processing", stats.SkippedTiles)
 	}
 
 	// Finalize PMTiles file.

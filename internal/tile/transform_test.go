@@ -459,3 +459,89 @@ func TestTransformRebuild_FillColor_StatsConsistency(t *testing.T) {
 		t.Errorf("EmptyTiles = %d, want 0 (fill should cover all positions)", stats.EmptyTiles)
 	}
 }
+
+// TestTransformRebuild_CorruptTile_Skipped verifies that a corrupt tile is
+// skipped with a warning instead of aborting the entire transform.
+func TestTransformRebuild_CorruptTile_Skipped(t *testing.T) {
+	tileSize := 8
+	green := color.RGBA{0, 200, 0, 255}
+	bounds := testBounds()
+
+	reader := &mockPMTilesReader{
+		tiles: map[[3]int][]byte{
+			{2, 2, 1}: encodePNGTile(t, tileSize, green),
+			{2, 3, 1}: encodePNGTile(t, tileSize, green),
+			{2, 2, 2}: []byte("not a valid image"), // corrupt tile
+			{2, 3, 2}: encodePNGTile(t, tileSize, green),
+		},
+		header: pmtiles.Header{MinZoom: 2, MaxZoom: 2,
+			MinLon: bounds[0], MinLat: bounds[1], MaxLon: bounds[2], MaxLat: bounds[3]},
+	}
+	writer := newMockTileWriter()
+	enc := testEncoder(t)
+
+	cfg := TransformConfig{
+		MinZoom:      0,
+		MaxZoom:      2,
+		TileSize:     tileSize,
+		Concurrency:  1,
+		Encoder:      enc,
+		SourceFormat: "png",
+		Resampling:   ResamplingNearest,
+		Mode:         TransformRebuild,
+		Bounds:       bounds,
+	}
+
+	stats, err := Transform(cfg, reader, writer)
+	if err != nil {
+		t.Fatalf("Transform should not fail on corrupt tile: %v", err)
+	}
+
+	if stats.SkippedTiles != 1 {
+		t.Errorf("SkippedTiles = %d, want 1", stats.SkippedTiles)
+	}
+	// 3 valid tiles at z2, plus downsampled tiles at z1 and z0.
+	if stats.TileCount < 3 {
+		t.Errorf("TileCount = %d, want >= 3 (valid tiles should still be processed)", stats.TileCount)
+	}
+}
+
+// TestTransformReencode_CorruptTile_Skipped verifies that reencode mode
+// also skips corrupt tiles instead of aborting.
+func TestTransformReencode_CorruptTile_Skipped(t *testing.T) {
+	tileSize := 8
+	green := color.RGBA{0, 200, 0, 255}
+
+	reader := &mockPMTilesReader{
+		tiles: map[[3]int][]byte{
+			{1, 0, 0}: encodePNGTile(t, tileSize, green),
+			{1, 1, 0}: []byte("corrupt data"), // corrupt tile
+			{1, 0, 1}: encodePNGTile(t, tileSize, green),
+		},
+		header: pmtiles.Header{MinZoom: 1, MaxZoom: 1},
+	}
+	writer := newMockTileWriter()
+	enc := testEncoder(t)
+
+	cfg := TransformConfig{
+		MinZoom:      1,
+		MaxZoom:      1,
+		TileSize:     tileSize,
+		Concurrency:  1,
+		Encoder:      enc,
+		SourceFormat: "png",
+		Mode:         TransformReencode,
+	}
+
+	stats, err := Transform(cfg, reader, writer)
+	if err != nil {
+		t.Fatalf("Transform should not fail on corrupt tile: %v", err)
+	}
+
+	if stats.SkippedTiles != 1 {
+		t.Errorf("SkippedTiles = %d, want 1", stats.SkippedTiles)
+	}
+	if stats.TileCount != 2 {
+		t.Errorf("TileCount = %d, want 2", stats.TileCount)
+	}
+}

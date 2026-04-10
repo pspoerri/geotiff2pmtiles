@@ -158,7 +158,7 @@ func transformPassthrough(cfg TransformConfig, reader PMTilesReader, writer Tile
 
 // transformReencode decodes each tile and re-encodes in the target format.
 func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWriter) (Stats, error) {
-	var tileCount, emptyCount, uniformCount, totalBytes atomic.Int64
+	var tileCount, emptyCount, uniformCount, skippedCount, totalBytes atomic.Int64
 
 	for z := cfg.MaxZoom; z >= cfg.MinZoom; z-- {
 		tiles := reader.TilesAtZoom(z)
@@ -205,11 +205,10 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 
 					img, err := encode.DecodeImage(rawData, cfg.SourceFormat)
 					if err != nil {
-						select {
-						case errCh <- fmt.Errorf("decoding tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
-						return
+						log.Printf("Warning: skipping corrupt tile z%d/%d/%d: %v", z, x, y, err)
+						skippedCount.Add(1)
+						pb.Increment()
+						continue
 					}
 
 					rgba := imageToRGBA(img)
@@ -266,6 +265,7 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 		TileCount:    tileCount.Load(),
 		EmptyTiles:   emptyCount.Load(),
 		UniformTiles: uniformCount.Load(),
+		SkippedTiles: skippedCount.Load(),
 		TotalBytes:   totalBytes.Load(),
 	}, nil
 }
@@ -300,7 +300,7 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 	})
 	defer store.Close()
 
-	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64
+	var tileCount, emptyCount, uniformCount, grayCount, skippedCount, totalBytes atomic.Int64
 
 	// When FillColor is set, build a set of source tiles at max zoom so we
 	// can distinguish "source tile exists" from "fill needed" while iterating
@@ -492,11 +492,10 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 								if rawData != nil {
 									img, err := encode.DecodeImage(rawData, cfg.SourceFormat)
 									if err != nil {
-										select {
-										case errCh <- fmt.Errorf("decoding tile z%d/%d/%d: %w", z, x, y, err):
-										default:
-										}
-										return
+										log.Printf("Warning: skipping corrupt tile z%d/%d/%d: %v", z, x, y, err)
+										skippedCount.Add(1)
+										pb.Increment()
+										continue
 									}
 									rgba := imageToRGBA(img)
 									if cfg.FillColor != nil {
@@ -599,8 +598,8 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 		}
 
 		if cfg.Verbose {
-			log.Printf("Zoom %d: completed (%d tiles so far, %d gray, %d uniform, %d empty)",
-				z, tileCount.Load(), grayCount.Load(), uniformCount.Load(), emptyCount.Load())
+			log.Printf("Zoom %d: completed (%d tiles so far, %d gray, %d uniform, %d empty, %d skipped)",
+				z, tileCount.Load(), grayCount.Load(), uniformCount.Load(), emptyCount.Load(), skippedCount.Load())
 			log.Printf("  Store: %s", nextStore.Stats())
 		}
 
@@ -614,6 +613,7 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 		TileCount:    tileCount.Load(),
 		EmptyTiles:   emptyCount.Load(),
 		UniformTiles: uniformCount.Load(),
+		SkippedTiles: skippedCount.Load(),
 		TotalBytes:   totalBytes.Load(),
 	}, nil
 }

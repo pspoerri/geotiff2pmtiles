@@ -63,6 +63,12 @@ func DecodeWebP(data []byte) (image.Image, error) {
 		return nil, fmt.Errorf("webp: empty data")
 	}
 
+	// Validate header before decoding to provide better error messages.
+	var infoW, infoH C.int
+	if C.WebPGetInfo((*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)), &infoW, &infoH) == 0 {
+		return nil, fmt.Errorf("webp: invalid header (%d bytes)", len(data))
+	}
+
 	var width, height C.int
 	ptr := C.WebPDecodeRGBA(
 		(*C.uint8_t)(unsafe.Pointer(&data[0])),
@@ -71,7 +77,7 @@ func DecodeWebP(data []byte) (image.Image, error) {
 		&height,
 	)
 	if ptr == nil {
-		return nil, fmt.Errorf("webp: decode failed")
+		return nil, fmt.Errorf("webp: decode failed (%d bytes, %dx%d)", len(data), int(infoW), int(infoH))
 	}
 	defer C.WebPFree(unsafe.Pointer(ptr))
 

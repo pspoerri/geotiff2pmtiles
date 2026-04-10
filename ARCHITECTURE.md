@@ -79,6 +79,9 @@ The original file is never touched. Three processing modes are selected automati
    then the entire lower-zoom pyramid is rebuilt via downsampling with the chosen resampling method.
    When `--tile-size` is omitted, the source tile size is discovered by decoding one tile.
 
+Corrupt or undecodable tiles are skipped with a warning (logged per tile) instead of
+aborting the process. The `SkippedTiles` count is tracked in `Stats` and reported at completion.
+
 Empty tile filling (`--fill-color`) uses a color transformation model: transparent/
 nodata pixels are substituted with the target color rather than resampled. During
 rebuild, transparent pixels in decoded tiles and nil-child quadrants in downsampled

@@ -87,6 +87,7 @@ type Stats struct {
 	TileCount    int64
 	EmptyTiles   int64
 	UniformTiles int64
+	SkippedTiles int64
 	TotalBytes   int64
 }
 

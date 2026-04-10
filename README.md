@@ -200,6 +200,7 @@ Convert a plain TIFF with TFW world file (global Natural Earth data):
 
 Transform an existing PMTiles archive: change format, zoom levels, resampling,
 or fill empty tiles. Always creates a new file — the original is never modified.
+Corrupt or undecodable tiles are skipped with a warning instead of aborting the process.
 
 ```
 pmtransform [flags] <input.pmtiles> <output.pmtiles>
