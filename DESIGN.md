@@ -297,10 +297,13 @@ pyramid regardless of what resampling was used in the original archive.
 When processing large archives (e.g., planet-scale files with millions of tiles), individual
 tiles may be corrupt or undecodable. Both rebuild and reencode modes skip corrupt tiles with
 a warning log (`Warning: skipping corrupt tile z/x/y: <reason>`) instead of aborting the
-entire process. The `SkippedTiles` count is tracked in `Stats` and reported in the summary
-output so users know how many tiles were lost. The WebP decoder validates headers via
-`WebPGetInfo` before attempting full decode to provide better diagnostics (data size,
-dimensions) when failures occur.
+entire process. The `--replace-corrupt` flag changes this behavior: instead of skipping,
+each undecodable tile is substituted with a transparent (empty) tile so the position is
+preserved in the output pyramid. This is useful when downstream consumers expect every
+position to have a tile. Either way, the `CorruptTiles` count is tracked in `Stats` and
+reported in the summary output so users know how many tiles were affected. The WebP decoder
+validates headers via `WebPGetInfo` before attempting full decode to provide better
+diagnostics (data size, dimensions) when failures occur.
 
 ## pmtransform: tile size discovery
 

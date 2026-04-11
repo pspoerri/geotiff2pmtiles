@@ -497,12 +497,60 @@ func TestTransformRebuild_CorruptTile_Skipped(t *testing.T) {
 		t.Fatalf("Transform should not fail on corrupt tile: %v", err)
 	}
 
-	if stats.SkippedTiles != 1 {
-		t.Errorf("SkippedTiles = %d, want 1", stats.SkippedTiles)
+	if stats.CorruptTiles != 1 {
+		t.Errorf("CorruptTiles = %d, want 1", stats.CorruptTiles)
 	}
-	// 3 valid tiles at z2, plus downsampled tiles at z1 and z0.
-	if stats.TileCount < 3 {
-		t.Errorf("TileCount = %d, want >= 3 (valid tiles should still be processed)", stats.TileCount)
+	// The corrupt z2/2/2 tile is skipped, so only 3 valid tiles at z2.
+	// Position (2,2,2) has no tile written.
+	if writer.tileCountAtZoom(2) != 3 {
+		t.Errorf("zoom 2 tile count = %d, want 3", writer.tileCountAtZoom(2))
+	}
+}
+
+// TestTransformRebuild_CorruptTile_Replaced verifies that --replace-corrupt
+// substitutes empty tiles for corrupt ones so all positions get a tile.
+func TestTransformRebuild_CorruptTile_Replaced(t *testing.T) {
+	tileSize := 8
+	green := color.RGBA{0, 200, 0, 255}
+	bounds := testBounds()
+
+	reader := &mockPMTilesReader{
+		tiles: map[[3]int][]byte{
+			{2, 2, 1}: encodePNGTile(t, tileSize, green),
+			{2, 3, 1}: encodePNGTile(t, tileSize, green),
+			{2, 2, 2}: []byte("not a valid image"), // corrupt tile
+			{2, 3, 2}: encodePNGTile(t, tileSize, green),
+		},
+		header: pmtiles.Header{MinZoom: 2, MaxZoom: 2,
+			MinLon: bounds[0], MinLat: bounds[1], MaxLon: bounds[2], MaxLat: bounds[3]},
+	}
+	writer := newMockTileWriter()
+	enc := testEncoder(t)
+
+	cfg := TransformConfig{
+		MinZoom:        0,
+		MaxZoom:        2,
+		TileSize:       tileSize,
+		Concurrency:    1,
+		Encoder:        enc,
+		SourceFormat:   "png",
+		Resampling:     ResamplingNearest,
+		Mode:           TransformRebuild,
+		Bounds:         bounds,
+		ReplaceCorrupt: true,
+	}
+
+	stats, err := Transform(cfg, reader, writer)
+	if err != nil {
+		t.Fatalf("Transform should not fail on corrupt tile: %v", err)
+	}
+
+	if stats.CorruptTiles != 1 {
+		t.Errorf("CorruptTiles = %d, want 1 (corrupt tile counter should still increment)", stats.CorruptTiles)
+	}
+	// All 4 positions at z2 should have tiles written (corrupt one replaced).
+	if writer.tileCountAtZoom(2) != 4 {
+		t.Errorf("zoom 2 tile count = %d, want 4 (replacement should fill the corrupt position)", writer.tileCountAtZoom(2))
 	}
 }
 
@@ -538,10 +586,55 @@ func TestTransformReencode_CorruptTile_Skipped(t *testing.T) {
 		t.Fatalf("Transform should not fail on corrupt tile: %v", err)
 	}
 
-	if stats.SkippedTiles != 1 {
-		t.Errorf("SkippedTiles = %d, want 1", stats.SkippedTiles)
+	if stats.CorruptTiles != 1 {
+		t.Errorf("CorruptTiles = %d, want 1", stats.CorruptTiles)
 	}
 	if stats.TileCount != 2 {
 		t.Errorf("TileCount = %d, want 2", stats.TileCount)
+	}
+}
+
+// TestTransformReencode_CorruptTile_Replaced verifies that reencode mode with
+// --replace-corrupt writes an empty tile in place of the corrupt one.
+func TestTransformReencode_CorruptTile_Replaced(t *testing.T) {
+	tileSize := 8
+	green := color.RGBA{0, 200, 0, 255}
+
+	reader := &mockPMTilesReader{
+		tiles: map[[3]int][]byte{
+			{1, 0, 0}: encodePNGTile(t, tileSize, green),
+			{1, 1, 0}: []byte("corrupt data"), // corrupt tile
+			{1, 0, 1}: encodePNGTile(t, tileSize, green),
+		},
+		header: pmtiles.Header{MinZoom: 1, MaxZoom: 1},
+	}
+	writer := newMockTileWriter()
+	enc := testEncoder(t)
+
+	cfg := TransformConfig{
+		MinZoom:        1,
+		MaxZoom:        1,
+		TileSize:       tileSize,
+		Concurrency:    1,
+		Encoder:        enc,
+		SourceFormat:   "png",
+		Mode:           TransformReencode,
+		ReplaceCorrupt: true,
+	}
+
+	stats, err := Transform(cfg, reader, writer)
+	if err != nil {
+		t.Fatalf("Transform should not fail on corrupt tile: %v", err)
+	}
+
+	if stats.CorruptTiles != 1 {
+		t.Errorf("CorruptTiles = %d, want 1", stats.CorruptTiles)
+	}
+	// All 3 input tiles should be written (corrupt one replaced with empty).
+	if stats.TileCount != 3 {
+		t.Errorf("TileCount = %d, want 3 (corrupt should be replaced)", stats.TileCount)
+	}
+	if writer.tileCountAtZoom(1) != 3 {
+		t.Errorf("zoom 1 tile count = %d, want 3", writer.tileCountAtZoom(1))
 	}
 }

@@ -80,7 +80,9 @@ The original file is never touched. Three processing modes are selected automati
    When `--tile-size` is omitted, the source tile size is discovered by decoding one tile.
 
 Corrupt or undecodable tiles are skipped with a warning (logged per tile) instead of
-aborting the process. The `SkippedTiles` count is tracked in `Stats` and reported at completion.
+aborting the process. With `--replace-corrupt`, undecodable tiles are substituted with
+transparent (empty) tiles so the output position is still populated. The `CorruptTiles`
+count is tracked in `Stats` and reported at completion.
 
 Empty tile filling (`--fill-color`) uses a color transformation model: transparent/
 nodata pixels are substituted with the target color rather than resampled. During

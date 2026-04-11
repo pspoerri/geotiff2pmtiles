@@ -200,7 +200,8 @@ Convert a plain TIFF with TFW world file (global Natural Earth data):
 
 Transform an existing PMTiles archive: change format, zoom levels, resampling,
 or fill empty tiles. Always creates a new file — the original is never modified.
-Corrupt or undecodable tiles are skipped with a warning instead of aborting the process.
+Corrupt or undecodable tiles are skipped with a warning instead of aborting the process;
+use `--replace-corrupt` to substitute empty tiles in their place.
 
 ```
 pmtransform [flags] <input.pmtiles> <output.pmtiles>
@@ -217,6 +218,7 @@ pmtransform [flags] <input.pmtiles> <output.pmtiles>
 | `--tile-size`   | keep source   | Output tile size in pixels (inferred from first decoded tile) |
 | `--resampling`  | `bicubic`     | Interpolation method: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
 | `--rebuild`     | `false`       | Force full pyramid rebuild (for resampling changes) |
+| `--replace-corrupt` | `false`   | Replace undecodable tiles with empty (transparent) tiles instead of skipping them |
 | `--fill-color`  | `0,0,0,0`     | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` (default: transparent) |
 | `--concurrency` | `NumCPU`      | Number of parallel workers                         |
 | `--mem-limit`   | auto          | Tile store memory limit in MB (0 = auto ~90% of RAM) |

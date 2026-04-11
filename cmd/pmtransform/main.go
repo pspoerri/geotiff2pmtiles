@@ -43,6 +43,7 @@ func main() {
 		noSpill         bool
 		fillColor       string
 		rebuild         bool
+		replaceCorrupt  bool
 		attribution     string
 		layerType       string
 		resamplingGamma float64
@@ -64,6 +65,7 @@ func main() {
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
 	flag.StringVar(&fillColor, "fill-color", "0,0,0,0", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\" (default: transparent)")
 	flag.BoolVar(&rebuild, "rebuild", false, "Force full pyramid rebuild (required for resampling changes)")
+	flag.BoolVar(&replaceCorrupt, "replace-corrupt", false, "Replace undecodable tiles with empty tiles instead of skipping them (default: skip)")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (default: keep source)")
 	flag.StringVar(&layerType, "type", "", "Layer type: baselayer, overlay (default: keep source)")
 
@@ -262,6 +264,11 @@ func main() {
 	if fc != nil {
 		fmt.Printf("  %-14s rgba(%d,%d,%d,%d)\n", "Fill color:", fc.R, fc.G, fc.B, fc.A)
 	}
+	if replaceCorrupt {
+		fmt.Printf("  %-14s replace with empty tile\n", "On corrupt:")
+	} else {
+		fmt.Printf("  %-14s skip (use --replace-corrupt to substitute)\n", "On corrupt:")
+	}
 	if noSpill {
 		fmt.Printf("  %-14s disabled (all in memory)\n", "Disk spill:")
 	} else if memLimitMB > 0 {
@@ -289,6 +296,7 @@ func main() {
 		Bounds:           bounds,
 		MemoryLimitBytes: memoryLimitBytes,
 		OutputDir:        outputDir,
+		ReplaceCorrupt:   replaceCorrupt,
 	}
 
 	// Build description with processing steps prepended to source description.
@@ -321,13 +329,17 @@ func main() {
 	}
 
 	if verbose {
-		log.Printf("Processed %d tiles (%d uniform, %d empty, %d skipped) in %v",
-			stats.TileCount, stats.UniformTiles, stats.EmptyTiles, stats.SkippedTiles,
+		log.Printf("Processed %d tiles (%d uniform, %d empty, %d corrupt) in %v",
+			stats.TileCount, stats.UniformTiles, stats.EmptyTiles, stats.CorruptTiles,
 			time.Since(genStart).Round(time.Millisecond))
 	}
 
-	if stats.SkippedTiles > 0 {
-		log.Printf("Warning: %d corrupt tiles were skipped during processing", stats.SkippedTiles)
+	if stats.CorruptTiles > 0 {
+		if replaceCorrupt {
+			log.Printf("Warning: %d corrupt tiles were replaced with empty tiles", stats.CorruptTiles)
+		} else {
+			log.Printf("Warning: %d corrupt tiles were skipped (use --replace-corrupt to substitute empty tiles)", stats.CorruptTiles)
+		}
 	}
 
 	// Finalize PMTiles file.
