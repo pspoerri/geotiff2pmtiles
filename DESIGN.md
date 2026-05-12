@@ -133,6 +133,49 @@ alpha, so transparent pixels would be baked back to black in the encoded tile. I
 the user did not explicitly set `--format`, the CLI switches the default `jpeg` →
 `webp`. If the user explicitly chose `--format=jpeg`, it warns and proceeds.
 
+## Source-level nodata flood fill
+
+Strict per-pixel tolerance matching has a failure mode at the boundary of a
+black-padded scan: pixels just inside the true border (values ~10–60 from
+JPEG quantisation smear) aren't caught by a small tolerance, leaving a
+speckle fringe along the alpha boundary, while widening the tolerance starts
+absorbing legitimate interior dark pixels (text, shadows, forest canopy).
+
+`--nodata-flood` solves this by treating the strict tolerance as a *candidate
+set* and only making transparent the pixels in that set that are reachable
+through it from the COG's outer image boundary. Implementation:
+
+1. **Build** (`Reader.BuildFloodMask`): walk every source tile once with
+   `HasNodata` temporarily cleared, populate a packed candidate bitmap (1 bit
+   per source pixel) for "all RGB within tolerance". Then 4-connected scanline
+   flood fill seeded from every boundary pixel (row 0, row H-1, col 0, col W-1)
+   that's in the candidate set; the flood writes a second packed bitmap which
+   is retained on the Reader. Memory: 2 × W·H/8 bytes during build, 1 × W·H/8
+   bytes resident.
+2. **Use**: the three decode paths (`decodeJPEGTile`, `decodePlanarSeparateJPEG`,
+   `decodeRawTile`) skip their own nodata logic when `Reader.floodMask != nil`
+   — leaving RGB *intact*. `ReadTile` then calls `applyFloodMaskRGBA` to zero
+   alpha at the source-pixel coordinates marked transparent. Skipping the
+   per-pixel masking is essential: if the decode path zeroed RGB for every
+   candidate, interior false positives would be permanently destroyed and the
+   mask couldn't recover them.
+
+The scanline flood is preferred over breadth-first / depth-first traversal
+because its peak queue size scales with the *perimeter* of the flooded region,
+not its area. For a 24081×18046 source with a thick black border, the queue
+stays well under 1 MB while filling tens of millions of pixels.
+
+Trade-offs vs per-tile flood fill:
+- Per-tile flood at the output zoom level is cheaper but has tile-seam
+  artefacts and can mark interior tiles that happen to be fully outside the
+  scan as opaque (no edge pixel to seed from).
+- Source-level flood is global and seam-free, but costs an upfront decode pass
+  (~6.5 s for a 158 MB JPEG-compressed BigTIFF) plus the resident bitmap.
+- Building at a downsampled overview would be cheaper still, but historic
+  scans like the motivating Katahdin file have no overviews. A future
+  optimisation: build the mask on the smallest available overview and
+  upsample. For now, full-resolution is simple and correct.
+
 All downstream code (bilinear/Lanczos/bicubic resampling, mode downsampling,
 `sampleFromTileSources`) excludes alpha=0 pixels from interpolation and voting, and
 tries the next source on fully-transparent results (see below).

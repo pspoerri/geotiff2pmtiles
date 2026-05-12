@@ -53,6 +53,7 @@ func main() {
 		rescaleRange    string
 		nodataStr       string
 		nodataTolStr    string
+		nodataFlood     bool
 		resamplingGamma float64
 	)
 
@@ -79,6 +80,7 @@ func main() {
 	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (required for 16-bit data)")
 	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set)")
 	flag.StringVar(&nodataTolStr, "nodata-tolerance", "", "Per-band tolerance applied to --nodata matching (default 0 = exact match). Useful for lossy-JPEG borders where strict 0 is smeared to 1..5; try 4–8.")
+	flag.BoolVar(&nodataFlood, "nodata-flood", false, "Source-level flood-fill from the COG outer edges through near-nodata pixels (tolerance widened, e.g. 40). Only edge-reachable pixels are made transparent; interior dark pixels (text, shadows, canopy) stay opaque. Requires --nodata. Costs ~W*H/8 bytes of RAM per source.")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -277,6 +279,26 @@ func main() {
 	log.Printf("Band config: %s", bandCfg)
 	for _, src := range sources {
 		src.SetBandConfig(bandCfg)
+	}
+
+	// --nodata-flood: build a per-source transparency bitmap once, before any
+	// concurrent ReadTile traffic begins. Pixels are transparent iff they fall
+	// within tolerance AND are reachable through near-nodata neighbours from
+	// the COG outer boundary, eliminating interior-speckle false positives.
+	if nodataFlood {
+		if !bandCfg.HasNodata {
+			log.Fatal("--nodata-flood requires --nodata to be set (or auto-detected)")
+		}
+		for i, src := range sources {
+			t0 := time.Now()
+			if err := src.BuildFloodMask(); err != nil {
+				log.Fatalf("BuildFloodMask for %s: %v", src.Path(), err)
+			}
+			if verbose {
+				log.Printf("Flood mask built for source %d/%d (%s) in %v",
+					i+1, len(sources), filepath.Base(src.Path()), time.Since(t0).Round(time.Millisecond))
+			}
+		}
 	}
 
 	// Compute merged bounds in WGS84.

@@ -91,6 +91,15 @@ type Reader struct {
 	id      int          // unique numeric ID for fast cache keying (set by OpenAll)
 	strip   *stripLayout // non-nil for strip-based TIFFs promoted to virtual tiles
 	bandCfg BandConfig   // band selection and rescaling config (set via SetBandConfig)
+
+	// floodMask, when non-nil, replaces per-pixel nodata-tolerance matching.
+	// Bit (y*floodMaskW + x) set ⇒ that source pixel is transparent. Built by
+	// BuildFloodMask: it captures the connected component of near-nodata pixels
+	// reachable from the COG's outer boundary, so interior dark pixels stay
+	// opaque even when --nodata-tolerance is widened.
+	floodMask  *bitmap
+	floodMaskW int
+	floodMaskH int
 }
 
 // stripLayout stores the original strip layout for strip-based TIFFs.
@@ -566,6 +575,22 @@ func (r *Reader) decodeRawFloat32Tile(ifd *IFD, data []byte) ([]float32, int, in
 // Level 0 is the full resolution; higher levels are overviews.
 // This is safe for concurrent use — the underlying data is memory-mapped read-only.
 func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
+	img, err := r.readTileDecoded(level, col, row)
+	if err != nil {
+		return nil, err
+	}
+	// A built flood mask supersedes per-pixel nodata matching at level 0.
+	if r.floodMask != nil && level == 0 {
+		ifd := &r.ifds[0]
+		rgba := toRGBA(img)
+		r.applyFloodMaskRGBA(rgba, col*int(ifd.TileWidth), row*int(ifd.TileHeight), int(ifd.TileWidth), int(ifd.TileHeight))
+		return rgba, nil
+	}
+	return img, nil
+}
+
+// readTileDecoded is the raw decode dispatch, without flood-mask post-processing.
+func (r *Reader) readTileDecoded(level, col, row int) (image.Image, error) {
 	if level < 0 || level >= len(r.ifds) {
 		return nil, fmt.Errorf("invalid IFD level %d (have %d)", level, len(r.ifds))
 	}
@@ -687,7 +712,10 @@ func (r *Reader) decodeJPEGTile(ifd *IFD, data []byte) (image.Image, error) {
 		return nil, err
 	}
 	cfg := r.bandCfg
-	if !cfg.HasNodata {
+	// Flood mask, when present, is the authority for transparency — skip the
+	// per-pixel tolerance check (which would zero RGB and prevent the flood
+	// mask from "reverting" interior-speckle false positives).
+	if !cfg.HasNodata || r.floodMask != nil {
 		return img, nil
 	}
 	rgba := toRGBA(img)
@@ -837,7 +865,7 @@ func (r *Reader) decodePlanarSeparateJPEG(ifd *IFD, col, row, tilesAcross, tiles
 	}
 
 	cfg := r.bandCfg
-	if cfg.HasNodata {
+	if cfg.HasNodata && r.floodMask == nil {
 		applyNodataMaskRGBA(out, uint8(cfg.Nodata), uint8(cfg.NodataTolerance))
 	}
 	return out, nil
@@ -924,7 +952,7 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	var hasNodata bool
 	var nodataVal uint8
 	isDefaultBandCfg := cfg.Bands == [3]int{} && cfg.AlphaBand == 0 && cfg.Rescale == RescaleNone
-	if spp <= 2 && isDefaultBandCfg && !is16 {
+	if spp <= 2 && isDefaultBandCfg && !is16 && r.floodMask == nil {
 		useLegacyNodata = true
 		nd := r.ifds[0].NoData
 		if nd != "" {
@@ -938,10 +966,12 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 
 	// General-path nodata: prefer BandConfig, fall back to IFD tag.
 	// Used for multi-band or 16-bit data not handled by the legacy path.
+	// Skipped entirely when a flood mask is present — the mask is authoritative
+	// and the loop must leave RGB untouched so the mask can revert false positives.
 	var genHasNodata bool
 	var genNodataU16 uint16
 	var genNodataTol uint16
-	if !useLegacyNodata {
+	if !useLegacyNodata && r.floodMask == nil {
 		if cfg.HasNodata {
 			genHasNodata = true
 			genNodataU16 = uint16(cfg.Nodata)
