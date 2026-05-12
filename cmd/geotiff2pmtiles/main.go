@@ -52,6 +52,7 @@ func main() {
 		rescaleStr      string
 		rescaleRange    string
 		nodataStr       string
+		nodataTolStr    string
 		resamplingGamma float64
 	)
 
@@ -77,6 +78,7 @@ func main() {
 	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, log, linear, none (auto: requires --rescale-range for 16-bit)")
 	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (required for 16-bit data)")
 	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set)")
+	flag.StringVar(&nodataTolStr, "nodata-tolerance", "", "Per-band tolerance applied to --nodata matching (default 0 = exact match). Useful for lossy-JPEG borders where strict 0 is smeared to 1..5; try 4–8.")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -239,6 +241,35 @@ func main() {
 			if v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64); err == nil && v >= 0 && v <= 65535 && v == math.Floor(v) {
 				bandCfg.HasNodata = true
 				bandCfg.Nodata = v
+			}
+		}
+	}
+
+	// --nodata-tolerance: only meaningful when nodata is active.
+	if nodataTolStr != "" {
+		v, err := strconv.ParseFloat(strings.TrimSpace(nodataTolStr), 64)
+		if err != nil || v < 0 || v > 65535 || v != math.Floor(v) {
+			log.Fatalf("--nodata-tolerance: must be a non-negative integer ≤ 65535, got %q", nodataTolStr)
+		}
+		if !bandCfg.HasNodata {
+			log.Printf("WARNING: --nodata-tolerance set without --nodata; ignored")
+		} else {
+			bandCfg.NodataTolerance = v
+		}
+	}
+
+	// If nodata is active but the output format can't carry transparency,
+	// switch to WebP automatically (when the user didn't pick --format),
+	// or warn if they explicitly chose jpeg.
+	if bandCfg.HasNodata && format == "jpeg" {
+		if isFlagSet("format") {
+			log.Printf("WARNING: --nodata is set but --format=jpeg cannot carry transparency; nodata pixels will be encoded as black. Use --format=webp or --format=png for true transparency.")
+		} else {
+			log.Printf("Nodata is active; switching output format jpeg → webp so transparency is preserved (override with --format=jpeg).")
+			format = "webp"
+			enc, err = encode.NewEncoder(format, quality)
+			if err != nil {
+				log.Fatalf("Encoder: %v", err)
 			}
 		}
 	}
@@ -505,6 +536,18 @@ func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog
 	}
 
 	return b.String()
+}
+
+// isFlagSet reports whether a flag was explicitly passed on the command line
+// (as opposed to taking its default value).
+func isFlagSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }
 
 // parseColor parses an RGBA color from "R,G,B,A" or "#RRGGBBAA" format.

@@ -114,7 +114,8 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--alpha-band`  | `auto`        | Alpha band: `auto` (band 4 for 8-bit spp>=4), `-1` (none), or 1-indexed band |
 | `--rescale`     | `auto`        | Rescale mode: `auto`, `linear`, `log`, `none` (auto requires `--rescale-range` for 16-bit) |
 | `--rescale-range` |             | Input value range `min,max` for rescaling (required for 16-bit data) |
-| `--nodata`      |               | Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set) |
+| `--nodata`      |               | Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set). When set without `--format`, output auto-switches from `jpeg` to `webp` so transparency is preserved. |
+| `--nodata-tolerance` | `0`      | Per-band tolerance for `--nodata` matching. Use 4–8 for borders that come from lossy JPEG sources, where the strict nodata value is smeared by compression. |
 | `--verbose`     | `false`       | Verbose progress output                            |
 | `--version`     |               | Print version and exit                             |
 | `--cpuprofile`  |               | Write CPU profile to file                          |
@@ -154,6 +155,14 @@ Fill transparent/nodata areas with a solid color (e.g. black):
 ```bash
 ./geotiff2pmtiles --fill-color "0,0,0,255" --format png \
   input/ output.pmtiles
+```
+
+Historic JPEG-compressed scan with a black border (output auto-switches to WebP for transparency):
+
+```bash
+./geotiff2pmtiles --nodata 0 --nodata-tolerance 8 \
+  scan.tif output.pmtiles
+# Nodata is active; switching output format jpeg → webp so transparency is preserved.
 ```
 
 Elevation data (auto-detects float GeoTIFF and selects Terrarium encoding):

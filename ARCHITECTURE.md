@@ -98,7 +98,8 @@ skipping DiskTileStore overhead entirely.
 - Continuous disk spilling via dedicated I/O goroutine with configurable memory backpressure (auto ~90% of RAM)
 - Uniform tiles (single color) stored as 4 bytes, never spilled to disk
 - `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers instead of allocating/GC'ing per tile
-- Nodata pixels (all bands equal to GDAL_NODATA tag value) decoded as transparent (alpha=0) for single-band and multi-band/16-bit data; stored in `BandConfig.HasNodata`/`Nodata`, auto-detected from GeoTIFF, overridable with `--nodata`
+- Nodata pixels (all bands within `BandConfig.NodataTolerance` of `BandConfig.Nodata`) decoded as transparent (alpha=0). Honoured by the raw, Deflate, LZW, and JPEG decode paths; planar-separate JPEG applies it after the per-plane merge. Auto-detected from the GDAL_NODATA tag; overridable with `--nodata` and `--nodata-tolerance` (use 4–8 for lossy-JPEG borders). When `--nodata` is set and `--format` is left at its default, the CLI switches output from `jpeg` → `webp` so transparency survives the encode step.
+- Planar-separate (`PlanarConfiguration=2`) JPEG COGs: each band is decoded from its own per-plane JPEG tile and merged into RGBA at read time. Plane 0→R, 1→G, 2→B, 3→A; missing channels are duplicated from plane 0 (grayscale).
 - Source fallthrough on nodata: transparent (alpha=0) samples are skipped and the next source is tried, preventing holes in one source from blocking valid data in another
 - PMTiles writer uses temp file for tile data (only directory entries in memory)
 - Pyramid downsampling avoids redundant source reads for lower zoom levels

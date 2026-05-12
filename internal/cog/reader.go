@@ -36,6 +36,11 @@ type BandConfig struct {
 	RescaleMax float64     // Input value range maximum
 	HasNodata  bool        // if true, pixels with all bands == Nodata are decoded as transparent (alpha=0)
 	Nodata     float64     // raw (pre-rescale) nodata value; valid when HasNodata is true
+	// NodataTolerance widens the match: a sample is considered nodata when
+	// |sample - Nodata| <= NodataTolerance. Useful for lossy-JPEG borders where
+	// compression smears strict nodata values (e.g. boundary blacks of 1..5
+	// instead of exactly 0). 0 = exact match.
+	NodataTolerance float64
 }
 
 // String returns a human-readable summary of the band configuration.
@@ -57,6 +62,9 @@ func (cfg BandConfig) String() string {
 	}
 	if cfg.HasNodata {
 		fmt.Fprintf(&b, ", nodata %.0f", cfg.Nodata)
+		if cfg.NodataTolerance > 0 {
+			fmt.Fprintf(&b, " (tol %.0f)", cfg.NodataTolerance)
+		}
 	}
 	return b.String()
 }
@@ -582,6 +590,16 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 		return r.decodeRawTile(ifd, data)
 	}
 
+	// Planar-separate layout: each band is stored in its own per-tile blob,
+	// with offsets/byte-counts laid out plane-major. The chunked layout
+	// requires special handling, so dispatch before the standard tile lookup.
+	if ifd.PlanarConfig == 2 && ifd.SamplesPerPixel > 1 {
+		if ifd.Compression != 7 {
+			return nil, fmt.Errorf("planar-separate (PlanarConfiguration=2) is only supported for JPEG-compressed COGs; got compression %d", ifd.Compression)
+		}
+		return r.decodePlanarSeparateJPEG(ifd, col, row, tilesAcross, tilesDown)
+	}
+
 	tileIdx := row*tilesAcross + col
 	if tileIdx >= len(ifd.TileOffsets) || tileIdx >= len(ifd.TileByteCounts) {
 		return nil, fmt.Errorf("tile index %d out of range", tileIdx)
@@ -659,9 +677,28 @@ func decompressLZW(data []byte) ([]byte, error) {
 }
 
 // decodeJPEGTile decodes a JPEG-compressed tile, optionally prepending JPEG tables.
+// When BandConfig.HasNodata is set, the result is materialised as RGBA and pixels
+// whose channels all match the nodata value (within NodataTolerance) are made
+// transparent. Without nodata, the underlying JPEG image is returned as-is to
+// preserve the YCbCr fast path in downstream sampling.
 func (r *Reader) decodeJPEGTile(ifd *IFD, data []byte) (image.Image, error) {
-	var jpegData []byte
+	img, err := decodeJPEGBytes(ifd, data)
+	if err != nil {
+		return nil, err
+	}
+	cfg := r.bandCfg
+	if !cfg.HasNodata {
+		return img, nil
+	}
+	rgba := toRGBA(img)
+	applyNodataMaskRGBA(rgba, uint8(cfg.Nodata), uint8(cfg.NodataTolerance))
+	return rgba, nil
+}
 
+// decodeJPEGBytes is the raw JPEG decode (with JPEGTables prepended if present).
+// It does not apply nodata.
+func decodeJPEGBytes(ifd *IFD, data []byte) (image.Image, error) {
+	var jpegData []byte
 	if len(ifd.JPEGTables) > 0 {
 		// JPEG tables contain the header with quantization/Huffman tables.
 		// Strip the trailing EOI (0xFFD9) from tables and the leading SOI (0xFFD8) from data.
@@ -679,13 +716,163 @@ func (r *Reader) decodeJPEGTile(ifd *IFD, data []byte) (image.Image, error) {
 	} else {
 		jpegData = data
 	}
-
 	img, err := jpeg.Decode(bytes.NewReader(jpegData))
 	if err != nil {
 		return nil, fmt.Errorf("decoding JPEG tile: %w", err)
 	}
-
 	return img, nil
+}
+
+// toRGBA materialises any image.Image into an *image.RGBA. If the input is
+// already RGBA the original is returned (no copy).
+func toRGBA(src image.Image) *image.RGBA {
+	if rgba, ok := src.(*image.RGBA); ok {
+		return rgba
+	}
+	b := src.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	// Use draw via image/color to handle YCbCr/Gray/etc generically.
+	for y := 0; y < b.Dy(); y++ {
+		for x := 0; x < b.Dx(); x++ {
+			rr, gg, bb, aa := src.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			i := dst.PixOffset(x, y)
+			dst.Pix[i+0] = uint8(rr >> 8)
+			dst.Pix[i+1] = uint8(gg >> 8)
+			dst.Pix[i+2] = uint8(bb >> 8)
+			dst.Pix[i+3] = uint8(aa >> 8)
+		}
+	}
+	return dst
+}
+
+// applyNodataMaskRGBA zeroes the alpha (and RGB) of any pixel where every RGB
+// channel is within tol of nodataVal. RGB is also zeroed so consumers that
+// ignore alpha (e.g. JPEG output) at least render a neutral colour.
+func applyNodataMaskRGBA(img *image.RGBA, nodataVal, tol uint8) {
+	pix := img.Pix
+	nd := int(nodataVal)
+	t := int(tol)
+	for i := 0; i+3 < len(pix); i += 4 {
+		if absDiff(int(pix[i+0]), nd) <= t &&
+			absDiff(int(pix[i+1]), nd) <= t &&
+			absDiff(int(pix[i+2]), nd) <= t {
+			pix[i+0] = 0
+			pix[i+1] = 0
+			pix[i+2] = 0
+			pix[i+3] = 0
+		}
+	}
+}
+
+func absDiff(a, b int) int {
+	if a >= b {
+		return a - b
+	}
+	return b - a
+}
+
+// decodePlanarSeparateJPEG handles PlanarConfig=2 (band-interleaved) JPEG COGs.
+// Each band is stored as a separate single-channel JPEG tile; tile offsets are
+// laid out plane-major: [plane0 tiles..., plane1 tiles..., ...].
+//
+// The resulting image is a 4-channel RGBA where R,G,B come from the first three
+// planes (or are duplicated from plane 0 when the file is single-band), and
+// alpha comes from plane 4 if SamplesPerPixel >= 4. Pixels matching the
+// configured nodata value (with tolerance) are made transparent.
+func (r *Reader) decodePlanarSeparateJPEG(ifd *IFD, col, row, tilesAcross, tilesDown int) (image.Image, error) {
+	tilesPerPlane := tilesAcross * tilesDown
+	planes := int(ifd.SamplesPerPixel)
+	if planes < 1 {
+		return nil, fmt.Errorf("planar separate: invalid SamplesPerPixel %d", planes)
+	}
+	tw := int(ifd.TileWidth)
+	th := int(ifd.TileHeight)
+
+	// Decode each plane's tile into a slice of per-pixel uint8 samples.
+	planeSamples := make([][]uint8, planes)
+	for p := 0; p < planes; p++ {
+		idx := p*tilesPerPlane + row*tilesAcross + col
+		if idx >= len(ifd.TileOffsets) || idx >= len(ifd.TileByteCounts) {
+			return nil, fmt.Errorf("planar separate: tile index %d out of range (have %d entries)", idx, len(ifd.TileOffsets))
+		}
+		offset := ifd.TileOffsets[idx]
+		size := ifd.TileByteCounts[idx]
+		if size == 0 {
+			planeSamples[p] = make([]uint8, tw*th) // zero plane
+			continue
+		}
+		end := offset + size
+		if end > uint64(len(r.data)) {
+			return nil, fmt.Errorf("planar separate: tile [%d:%d] exceeds file size %d", offset, end, len(r.data))
+		}
+		img, err := decodeJPEGBytes(ifd, r.data[offset:end])
+		if err != nil {
+			return nil, fmt.Errorf("planar separate plane %d: %w", p, err)
+		}
+		planeSamples[p] = grayBytes(img, tw, th)
+	}
+
+	// Merge planes into RGBA. Default mapping: plane 0→R, 1→G, 2→B, 3→A.
+	out := image.NewRGBA(image.Rect(0, 0, tw, th))
+	pix := out.Pix
+	hasAlphaPlane := planes >= 4
+	for i := 0; i < tw*th; i++ {
+		r0 := planeSamples[0][i]
+		var g0, b0 uint8 = r0, r0
+		if planes >= 2 {
+			g0 = planeSamples[1][i]
+		}
+		if planes >= 3 {
+			b0 = planeSamples[2][i]
+		}
+		var a0 uint8 = 255
+		if hasAlphaPlane {
+			a0 = planeSamples[3][i]
+		}
+		j := i * 4
+		pix[j+0] = r0
+		pix[j+1] = g0
+		pix[j+2] = b0
+		pix[j+3] = a0
+	}
+
+	cfg := r.bandCfg
+	if cfg.HasNodata {
+		applyNodataMaskRGBA(out, uint8(cfg.Nodata), uint8(cfg.NodataTolerance))
+	}
+	return out, nil
+}
+
+// grayBytes extracts a tw×th grayscale byte buffer from a decoded image,
+// handling *image.Gray, *image.YCbCr (Y plane), and the generic fallback.
+func grayBytes(img image.Image, tw, th int) []uint8 {
+	out := make([]uint8, tw*th)
+	switch im := img.(type) {
+	case *image.Gray:
+		// Stride may differ from width; copy row by row.
+		for y := 0; y < th; y++ {
+			srcOff := y * im.Stride
+			dstOff := y * tw
+			copy(out[dstOff:dstOff+tw], im.Pix[srcOff:srcOff+tw])
+		}
+	case *image.YCbCr:
+		// Single-channel JPEG sometimes decodes as YCbCr 4:4:4 with chroma = 128.
+		for y := 0; y < th; y++ {
+			for x := 0; x < tw; x++ {
+				yi := im.YOffset(x, y)
+				out[y*tw+x] = im.Y[yi]
+			}
+		}
+	default:
+		b := img.Bounds()
+		for y := 0; y < th; y++ {
+			for x := 0; x < tw; x++ {
+				c := color.GrayModel.Convert(img.At(b.Min.X+x, b.Min.Y+y)).(color.Gray)
+				out[y*tw+x] = c.Y
+			}
+		}
+	}
+	return out
 }
 
 // decodeRawTile decodes an uncompressed tile.
@@ -753,10 +940,14 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	// Used for multi-band or 16-bit data not handled by the legacy path.
 	var genHasNodata bool
 	var genNodataU16 uint16
+	var genNodataTol uint16
 	if !useLegacyNodata {
 		if cfg.HasNodata {
 			genHasNodata = true
 			genNodataU16 = uint16(cfg.Nodata)
+			if cfg.NodataTolerance > 0 {
+				genNodataTol = uint16(cfg.NodataTolerance)
+			}
 		} else if nd := r.ifds[0].NoData; nd != "" {
 			if v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64); err == nil && v >= 0 && v <= 65535 && v == math.Floor(v) {
 				genHasNodata = true
@@ -846,7 +1037,14 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			if genHasNodata && effectiveAlpha < 0 {
 				isNodata := true
 				for b := 0; b < spp; b++ {
-					if readSample(pixelOff, b) != genNodataU16 {
+					s := readSample(pixelOff, b)
+					var diff uint16
+					if s >= genNodataU16 {
+						diff = s - genNodataU16
+					} else {
+						diff = genNodataU16 - s
+					}
+					if diff > genNodataTol {
 						isNodata = false
 						break
 					}

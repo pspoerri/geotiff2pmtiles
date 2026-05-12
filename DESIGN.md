@@ -102,9 +102,36 @@ gray+alpha also overrides the alpha channel.
 `BandConfig.HasNodata`/`BandConfig.Nodata`. `DetectPreset()` automatically populates
 these from the GDAL_NODATA tag (integer in [0,65535]) so the preset is self-contained.
 The `--nodata` CLI flag overrides the auto-detected value. In the pixel loop, all `spp`
-file bands are compared to the raw nodata value before rescaling; if all match, the pixel
-is emitted as (0,0,0,0). Only applied when there is no dedicated alpha band
-(`effectiveAlpha < 0`), since an alpha band already encodes transparency directly.
+file bands are compared to the raw nodata value before rescaling; if all are within
+`BandConfig.NodataTolerance` of the nodata value, the pixel is emitted as (0,0,0,0).
+Only applied when there is no dedicated alpha band (`effectiveAlpha < 0`), since an
+alpha band already encodes transparency directly.
+
+**Tolerance for lossy-JPEG borders**: COGs scanned from historic imagery often have
+black-padded borders that are *intended* as nodata but, because the file is JPEG-
+compressed, decode as 1..8 rather than strict 0. `BandConfig.NodataTolerance` (CLI:
+`--nodata-tolerance`) widens the match to `|sample - nodata| ≤ tolerance` so those
+borders disappear cleanly. Default 0 keeps exact-match semantics.
+
+**JPEG decode path**: previously returned the JPEG-decoded image untouched, silently
+ignoring `BandConfig.HasNodata`. `decodeJPEGTile` now materialises the image as RGBA
+and zeroes alpha+RGB for nodata pixels when `HasNodata` is set; without nodata it
+still returns the raw `*image.YCbCr`/`*image.Gray` to preserve the fast sampling path.
+
+**Planar-separate JPEG** (`PlanarConfiguration=2`): each band lives in its own
+per-plane JPEG tile, with offsets laid out plane-major. `ReadTile` dispatches to
+`decodePlanarSeparateJPEG`, which decodes each plane (using `grayBytes` to extract
+the single channel from `*image.Gray` or single-band `*image.YCbCr`) and merges into
+RGBA: plane 0→R, 1→G, 2→B, 3→A. Missing channels are duplicated from plane 0 so
+grayscale planar-separate files render correctly. Nodata is applied after the merge.
+Uncompressed and Deflate/LZW planar-separate are rare in practice and currently
+return an explicit "not supported" error rather than silently decoding wrong data
+(the previous behaviour silently returned plane 0 as R=G=B).
+
+**Output-format auto-switch**: when `--nodata` is active, JPEG output cannot carry
+alpha, so transparent pixels would be baked back to black in the encoded tile. If
+the user did not explicitly set `--format`, the CLI switches the default `jpeg` →
+`webp`. If the user explicitly chose `--format=jpeg`, it warns and proceeds.
 
 All downstream code (bilinear/Lanczos/bicubic resampling, mode downsampling,
 `sampleFromTileSources`) excludes alpha=0 pixels from interpolation and voting, and
