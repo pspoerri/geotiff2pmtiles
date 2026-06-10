@@ -40,19 +40,19 @@ type Header struct {
 	NumAddressedTiles   uint64
 	NumTileEntries      uint64
 	NumTileContents     uint64
+	MinLon              float32
+	MinLat              float32
+	MaxLon              float32
+	MaxLat              float32
+	CenterLon           float32
+	CenterLat           float32
 	Clustered           bool
 	InternalCompression uint8
 	TileCompression     uint8
 	TileType            uint8
 	MinZoom             uint8
 	MaxZoom             uint8
-	MinLon              float32
-	MinLat              float32
-	MaxLon              float32
-	MaxLat              float32
 	CenterZoom          uint8
-	CenterLon           float32
-	CenterLat           float32
 }
 
 // NewHeader creates a header with basic metadata.
@@ -186,11 +186,6 @@ func e7ToLonLat(v uint32) float32 {
 
 // WriterOptions holds configuration for the PMTiles writer.
 type WriterOptions struct {
-	MinZoom    int
-	MaxZoom    int
-	Bounds     cog.Bounds
-	TileFormat uint8
-	TileSize   int
 	// TempDir is the directory for temporary tile data files.
 	// Defaults to the output file's directory when empty.
 	TempDir string
@@ -204,5 +199,10 @@ type WriterOptions struct {
 	Attribution string
 	// Type categorizes the tileset: "baselayer" or "overlay".
 	// Defaults to "baselayer" when empty.
-	Type string
+	Type       string
+	MinZoom    int
+	MaxZoom    int
+	TileSize   int
+	Bounds     cog.Bounds
+	TileFormat uint8
 }

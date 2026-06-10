@@ -13,9 +13,9 @@ import (
 // Reader provides read access to an existing PMTiles v3 archive.
 type Reader struct {
 	file    *os.File
-	header  Header
-	entries []Entry            // all tile entries (expanded from run lengths)
 	tileIdx map[uint64]tileRef // tileID -> location in file
+	entries []Entry            // all tile entries (expanded from run lengths)
+	header  Header
 }
 
 // tileRef records the absolute file offset and length of a tile's data.

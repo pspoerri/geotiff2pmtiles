@@ -27,19 +27,18 @@ type dedupEntry struct {
 // the same encoded bytes (e.g. uniform single-color tiles), the data is written
 // to disk only once and all entries share the same offset.
 type Writer struct {
+	tmpFile    *os.File
+	dedup      map[uint64]dedupEntry // FNV-64a hash → first occurrence (for dedup)
 	outputPath string
+	tmpDir     string // directory for temp files
+	entries    []Entry
 	opts       WriterOptions
 	header     Header
 
-	tmpFile   *os.File
-	tmpDir    string // directory for temp files
 	tmpOffset uint64
-	entries   []Entry
-	dedup     map[uint64]dedupEntry // FNV-64a hash → first occurrence (for dedup)
+	dedupHits int64 // number of tiles that reused existing data
 	mu        sync.Mutex
 	finalized bool
-
-	dedupHits int64 // number of tiles that reused existing data
 }
 
 // NewWriter creates a new PMTiles writer.

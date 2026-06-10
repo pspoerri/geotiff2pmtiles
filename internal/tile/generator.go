@@ -67,19 +67,19 @@ func ParseResampling(s string) (Resampling, error) {
 
 // Config holds tile generation configuration.
 type Config struct {
+	Encoder          encode.Encoder
+	FillColor        *color.RGBA // when set, transparent/nodata pixels → fill color; missing tiles → solid fill
+	OutputDir        string      // directory for spill files (defaults to OS temp dir)
 	MinZoom          int
 	MaxZoom          int
 	TileSize         int
 	Concurrency      int
-	Verbose          bool
-	Encoder          encode.Encoder
 	Bounds           cog.Bounds
 	Resampling       Resampling
-	ResamplingGamma  float64     // power-law gamma for resampling interpolation (1.0 = disabled)
-	IsTerrarium      bool        // true for float GeoTIFF → Terrarium encoding
-	FillColor        *color.RGBA // when set, transparent/nodata pixels → fill color; missing tiles → solid fill
-	MemoryLimitBytes int64       // max tile store memory before disk spilling (0 = auto)
-	OutputDir        string      // directory for spill files (defaults to OS temp dir)
+	ResamplingGamma  float64 // power-law gamma for resampling interpolation (1.0 = disabled)
+	MemoryLimitBytes int64   // max tile store memory before disk spilling (0 = auto)
+	Verbose          bool
+	IsTerrarium      bool // true for float GeoTIFF → Terrarium encoding
 }
 
 // Stats holds generation statistics.
