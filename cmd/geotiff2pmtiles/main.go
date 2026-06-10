@@ -13,6 +13,7 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
@@ -80,7 +81,7 @@ func main() {
 	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (required for 16-bit data)")
 	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set)")
 	flag.StringVar(&nodataTolStr, "nodata-tolerance", "", "Per-band tolerance applied to --nodata matching (default 0 = exact match). Useful for lossy-JPEG borders where strict 0 is smeared to 1..5; try 4–8.")
-	flag.BoolVar(&nodataFlood, "nodata-flood", false, "Source-level flood-fill from the COG outer edges through near-nodata pixels (tolerance widened, e.g. 40). Only edge-reachable pixels are made transparent; interior dark pixels (text, shadows, canopy) stay opaque. Requires --nodata. Costs ~W*H/8 bytes of RAM per source.")
+	flag.BoolVar(&nodataFlood, "nodata-flood", false, "Source-level flood-fill from the COG outer edges through near-nodata pixels. Only edge-reachable pixels are made transparent; interior dark pixels (text, shadows, canopy) stay opaque. Requires --nodata; pair with a widened --nodata-tolerance (e.g. 40) for scanned/JPEG sources. Costs ~W*H/8 bytes of RAM per source.")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -289,16 +290,46 @@ func main() {
 		if !bandCfg.HasNodata {
 			log.Fatal("--nodata-flood requires --nodata to be set (or auto-detected)")
 		}
-		for i, src := range sources {
-			t0 := time.Now()
-			if err := src.BuildFloodMask(); err != nil {
-				log.Fatalf("BuildFloodMask for %s: %v", src.Path(), err)
-			}
-			if verbose {
-				log.Printf("Flood mask built for source %d/%d (%s) in %v",
-					i+1, len(sources), filepath.Base(src.Path()), time.Since(t0).Round(time.Millisecond))
-			}
+		if bandCfg.NodataTolerance == 0 {
+			log.Print("note: --nodata-flood with --nodata-tolerance 0 only removes exactly-matching edge-connected pixels; consider --nodata-tolerance 20-40 for scanned/JPEG sources")
 		}
+		// Up to 4 sources build concurrently (each costs ~2×W*H/8 bytes while
+		// under construction); pass 1 of each build is itself parallel, so the
+		// per-source worker count divides the global concurrency budget.
+		buildStart := time.Now()
+		log.Printf("Building nodata flood masks for %d source(s)...", len(sources))
+		parallelSources := max(min(len(sources), 4, concurrency), 1)
+		workersPerSource := max(concurrency/parallelSources, 1)
+		sem := make(chan struct{}, parallelSources)
+		var floodWg sync.WaitGroup
+		var floodErrMu sync.Mutex
+		var floodErr error
+		for i, src := range sources {
+			floodWg.Add(1)
+			go func(i int, src *cog.Reader) {
+				defer floodWg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				t0 := time.Now()
+				if err := src.BuildFloodMask(workersPerSource); err != nil {
+					floodErrMu.Lock()
+					if floodErr == nil {
+						floodErr = fmt.Errorf("BuildFloodMask for %s: %w", src.Path(), err)
+					}
+					floodErrMu.Unlock()
+					return
+				}
+				if verbose {
+					log.Printf("Flood mask built for source %d/%d (%s) in %v",
+						i+1, len(sources), filepath.Base(src.Path()), time.Since(t0).Round(time.Millisecond))
+				}
+			}(i, src)
+		}
+		floodWg.Wait()
+		if floodErr != nil {
+			log.Fatal(floodErr)
+		}
+		log.Printf("Flood masks built in %v", time.Since(buildStart).Round(time.Millisecond))
 	}
 
 	// Compute merged bounds in WGS84.

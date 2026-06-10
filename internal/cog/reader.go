@@ -83,21 +83,22 @@ func (b Bounds) CenterLat() float64 {
 // Reader provides tile-level access to a COG/GeoTIFF file.
 // The file is memory-mapped for lock-free concurrent access.
 type Reader struct {
-	data    []byte // memory-mapped file contents
-	bo      binary.ByteOrder
-	ifds    []IFD
-	geo     GeoInfo
-	path    string
-	id      int          // unique numeric ID for fast cache keying (set by OpenAll)
-	strip   *stripLayout // non-nil for strip-based TIFFs promoted to virtual tiles
-	bandCfg BandConfig   // band selection and rescaling config (set via SetBandConfig)
+	bo    binary.ByteOrder
+	strip *stripLayout // non-nil for strip-based TIFFs promoted to virtual tiles
 
 	// floodMask, when non-nil, replaces per-pixel nodata-tolerance matching.
 	// Bit (y*floodMaskW + x) set ⇒ that source pixel is transparent. Built by
 	// BuildFloodMask: it captures the connected component of near-nodata pixels
 	// reachable from the COG's outer boundary, so interior dark pixels stay
 	// opaque even when --nodata-tolerance is widened.
-	floodMask  *bitmap
+	floodMask *bitmap
+
+	path       string
+	data       []byte // memory-mapped file contents
+	ifds       []IFD
+	geo        GeoInfo
+	bandCfg    BandConfig // band selection and rescaling config (set via SetBandConfig)
+	id         int        // unique numeric ID for fast cache keying (set by OpenAll)
 	floodMaskW int
 	floodMaskH int
 }
@@ -579,11 +580,21 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A built flood mask supersedes per-pixel nodata matching at level 0.
-	if r.floodMask != nil && level == 0 {
-		ifd := &r.ifds[0]
+	// A built flood mask supersedes per-pixel nodata matching. Level 0 maps
+	// 1:1 onto the mask; overview levels sample the mask at the center of
+	// each overview pixel's level-0 footprint so transparency survives reads
+	// through OverviewForZoom (e.g. when --max-zoom is below the source's
+	// native resolution).
+	if r.floodMask != nil {
+		ifd := &r.ifds[level]
+		tw := int(ifd.TileWidth)
+		th := int(ifd.TileHeight)
 		rgba := toRGBA(img)
-		r.applyFloodMaskRGBA(rgba, col*int(ifd.TileWidth), row*int(ifd.TileHeight), int(ifd.TileWidth), int(ifd.TileHeight))
+		if level == 0 {
+			r.applyFloodMaskRGBA(rgba, col*tw, row*th, tw, th)
+		} else {
+			r.applyFloodMaskRGBAScaled(rgba, int(ifd.Width), int(ifd.Height), col*tw, row*th, tw, th)
+		}
 		return rgba, nil
 	}
 	return img, nil
@@ -1690,8 +1701,8 @@ func (r *Reader) GDALMeta() *GDALMeta {
 // Preset describes auto-detected settings derived from the GeoTIFF.
 type Preset struct {
 	Name    string     // e.g. "multispectral-rgbnir", "float-terrarium"
-	BandCfg BandConfig // fully configured bands, rescale, alpha (zero value for float)
 	Format  string     // suggested output format ("terrarium", ""), empty = no override
+	BandCfg BandConfig // fully configured bands, rescale, alpha (zero value for float)
 }
 
 // bandRoleKeywords maps canonical color roles to GDAL band DESCRIPTION keywords.

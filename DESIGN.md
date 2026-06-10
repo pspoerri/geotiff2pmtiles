@@ -145,20 +145,31 @@ absorbing legitimate interior dark pixels (text, shadows, forest canopy).
 set* and only making transparent the pixels in that set that are reachable
 through it from the COG's outer image boundary. Implementation:
 
-1. **Build** (`Reader.BuildFloodMask`): walk every source tile once with
+1. **Build** (`Reader.BuildFloodMask`): decode every source tile once with
    `HasNodata` temporarily cleared, populate a packed candidate bitmap (1 bit
-   per source pixel) for "all RGB within tolerance". Then 4-connected scanline
-   flood fill seeded from every boundary pixel (row 0, row H-1, col 0, col W-1)
-   that's in the candidate set; the flood writes a second packed bitmap which
-   is retained on the Reader. Memory: 2 × W·H/8 bytes during build, 1 × W·H/8
-   bytes resident.
+   per source pixel) for "all RGB within tolerance". Tile decoding — the
+   dominant cost — is fanned out over a worker pool; each worker assembles
+   word-local bit accumulators and merges them with `atomic.OrUint64`, so
+   horizontally adjacent tiles that share boundary words never race. Then a
+   (serial) 4-connected scanline flood fill seeded from every boundary pixel
+   (row 0, row H-1, col 0, col W-1) that's in the candidate set writes a
+   second packed bitmap which is retained on the Reader. Memory: 2 × W·H/8
+   bytes during build, 1 × W·H/8 bytes resident. The CLI additionally builds
+   masks for up to 4 sources concurrently, dividing the `--concurrency`
+   budget among them.
 2. **Use**: the three decode paths (`decodeJPEGTile`, `decodePlanarSeparateJPEG`,
    `decodeRawTile`) skip their own nodata logic when `Reader.floodMask != nil`
-   — leaving RGB *intact*. `ReadTile` then calls `applyFloodMaskRGBA` to zero
-   alpha at the source-pixel coordinates marked transparent. Skipping the
-   per-pixel masking is essential: if the decode path zeroed RGB for every
-   candidate, interior false positives would be permanently destroyed and the
-   mask couldn't recover them.
+   — leaving RGB *intact*. `ReadTile` then zeroes alpha at the marked
+   coordinates: at level 0 via `applyFloodMaskRGBA`, which walks the mask a
+   64-pixel word at a time (all-zero words — the common case on interior
+   tiles — cost one load; set bits are visited by trailing-zeros iteration);
+   at overview levels via `applyFloodMaskRGBAScaled`, which samples the
+   level-0 mask at the center of each overview pixel's footprint so
+   transparency survives reads through `OverviewForZoom` (e.g. when
+   `--max-zoom` sits below the source's native resolution). Skipping the
+   per-pixel masking in the decode paths is essential: if they zeroed RGB for
+   every candidate, interior false positives would be permanently destroyed
+   and the mask couldn't recover them.
 
 The scanline flood is preferred over breadth-first / depth-first traversal
 because its peak queue size scales with the *perimeter* of the flooded region,
@@ -170,7 +181,8 @@ Trade-offs vs per-tile flood fill:
   artefacts and can mark interior tiles that happen to be fully outside the
   scan as opaque (no edge pixel to seed from).
 - Source-level flood is global and seam-free, but costs an upfront decode pass
-  (~6.5 s for a 158 MB JPEG-compressed BigTIFF) plus the resident bitmap.
+  (~6.5 s single-threaded for a 158 MB JPEG-compressed BigTIFF; the parallel
+  build divides that by roughly the worker count) plus the resident bitmap.
 - Building at a downsampled overview would be cheaper still, but historic
   scans like the motivating Katahdin file have no overviews. A future
   optimisation: build the mask on the smallest available overview and

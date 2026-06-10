@@ -116,7 +116,7 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--rescale-range` |             | Input value range `min,max` for rescaling (required for 16-bit data) |
 | `--nodata`      |               | Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set). When set without `--format`, output auto-switches from `jpeg` to `webp` so transparency is preserved. |
 | `--nodata-tolerance` | `0`      | Per-band tolerance for `--nodata` matching. Use 4–8 for borders that come from lossy JPEG sources, where the strict nodata value is smeared by compression. |
-| `--nodata-flood` | `false`     | Source-level flood-fill from the COG outer edges through near-nodata pixels. Only the connected component reachable from the image boundary becomes transparent; interior dark pixels (text, shadows, canopy) stay opaque even when tolerance is widened. Pair with a generous `--nodata-tolerance` (e.g. 40) to clean up JPEG-smeared boundaries. Costs ~W·H/8 bytes RAM per source plus an upfront decode pass. |
+| `--nodata-flood` | `false`     | Source-level flood-fill from the COG outer edges through near-nodata pixels. Only the connected component reachable from the image boundary becomes transparent; interior dark pixels (text, shadows, canopy) stay opaque even when tolerance is widened. Pair with a generous `--nodata-tolerance` (e.g. 40) to clean up JPEG-smeared boundaries. Costs ~W·H/8 bytes RAM per source plus an upfront decode pass (parallelized across `--concurrency` workers and up to 4 sources at once). |
 | `--verbose`     | `false`       | Verbose progress output                            |
 | `--version`     |               | Print version and exit                             |
 | `--cpuprofile`  |               | Write CPU profile to file                          |
@@ -171,7 +171,8 @@ Same source but the boundary still shows JPEG-smear speckles — flood-fill from
 ```bash
 ./geotiff2pmtiles --nodata 0 --nodata-tolerance 40 --nodata-flood \
   scan.tif output.pmtiles
-# Flood mask built for source 1/1 (scan.tif) in 6.5s
+# Building nodata flood masks for 1 source(s)...
+# Flood masks built in 710ms
 ```
 
 Elevation data (auto-detects float GeoTIFF and selects Terrarium encoding):
