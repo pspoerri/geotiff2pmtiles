@@ -13,12 +13,12 @@ import (
 // It refreshes at a fixed interval and supports concurrent Increment calls
 // from multiple worker goroutines.
 type progressBar struct {
+	done      chan struct{}
+	start     time.Time
+	label     string
 	total     int64
 	processed atomic.Int64
-	label     string
 	barWidth  int
-	start     time.Time
-	done      chan struct{}
 	mu        sync.Mutex
 }
 

@@ -59,30 +59,30 @@ const (
 
 // IFD represents a parsed TIFF Image File Directory.
 type IFD struct {
-	Width           uint32
-	Height          uint32
-	TileWidth       uint32
-	TileHeight      uint32
+	GDALMetadata    *GDALMeta // parsed GDAL_METADATA XML (tag 42112), nil if absent
+	GeoAsciiParams  string
+	NoData          string
 	BitsPerSample   []uint16
-	SamplesPerPixel uint16
 	SampleFormat    []uint16
-	Compression     uint16
-	Photometric     uint16
-	PlanarConfig    uint16
-	Predictor       uint16
 	TileOffsets     []uint64
 	TileByteCounts  []uint64
 	StripOffsets    []uint64
 	StripByteCounts []uint64
-	RowsPerStrip    uint32
 	JPEGTables      []byte
 	ModelTiepoint   []float64
 	ModelPixelScale []float64
 	GeoKeys         []uint16
 	GeoDoubleParams []float64
-	GeoAsciiParams  string
-	NoData          string
-	GDALMetadata    *GDALMeta // parsed GDAL_METADATA XML (tag 42112), nil if absent
+	Width           uint32
+	Height          uint32
+	TileWidth       uint32
+	TileHeight      uint32
+	RowsPerStrip    uint32
+	SamplesPerPixel uint16
+	Compression     uint16
+	Photometric     uint16
+	PlanarConfig    uint16
+	Predictor       uint16
 }
 
 // GDALMeta holds parsed GDAL_METADATA XML items from tag 42112.
@@ -112,10 +112,10 @@ func (ifd *IFD) TilesDown() int {
 
 // tiffEntry is a raw TIFF directory entry.
 type tiffEntry struct {
+	Value    []byte // raw value bytes or inline value
+	Count    uint64
 	Tag      uint16
 	DataType uint16
-	Count    uint64
-	Value    []byte // raw value bytes or inline value
 }
 
 // parseTIFF reads all IFDs from a TIFF file.

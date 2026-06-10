@@ -166,9 +166,10 @@ func main() {
 }
 
 type patchOptions struct {
-	showOnly     bool
-	verbose      bool
-	rebuildDirs  bool
+	tileTypeStr  string
+	metadataFile string
+	setKV        []string
+	unsetKeys    []string
 	minZoom      optInt
 	maxZoom      optInt
 	centerZoom   optInt
@@ -178,10 +179,9 @@ type patchOptions struct {
 	maxLat       optFloat32
 	centerLon    optFloat32
 	centerLat    optFloat32
-	tileTypeStr  string
-	setKV        []string
-	unsetKeys    []string
-	metadataFile string
+	showOnly     bool
+	verbose      bool
+	rebuildDirs  bool
 }
 
 func patch(inputPath, outputPath string, opts patchOptions) error {

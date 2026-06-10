@@ -31,9 +31,9 @@ const (
 
 // ioRequest is sent from Put() to the I/O goroutine for async disk writes.
 type ioRequest struct {
-	key      [3]int
 	encoded  []byte // pre-encoded tile bytes (PNG/WebP/JPEG)
 	memBytes int64  // memory to reclaim when evicted from in-memory store
+	key      [3]int
 }
 
 // DiskTileStore is a concurrent-safe tile store that keeps tiles in memory
@@ -62,52 +62,52 @@ type ioRequest struct {
 // Readers access it via an atomic pointer (lock-free ReadAt), so file I/O
 // never contends with the map mutex.
 type DiskTileStore struct {
-	mu       sync.RWMutex
 	uniforms map[[3]int]*TileData // uniform tiles (tiny, never spilled)
 	encoded  map[[3]int][]byte    // encoded non-uniform tiles in memory
 	index    map[[3]int]diskEntry // disk index (populated by I/O goroutine)
-	tileSize int
-	format   string // encoder format for decode path ("png", "jpeg", "webp", "terrarium")
 
 	// Read-only file handle for Get(). Set once by ioLoop on first write,
 	// never reassigned. Readers use atomic load + ReadAt (pread, no locking).
 	readFile atomic.Pointer[os.File]
-	dir      string // directory for temp files
+
+	memCond  *sync.Cond     // signaled by ioLoop when memBytes decreases; nil when spilling is off
+	ioCh     chan ioRequest // tiles to write to disk (consumed by the I/O goroutine)
+	format   string         // encoder format for decode path ("png", "jpeg", "webp", "terrarium")
+	dir      string         // directory for temp files
+	tileSize int
+	mu       sync.RWMutex
 
 	// Memory tracking.
 	memBytes    atomic.Int64 // estimated bytes of in-memory encoded tile data
 	mapOverhead atomic.Int64 // estimated bytes for map entry overhead (uniforms + index)
 	memoryLimit int64        // max total memory before blocking Put(); 0 = no limit
 	spillMu     sync.Mutex   // protects memCond waits (separate from mu to avoid contention)
-	memCond     *sync.Cond   // signaled by ioLoop when memBytes decreases; nil when spilling is off
 
 	// Dedicated I/O goroutine.
-	ioCh      chan ioRequest // tiles to write to disk
 	ioWg      sync.WaitGroup // for Drain()
 	drainOnce sync.Once      // ensures Drain() is idempotent
+	verbose   bool
 
 	// Stats (updated by I/O goroutine only, read after Drain).
 	totalDiskTiles int64 // tiles written to disk
 	totalDiskBytes int64 // total encoded bytes on disk
-
-	verbose bool
 }
 
 // DiskTileStoreConfig configures the disk-backed tile store.
 type DiskTileStoreConfig struct {
+	// TempDir is the directory for spill files. Defaults to the OS temp dir.
+	TempDir string
+	// Format is the encoder format name (e.g. "png", "jpeg", "webp", "terrarium").
+	// Required when MemoryLimitBytes > 0 so that tiles can be decoded on read-back.
+	Format string
 	// InitialCapacity is the estimated number of tiles for map pre-allocation.
 	InitialCapacity int
 	// TileSize is the tile dimension in pixels (e.g. 256).
 	TileSize int
-	// TempDir is the directory for spill files. Defaults to the OS temp dir.
-	TempDir string
 	// MemoryLimitBytes enables continuous disk spilling when > 0. Tiles are
 	// written to disk by a dedicated I/O goroutine, encoded in the target
 	// format for reduced disk usage. Set to 0 to disable (pure in-memory mode).
 	MemoryLimitBytes int64
-	// Format is the encoder format name (e.g. "png", "jpeg", "webp", "terrarium").
-	// Required when MemoryLimitBytes > 0 so that tiles can be decoded on read-back.
-	Format string
 	// Verbose enables logging of I/O events.
 	Verbose bool
 }

@@ -29,20 +29,20 @@ const (
 
 // TransformConfig holds configuration for the PMTiles transform pipeline.
 type TransformConfig struct {
+	Encoder          encode.Encoder
+	FillColor        *color.RGBA
+	SourceFormat     string // format of input tiles (for decoding)
+	OutputDir        string
 	MinZoom          int
 	MaxZoom          int
 	TileSize         int
 	Concurrency      int
-	Verbose          bool
-	Encoder          encode.Encoder
-	SourceFormat     string // format of input tiles (for decoding)
 	Resampling       Resampling
 	ResamplingGamma  float64 // power-law gamma for resampling interpolation (1.0 = disabled)
 	Mode             TransformMode
-	FillColor        *color.RGBA
 	Bounds           [4]float32 // MinLon, MinLat, MaxLon, MaxLat
 	MemoryLimitBytes int64
-	OutputDir        string
+	Verbose          bool
 }
 
 // PMTilesReader is the interface for reading tiles from a PMTiles archive.
