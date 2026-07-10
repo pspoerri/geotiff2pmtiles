@@ -1,5 +1,7 @@
 data2/
 dist/
+/*.tif
+.claude/settings.local.json
 integration/testdata/**/*.tif
 integration/testdata/**/*.tfw
 integration/testdata/**/*.zip
