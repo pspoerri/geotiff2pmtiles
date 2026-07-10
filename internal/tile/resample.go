@@ -75,7 +75,8 @@ type tileSource struct {
 	maxCRSX        float64
 	maxCRSY        float64
 	level          int
-	levelPixelSize float64
+	levelPixelSize  float64
+	levelPixelSizeY float64
 	imgW           int
 	imgH           int
 	tileW          int // source tile width (pixels per COG tile)
@@ -98,18 +99,19 @@ func prepareTileSources(srcInfos []sourceInfo, outputResCRS float64, tileMinCRSX
 		level := src.reader.OverviewForZoom(outputResCRS)
 		ifd := src.reader.IFDTileSize(level)
 		result = append(result, tileSource{
-			reader:         src.reader,
-			geo:            src.geo,
-			minCRSX:        src.minCRSX,
-			minCRSY:        src.minCRSY,
-			maxCRSX:        src.maxCRSX,
-			maxCRSY:        src.maxCRSY,
-			level:          level,
-			levelPixelSize: src.reader.IFDPixelSize(level),
-			imgW:           src.reader.IFDWidth(level),
-			imgH:           src.reader.IFDHeight(level),
-			tileW:          ifd[0],
-			tileH:          ifd[1],
+			reader:          src.reader,
+			geo:             src.geo,
+			minCRSX:         src.minCRSX,
+			minCRSY:         src.minCRSY,
+			maxCRSX:         src.maxCRSX,
+			maxCRSY:         src.maxCRSY,
+			level:           level,
+			levelPixelSize:  src.reader.IFDPixelSize(level),
+			levelPixelSizeY: src.reader.IFDPixelSizeY(level),
+			imgW:            src.reader.IFDWidth(level),
+			imgH:            src.reader.IFDHeight(level),
+			tileW:           ifd[0],
+			tileH:           ifd[1],
 		})
 	}
 	return result
@@ -211,7 +213,7 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 
 		// Convert CRS coordinates to pixel coordinates using pre-computed level data.
 		pixX := (srcX - src.geo.OriginX) / src.levelPixelSize
-		pixY := (src.geo.OriginY - srcY) / src.levelPixelSize
+		pixY := (src.geo.OriginY - srcY) / src.levelPixelSizeY
 
 		// Check bounds.
 		if pixX < 0 || pixX >= float64(src.imgW) || pixY < 0 || pixY >= float64(src.imgH) {
@@ -1519,7 +1521,7 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, sr
 		}
 
 		pixX := (srcX - src.geo.OriginX) / src.levelPixelSize
-		pixY := (src.geo.OriginY - srcY) / src.levelPixelSize
+		pixY := (src.geo.OriginY - srcY) / src.levelPixelSizeY
 
 		if pixX < 0 || pixX >= float64(src.imgW) || pixY < 0 || pixY >= float64(src.imgH) {
 			continue
