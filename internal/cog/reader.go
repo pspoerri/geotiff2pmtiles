@@ -1615,6 +1615,13 @@ func (r *Reader) IFDPixelSize(level int) float64 {
 	return r.geo.PixelSizeX * float64(r.ifds[0].Width) / float64(r.ifds[level].Width)
 }
 
+// IFDPixelSizeY returns the pixel size in the Y direction (CRS units) for the
+// given IFD level. Unlike IFDPixelSize which uses Width-based scaling, this
+// uses Height-based scaling for non-square pixels.
+func (r *Reader) IFDPixelSizeY(level int) float64 {
+	return math.Abs(r.geo.PixelSizeY) * float64(r.ifds[0].Height) / float64(r.ifds[level].Height)
+}
+
 func (r *Reader) IFDWidth(level int) int {
 	return int(r.ifds[level].Width)
 }
