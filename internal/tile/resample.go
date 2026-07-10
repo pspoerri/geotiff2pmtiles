@@ -68,19 +68,19 @@ func buildSourceInfos(sources []*cog.Reader) []sourceInfo {
 // pixels within a single output tile, so computing them once per tile instead
 // of per pixel eliminates millions of redundant OverviewForZoom iterations.
 type tileSource struct {
-	reader         *cog.Reader
-	geo            cog.GeoInfo
-	minCRSX        float64
-	minCRSY        float64
-	maxCRSX        float64
-	maxCRSY        float64
-	level          int
+	reader          *cog.Reader
+	geo             cog.GeoInfo
+	minCRSX         float64
+	minCRSY         float64
+	maxCRSX         float64
+	maxCRSY         float64
+	level           int
 	levelPixelSize  float64
 	levelPixelSizeY float64
-	imgW           int
-	imgH           int
-	tileW          int // source tile width (pixels per COG tile)
-	tileH          int // source tile height (pixels per COG tile)
+	imgW            int
+	imgH            int
+	tileW           int // source tile width (pixels per COG tile)
+	tileH           int // source tile height (pixels per COG tile)
 }
 
 // prepareTileSources filters the full source list to only those overlapping

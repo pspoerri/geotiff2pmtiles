@@ -54,7 +54,7 @@ integration/
 ## Pipeline
 
 1. **Scan**: Collect and open GeoTIFF/COG input files (tiled or strip-based, with optional TFW sidecar)
-2. **Metadata**: Parse GeoTIFF tags (or TFW) for CRS, bounds, and resolution; promote strips to virtual tiles
+2. **Metadata**: Parse GeoTIFF tags (or TFW) for CRS, bounds, and resolution; promote strips (chunky or planar-separate) to virtual tiles
 3. **Plan**: Compute merged WGS84 bounds and zoom range; auto-detect float data
 4. **Generate (max zoom)**: Enumerate tiles, sort by Hilbert curve, distribute to worker pool
 5. **Reproject**: Per-pixel inverse projection from output tile to source CRS

@@ -32,7 +32,7 @@ Real satellite and raster test data is downloaded via `make test-integration-dow
 
 - GeoTIFF / Cloud Optimized GeoTIFF (COG) files
 - Plain TIFF with TFW (TIFF World File) sidecar for georeferencing
-- Strip-based and tiled TIFF layouts
+- Strip-based and tiled TIFF layouts, pixel- or band-interleaved (planar-separate strips: all compressions except JPEG)
 - TIFF compression: JPEG, LZW, Deflate/Zlib, and uncompressed (with predictor support)
 - Sample formats: 8-bit RGB/RGBA, 16-bit uint16 (with linear/log rescaling), Float32/Float64 (for elevation/DEM data)
 - Band reordering and alpha band selection for multi-band GeoTIFFs (e.g. RGBNIR false-color composites)

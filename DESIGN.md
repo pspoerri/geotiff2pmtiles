@@ -43,6 +43,14 @@ least 256 rows to ensure resampling kernels (Lanczos 6×6) never span more than 
 tiles. At read time, individual strips are read and decompressed separately then
 concatenated, so non-contiguous strip storage is handled correctly.
 
+Planar-separate strip files (PlanarConfiguration=2, GDAL INTERLEAVE=BAND — GDAL's
+default when copying from a band-interleaved source) store each band's strips
+consecutively, plane-major. Virtual tiles are derived from one plane's worth of
+strips; at read time each plane's strips are decompressed (with the predictor
+undone at samplesPerPixel=1) and interleaved into chunky order so downstream
+decoding is layout-agnostic. JPEG-compressed planar strips are rejected, since
+encoded planes cannot be byte-interleaved.
+
 ## EPSG inference from coordinates
 
 When GeoTIFF tags don't provide an EPSG code, the coordinate ranges from the TFW are

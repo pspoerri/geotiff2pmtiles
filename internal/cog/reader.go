@@ -105,11 +105,15 @@ type Reader struct {
 
 // stripLayout stores the original strip layout for strip-based TIFFs.
 // Virtual tiles are composed from multiple strips at read time.
+// For planar-separate files (PlanarConfiguration=2) the strip sequence is
+// plane-major: all of plane 0's strips, then plane 1's, and so on.
 type stripLayout struct {
-	offsets       []uint64
-	byteCounts    []uint64
-	rowsPerStrip  uint32
-	stripsPerTile int // number of original strips per virtual tile
+	offsets        []uint64
+	byteCounts     []uint64
+	rowsPerStrip   uint32
+	stripsPerTile  int // number of original strips per virtual tile
+	stripsPerPlane int // strips covering one plane (== total strips when chunky)
+	planes         int // 1 for chunky; SamplesPerPixel for planar-separate
 }
 
 // Open opens a COG/GeoTIFF file by memory-mapping it and parsing its structure.
@@ -216,8 +220,18 @@ func promoteStripsToTiles(ifd *IFD) *stripLayout {
 	}
 	virtualTileH := rps * uint32(stripsPerTile)
 
-	totalStrips := len(ifd.StripOffsets)
-	numVirtualTiles := (totalStrips + stripsPerTile - 1) / stripsPerTile
+	// Planar-separate files store each band's strips consecutively, so the
+	// strip count is planes * stripsPerPlane and virtual tiles must be
+	// derived from one plane's worth of strips.
+	planes := 1
+	if ifd.PlanarConfig == 2 && ifd.SamplesPerPixel > 1 {
+		planes = int(ifd.SamplesPerPixel)
+	}
+	stripsPerPlane := int((ifd.Height + rps - 1) / rps)
+	if maxPerPlane := len(ifd.StripOffsets) / planes; stripsPerPlane > maxPerPlane {
+		stripsPerPlane = maxPerPlane // malformed file: fewer strips than rows imply
+	}
+	numVirtualTiles := (stripsPerPlane + stripsPerTile - 1) / stripsPerTile
 
 	virtualOffsets := make([]uint64, numVirtualTiles)
 	virtualByteCounts := make([]uint64, numVirtualTiles)
@@ -226,20 +240,24 @@ func promoteStripsToTiles(ifd *IFD) *stripLayout {
 		virtualOffsets[i] = ifd.StripOffsets[startStrip]
 		var totalBytes uint64
 		endStrip := startStrip + stripsPerTile
-		if endStrip > totalStrips {
-			endStrip = totalStrips
+		if endStrip > stripsPerPlane {
+			endStrip = stripsPerPlane
 		}
-		for s := startStrip; s < endStrip; s++ {
-			totalBytes += ifd.StripByteCounts[s]
+		for p := 0; p < planes; p++ {
+			for s := startStrip; s < endStrip; s++ {
+				totalBytes += ifd.StripByteCounts[p*stripsPerPlane+s]
+			}
 		}
 		virtualByteCounts[i] = totalBytes
 	}
 
 	sl := &stripLayout{
-		offsets:       ifd.StripOffsets,
-		byteCounts:    ifd.StripByteCounts,
-		rowsPerStrip:  rps,
-		stripsPerTile: stripsPerTile,
+		offsets:        ifd.StripOffsets,
+		byteCounts:     ifd.StripByteCounts,
+		rowsPerStrip:   rps,
+		stripsPerTile:  stripsPerTile,
+		stripsPerPlane: stripsPerPlane,
+		planes:         planes,
 	}
 
 	ifd.TileWidth = ifd.Width
@@ -382,18 +400,73 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 }
 
 // readStripTileRaw reads the strips that compose a virtual tile row and
-// returns the concatenated, decompressed bytes.
+// returns the concatenated, decompressed bytes. Planar-separate strips are
+// interleaved into chunky order so downstream decoding sees a normal tile.
 func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 	sl := r.strip
 	startStrip := tileRow * sl.stripsPerTile
 	endStrip := startStrip + sl.stripsPerTile
-	if endStrip > len(sl.offsets) {
-		endStrip = len(sl.offsets)
+	if endStrip > sl.stripsPerPlane {
+		endStrip = sl.stripsPerPlane
 	}
 
+	if sl.planes == 1 {
+		combined, err := r.readStripsRaw(ifd, startStrip, endStrip)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(combined) == 0 {
+			return nil, ifd, nil
+		}
+		applyPredictor(ifd, combined, int(ifd.Width), r.bo)
+		return combined, ifd, nil
+	}
+
+	// Planar-separate: read each plane's strips for this tile row, then
+	// interleave samples. JPEG strips cannot be byte-interleaved.
+	if ifd.Compression == 7 {
+		return nil, nil, fmt.Errorf("planar-separate (PlanarConfiguration=2) strip TIFFs with JPEG compression are not supported")
+	}
+	bps := ifd.bytesPerSample()
+	planeBufs := make([][]byte, sl.planes)
+	total := 0
+	for p := 0; p < sl.planes; p++ {
+		buf, err := r.readStripsRaw(ifd, p*sl.stripsPerPlane+startStrip, p*sl.stripsPerPlane+endStrip)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Each plane row holds one sample per pixel, so the predictor is
+		// undone with samplesPerPixel=1 before interleaving.
+		switch ifd.Predictor {
+		case 2:
+			undoHorizontalDifferencing(buf, int(ifd.Width), 1, bps, r.bo)
+		case 3:
+			undoFloatingPointPredictor(buf, int(ifd.Width), 1, bps)
+		}
+		planeBufs[p] = buf
+		total += len(buf)
+	}
+	if total == 0 {
+		return nil, ifd, nil
+	}
+	combined := make([]byte, total)
+	for p, buf := range planeBufs {
+		for i := 0; i+bps <= len(buf); i += bps {
+			copy(combined[(i/bps*sl.planes+p)*bps:], buf[i:i+bps])
+		}
+	}
+	return combined, ifd, nil
+}
+
+// readStripsRaw decompresses and concatenates strips [start, end).
+func (r *Reader) readStripsRaw(ifd *IFD, start, end int) ([]byte, error) {
+	sl := r.strip
 	var combined []byte
 
-	for s := startStrip; s < endStrip; s++ {
+	for s := start; s < end; s++ {
+		if s >= len(sl.offsets) || s >= len(sl.byteCounts) {
+			return nil, fmt.Errorf("strip %d out of range (%d strips)", s, len(sl.offsets))
+		}
 		offset := sl.offsets[s]
 		size := sl.byteCounts[s]
 		if size == 0 {
@@ -401,7 +474,7 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 		}
 		end := offset + size
 		if end > uint64(len(r.data)) {
-			return nil, nil, fmt.Errorf("strip %d data [%d:%d] exceeds file size %d", s, offset, end, len(r.data))
+			return nil, fmt.Errorf("strip %d data [%d:%d] exceeds file size %d", s, offset, end, len(r.data))
 		}
 
 		chunk := r.data[offset:end]
@@ -414,26 +487,21 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 		case 8, 32946: // Deflate / zlib
 			dec, err := decompressDeflate(chunk)
 			if err != nil {
-				return nil, nil, fmt.Errorf("decompressing deflate strip %d: %w", s, err)
+				return nil, fmt.Errorf("decompressing deflate strip %d: %w", s, err)
 			}
 			combined = append(combined, dec...)
 		case 5: // LZW
 			dec, err := decompressLZW(chunk)
 			if err != nil {
-				return nil, nil, fmt.Errorf("decompressing LZW strip %d: %w", s, err)
+				return nil, fmt.Errorf("decompressing LZW strip %d: %w", s, err)
 			}
 			combined = append(combined, dec...)
 		default:
-			return nil, nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
+			return nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
 		}
 	}
 
-	if len(combined) == 0 {
-		return nil, ifd, nil
-	}
-
-	applyPredictor(ifd, combined, int(ifd.Width), r.bo)
-	return combined, ifd, nil
+	return combined, nil
 }
 
 // applyPredictor reverses TIFF predictor encoding on decompressed data.
