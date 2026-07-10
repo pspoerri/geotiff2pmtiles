@@ -320,11 +320,13 @@ original values. Supported for 8-bit, 16-bit, and 32-bit data, with multi-byte d
 accumulated at the sample width using the TIFF byte order.
 
 **Predictor=3** (floating-point predictor) is the standard for float32/float64 data
-compressed with Deflate or LZW (GDAL default). It first byte-shuffles each row so
-all byte-0 of all samples are grouped together, then byte-1, etc., then applies
-byte-level horizontal differencing. Reversing it: (1) undo byte differencing by
-accumulating bytes, (2) unshuffle to restore each sample's bytes to contiguous order.
-Without this, float tile data appears as garbled values producing banding artifacts.
+compressed with Deflate or LZW (GDAL default). It first byte-shuffles each row into
+byte planes — most-significant byte plane first, regardless of file byte order
+(matching libtiff's fpDiff/fpAcc) — then applies byte-level horizontal differencing
+at a stride of samplesPerPixel. Reversing it: (1) undo byte differencing by
+accumulating bytes at the same stride, (2) unshuffle the MSB-first planes back into
+the file's byte order. Getting the plane order wrong scrambles exponent bytes into
+the mantissa, turning float tiles into full-range noise.
 
 ## BandConfig: band reordering, alpha, and rescaling
 

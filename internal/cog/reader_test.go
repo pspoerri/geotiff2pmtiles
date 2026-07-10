@@ -101,45 +101,57 @@ func TestUndoHorizontalDifferencing32Bit(t *testing.T) {
 	}
 }
 
-func TestUndoFloatingPointPredictor(t *testing.T) {
-	bo := binary.LittleEndian
-	// 3 pixels wide, 1 sample per pixel, float32 (4 bytes per sample).
-	// Original float values: 1.0, 2.0, 3.0
-	// Step 1 (encode): byte-shuffle each row — group all byte-0, byte-1, byte-2, byte-3.
-	// Step 2 (encode): byte-level horizontal differencing.
-	// To create test data, we reverse the process.
-
-	origFloats := []float32{1.0, 2.0, 3.0}
-	origBytes := make([]byte, 12)
-	for i, f := range origFloats {
-		bo.PutUint32(origBytes[i*4:i*4+4], math.Float32bits(f))
+// encodeFloatPredictor applies TIFF predictor=3 the way libtiff's fpDiff does:
+// byte-shuffle into planes with the most-significant byte plane first
+// (independent of file byte order), then byte-level horizontal differencing
+// at a stride of samplesPerPixel.
+func encodeFloatPredictor(values []float32, spp int, bo binary.ByteOrder) []byte {
+	n := len(values)
+	raw := make([]byte, n*4)
+	for i, f := range values {
+		bo.PutUint32(raw[i*4:], math.Float32bits(f))
 	}
-
-	// Byte-shuffle: group by byte position.
-	shuffled := make([]byte, 12)
-	for s := 0; s < 3; s++ {
+	shuffled := make([]byte, len(raw))
+	for s := 0; s < n; s++ {
 		for b := 0; b < 4; b++ {
-			shuffled[b*3+s] = origBytes[s*4+b]
+			plane := b // big-endian: byte 0 is already the MSB
+			if bo == binary.LittleEndian {
+				plane = 3 - b
+			}
+			shuffled[plane*n+s] = raw[s*4+b]
 		}
 	}
-
-	// Byte-level differencing.
-	encoded := make([]byte, 12)
-	encoded[0] = shuffled[0]
-	for i := 1; i < 12; i++ {
-		encoded[i] = shuffled[i] - shuffled[i-1]
+	encoded := make([]byte, len(shuffled))
+	copy(encoded, shuffled)
+	for i := len(encoded) - 1; i >= spp; i-- {
+		encoded[i] -= encoded[i-spp]
 	}
+	return encoded
+}
 
-	// Now undo.
-	undoFloatingPointPredictor(encoded, 3, 1, 4)
-
-	// Verify we get the original float values back.
-	for i, want := range origFloats {
-		bits := bo.Uint32(encoded[i*4 : i*4+4])
-		got := math.Float32frombits(bits)
-		if got != want {
-			t.Errorf("pixel %d: got %v, want %v", i, got, want)
-		}
+func TestUndoFloatingPointPredictor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bo   binary.ByteOrder
+		spp  int
+		vals []float32
+	}{
+		{"little-endian spp=1", binary.LittleEndian, 1, []float32{1.0, 2.0, 3.0}},
+		{"big-endian spp=1", binary.BigEndian, 1, []float32{1.0, 2.0, 3.0}},
+		{"little-endian spp=3", binary.LittleEndian, 3, []float32{1, -2, 3.5, 4096, 0.25, -1e9}},
+		{"realistic elevations", binary.LittleEndian, 1, []float32{1479.0, 1480.25, 1476.5, -32767, 8848.86, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			width := len(tc.vals) / tc.spp
+			encoded := encodeFloatPredictor(tc.vals, tc.spp, tc.bo)
+			undoFloatingPointPredictor(encoded, width, tc.spp, 4, tc.bo)
+			for i, want := range tc.vals {
+				got := math.Float32frombits(tc.bo.Uint32(encoded[i*4 : i*4+4]))
+				if got != want {
+					t.Errorf("sample %d: got %v, want %v", i, got, want)
+				}
+			}
+		})
 	}
 }
 

@@ -412,6 +412,7 @@ func runPipeline(t *testing.T, cfg pipelineConfig) string {
 		Encoder:          enc,
 		Bounds:           mergedBounds,
 		Resampling:       resamplingMode,
+		IsTerrarium:      cfg.Format == "terrarium",
 		FillColor:        cfg.FillColor,
 		MemoryLimitBytes: memoryLimitBytes,
 		OutputDir:        outputDir,

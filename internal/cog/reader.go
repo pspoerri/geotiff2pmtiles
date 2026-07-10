@@ -441,7 +441,7 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 		case 2:
 			undoHorizontalDifferencing(buf, int(ifd.Width), 1, bps, r.bo)
 		case 3:
-			undoFloatingPointPredictor(buf, int(ifd.Width), 1, bps)
+			undoFloatingPointPredictor(buf, int(ifd.Width), 1, bps, r.bo)
 		}
 		planeBufs[p] = buf
 		total += len(buf)
@@ -510,7 +510,7 @@ func applyPredictor(ifd *IFD, data []byte, width int, bo binary.ByteOrder) {
 	case 2:
 		undoHorizontalDifferencing(data, width, int(ifd.SamplesPerPixel), ifd.bytesPerSample(), bo)
 	case 3:
-		undoFloatingPointPredictor(data, width, int(ifd.SamplesPerPixel), ifd.bytesPerSample())
+		undoFloatingPointPredictor(data, width, int(ifd.SamplesPerPixel), ifd.bytesPerSample(), bo)
 	}
 }
 
@@ -556,27 +556,34 @@ func undoHorizontalDifferencing(data []byte, width, samplesPerPixel, bytesPerSam
 
 // undoFloatingPointPredictor reverses TIFF predictor=3 (floating-point predictor).
 // Predictor=3 first byte-shuffles sample bytes (grouping by byte position across
-// all samples), then applies byte-level horizontal differencing.
-// To reverse: (1) undo byte differencing, (2) unshuffle bytes.
-func undoFloatingPointPredictor(data []byte, width, samplesPerPixel, bytesPerSample int) {
+// all samples, most-significant byte plane first regardless of file byte order),
+// then applies byte-level horizontal differencing at a stride of samplesPerPixel
+// (matching libtiff's fpDiff/fpAcc).
+// To reverse: (1) undo byte differencing, (2) unshuffle bytes back into the
+// file's byte order so downstream decoding with the file's ByteOrder works.
+func undoFloatingPointPredictor(data []byte, width, samplesPerPixel, bytesPerSample int, bo binary.ByteOrder) {
 	rowBytes := width * samplesPerPixel * bytesPerSample
 	tmp := make([]byte, rowBytes)
 
 	for off := 0; off+rowBytes <= len(data); off += rowBytes {
 		row := data[off : off+rowBytes]
 
-		// Step 1: Undo byte-level horizontal differencing.
-		for i := 1; i < rowBytes; i++ {
-			row[i] += row[i-1]
+		// Step 1: Undo byte-level horizontal differencing (stride = spp).
+		for i := samplesPerPixel; i < rowBytes; i++ {
+			row[i] += row[i-samplesPerPixel]
 		}
 
 		// Step 2: Byte-unshuffle.
-		// Encoded layout: all byte-0 of all samples, then all byte-1, etc.
-		// Target layout: sample-0 bytes together, sample-1 bytes together, etc.
+		// Encoded layout: MSB plane of all samples first, down to the LSB plane.
+		// Target layout: consecutive samples in the file's byte order.
 		sampleCount := width * samplesPerPixel
 		for s := 0; s < sampleCount; s++ {
 			for b := 0; b < bytesPerSample; b++ {
-				tmp[s*bytesPerSample+b] = row[b*sampleCount+s]
+				plane := b // big-endian file: byte b is plane b
+				if bo == binary.LittleEndian {
+					plane = bytesPerSample - 1 - b
+				}
+				tmp[s*bytesPerSample+b] = row[plane*sampleCount+s]
 			}
 		}
 		copy(row, tmp)
