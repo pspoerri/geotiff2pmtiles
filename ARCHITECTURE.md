@@ -78,6 +78,9 @@ The original file is never touched. Three processing modes are selected automati
 3. **Rebuild pyramid**: Zoom range extension or `--rebuild` flag — max-zoom tiles are decoded,
    then the entire lower-zoom pyramid is rebuilt via downsampling with the chosen resampling method.
    When `--tile-size` is omitted, the source tile size is discovered by decoding one tile.
+   Terrarium archives (detected via the `encoding` metadata key, or forced with `--terrarium`)
+   are downsampled in elevation space — per-channel RGBA averaging would corrupt elevations
+   at the 256 m channel boundaries.
 
 Empty tile filling (`--fill-color`) uses a color transformation model: transparent/
 nodata pixels are substituted with the target color rather than resampled. During

@@ -235,6 +235,7 @@ pmtransform [flags] <input.pmtiles> <output.pmtiles>
 | `--tile-size`   | keep source   | Output tile size in pixels (inferred from first decoded tile) |
 | `--resampling`  | `bicubic`     | Interpolation method: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
 | `--rebuild`     | `false`       | Force full pyramid rebuild (for resampling changes) |
+| `--terrarium`   | auto-detected | Treat tiles as terrarium-encoded elevations so rebuild downsamples in elevation space. Auto-detected from archive metadata written by geotiff2pmtiles |
 | `--fill-color`  | `0,0,0,0`     | Substitute transparent/nodata with RGBA color (color transform); also fill missing tile positions. E.g. `"0,0,0,255"` or `"#000000ff"` (default: transparent) |
 | `--concurrency` | `NumCPU`      | Number of parallel workers                         |
 | `--mem-limit`   | auto          | Tile store memory limit in MB (0 = auto ~90% of RAM) |

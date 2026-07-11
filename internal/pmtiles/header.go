@@ -199,7 +199,11 @@ type WriterOptions struct {
 	Attribution string
 	// Type categorizes the tileset: "baselayer" or "overlay".
 	// Defaults to "baselayer" when empty.
-	Type       string
+	Type string
+	// Encoding names the pixel encoding when it isn't plain imagery
+	// (e.g. "terrarium" for elevation-encoded PNG). Stored in the metadata
+	// JSON so tools like pmtransform can handle the tiles correctly.
+	Encoding   string
 	MinZoom    int
 	MaxZoom    int
 	TileSize   int

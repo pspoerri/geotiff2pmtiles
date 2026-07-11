@@ -57,6 +57,20 @@ func TestCopernicusDEM(t *testing.T) {
 			t.Errorf("elevation at (%v, %v): got %.1f m, want %.1f m ±75", pt.lon, pt.lat, got, pt.elevation)
 		}
 	}
+
+	// A pmtransform rebuild must keep elevations intact: the terrarium
+	// encoding is auto-detected from the archive metadata and the pyramid
+	// is downsampled in elevation space, not per-RGBA-channel.
+	rebuiltPath := runTransform(t, transformConfig{
+		InputPath: outPath,
+		MinZoom:   -1,
+		MaxZoom:   -1,
+		Rebuild:   true,
+	})
+	got := terrariumElevationAt(t, rebuiltPath, 9, 8.7, 46.1)
+	if math.Abs(got-193.0) > 75 {
+		t.Errorf("rebuilt elevation at (8.7, 46.1): got %.1f m, want 193.0 m ±75", got)
+	}
 }
 
 // terrariumElevationAt decodes the terrarium-encoded elevation at a lon/lat

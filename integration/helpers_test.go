@@ -418,6 +418,10 @@ func runPipeline(t *testing.T, cfg pipelineConfig) string {
 		OutputDir:        outputDir,
 	}
 
+	encoding := ""
+	if cfg.Format == "terrarium" {
+		encoding = "terrarium"
+	}
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
 		MinZoom:    minZoom,
 		MaxZoom:    maxZoom,
@@ -426,6 +430,7 @@ func runPipeline(t *testing.T, cfg pipelineConfig) string {
 		TileSize:   cfg.TileSize,
 		TempDir:    outputDir,
 		Type:       "baselayer",
+		Encoding:   encoding,
 	})
 	if err != nil {
 		t.Fatalf("pmtiles.NewWriter: %v", err)
@@ -482,6 +487,14 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 
 	srcHeader := reader.Header()
 	srcFormat := pmtiles.TileTypeString(srcHeader.TileType)
+
+	// Auto-detect terrarium encoding from source metadata, like the CLI.
+	terrarium := false
+	if srcMeta, err := reader.ReadMetadata(); err == nil && srcMeta != nil {
+		if v, ok := srcMeta["encoding"].(string); ok && v == "terrarium" {
+			terrarium = true
+		}
+	}
 
 	// Resolve format.
 	format := cfg.Format
@@ -540,8 +553,13 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 		FillColor:    cfg.FillColor,
 		Bounds:       bounds,
 		OutputDir:    outputDir,
+		IsTerrarium:  terrarium,
 	}
 
+	encoding := ""
+	if terrarium {
+		encoding = "terrarium"
+	}
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
 		MinZoom:    minZoom,
 		MaxZoom:    maxZoom,
@@ -550,6 +568,7 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 		TileSize:   tileSize,
 		TempDir:    outputDir,
 		Type:       "baselayer",
+		Encoding:   encoding,
 	})
 	if err != nil {
 		t.Fatalf("pmtiles.NewWriter: %v", err)

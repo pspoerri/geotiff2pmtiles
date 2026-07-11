@@ -43,6 +43,10 @@ type TransformConfig struct {
 	Bounds           [4]float32 // MinLon, MinLat, MaxLon, MaxLat
 	MemoryLimitBytes int64
 	Verbose          bool
+	// IsTerrarium marks tiles as terrarium-encoded elevations. Rebuild then
+	// downsamples in elevation space — averaging R/G/B channels independently
+	// corrupts elevations at the 256 m channel boundaries.
+	IsTerrarium bool
 }
 
 // PMTilesReader is the interface for reading tiles from a PMTiles archive.
@@ -530,7 +534,11 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 									br = fillTileShared
 								}
 							}
-							td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+							if cfg.IsTerrarium {
+								td = downsampleTileTerrarium(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+							} else {
+								td = downsampleTile(tl, tr, bl, br, cfg.TileSize, cfg.Resampling)
+							}
 						}
 
 						if td == nil {

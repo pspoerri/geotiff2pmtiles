@@ -344,6 +344,9 @@ func (w *Writer) buildMetadata() []byte {
 	if w.opts.Attribution != "" {
 		meta["attribution"] = w.opts.Attribution
 	}
+	if w.opts.Encoding != "" {
+		meta["encoding"] = w.opts.Encoding
+	}
 
 	data, _ := json.Marshal(meta)
 	return data

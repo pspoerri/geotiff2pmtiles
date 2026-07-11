@@ -437,6 +437,10 @@ func main() {
 	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling, resamplingGamma, fc, bandCfg)
 
 	// Create PMTiles writer.
+	encoding := ""
+	if format == "terrarium" {
+		encoding = "terrarium"
+	}
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
 		MinZoom:     minZoom,
 		MaxZoom:     maxZoom,
@@ -447,6 +451,7 @@ func main() {
 		Description: description,
 		Attribution: attribution,
 		Type:        layerType,
+		Encoding:    encoding,
 	})
 	if err != nil {
 		log.Fatalf("Creating PMTiles writer: %v", err)

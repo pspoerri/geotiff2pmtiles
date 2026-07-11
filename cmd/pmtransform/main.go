@@ -43,6 +43,7 @@ func main() {
 		noSpill         bool
 		fillColor       string
 		rebuild         bool
+		terrarium       bool
 		attribution     string
 		layerType       string
 		resamplingGamma float64
@@ -64,6 +65,7 @@ func main() {
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
 	flag.StringVar(&fillColor, "fill-color", "0,0,0,0", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\" (default: transparent)")
 	flag.BoolVar(&rebuild, "rebuild", false, "Force full pyramid rebuild (required for resampling changes)")
+	flag.BoolVar(&terrarium, "terrarium", false, "Treat tiles as terrarium-encoded elevations so rebuild downsamples in elevation space (auto-detected from archive metadata)")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (default: keep source)")
 	flag.StringVar(&layerType, "type", "", "Layer type: baselayer, overlay (default: keep source)")
 
@@ -156,6 +158,9 @@ func main() {
 		if v, ok := srcMeta["type"].(string); ok {
 			srcType = v
 		}
+		if v, ok := srcMeta["encoding"].(string); ok && v == "terrarium" {
+			terrarium = true
+		}
 	}
 
 	// Carry forward source attribution and type when not explicitly overridden.
@@ -223,6 +228,10 @@ func main() {
 		mode = tile.TransformReencode
 	}
 
+	if terrarium && (format == "jpeg" || format == "webp") {
+		log.Printf("Warning: source is terrarium-encoded elevation data; lossy %s encoding will corrupt elevations", format)
+	}
+
 	// Compute memory limit.
 	var memoryLimitBytes int64
 	if noSpill {
@@ -258,6 +267,9 @@ func main() {
 			fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
 		}
 	}
+	if terrarium {
+		fmt.Printf("  %-14s terrarium (elevation-space downsampling)\n", "Encoding:")
+	}
 	fmt.Printf("  %-14s %d\n", "Concurrency:", concurrency)
 	if fc != nil {
 		fmt.Printf("  %-14s rgba(%d,%d,%d,%d)\n", "Fill color:", fc.R, fc.G, fc.B, fc.A)
@@ -289,6 +301,7 @@ func main() {
 		Bounds:           bounds,
 		MemoryLimitBytes: memoryLimitBytes,
 		OutputDir:        outputDir,
+		IsTerrarium:      terrarium,
 	}
 
 	// Build description with processing steps prepended to source description.
@@ -296,6 +309,10 @@ func main() {
 		tileSize, minZoom, maxZoom, resampling, resamplingGamma, fc)
 
 	// Create PMTiles writer.
+	encoding := ""
+	if terrarium {
+		encoding = "terrarium"
+	}
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
 		MinZoom:     minZoom,
 		MaxZoom:     maxZoom,
@@ -307,6 +324,7 @@ func main() {
 		Description: description,
 		Attribution: attribution,
 		Type:        layerType,
+		Encoding:    encoding,
 	})
 	if err != nil {
 		log.Fatalf("Creating PMTiles writer: %v", err)
