@@ -384,6 +384,22 @@ levels are then rebuilt by downsampling from the level above — exactly matchin
 `geotiff2pmtiles` works with COG sources. This ensures consistent quality across the
 pyramid regardless of what resampling was used in the original archive.
 
+## pmtransform: terrarium-aware rebuild
+
+Terrarium tiles pack elevation across RGB (`elevation = R*256 + G + B/256 - 32768`), so
+the ordinary per-channel downsampling corrupts values wherever the four source pixels
+straddle a 256 m channel boundary: averaging G=255 and G=0 yields ~127 with no carry
+into R, an error of up to ~128 m. Rebuild therefore switches to the generator's
+elevation-space downsampler (`downsampleTileTerrarium`) when the archive is terrarium.
+
+The PMTiles header can't express this — terrarium's `TileType` is just PNG — so
+`geotiff2pmtiles` records `"encoding": "terrarium"` in the metadata JSON. pmtransform
+auto-detects that key, propagates it to the output archive, and offers an explicit
+`--terrarium` flag for archives written before the key existed. The flag and key only
+widen detection; there is no way to force RGBA downsampling on a marked archive, since
+that is never correct. Re-encoding terrarium to a lossy format (jpeg/webp) warns instead
+of erroring — the output is visually usable, just no longer valid elevation data.
+
 ## pmtransform: tile size discovery
 
 The PMTiles v3 header does not store tile size (only format via `TileType`). When

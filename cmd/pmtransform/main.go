@@ -145,9 +145,11 @@ func main() {
 	// Read source metadata for description/attribution/type propagation.
 	var srcDescription, srcAttribution, srcType string
 	if srcMeta, err := reader.ReadMetadata(); err != nil {
-		if verbose {
-			log.Printf("Warning: could not read source metadata: %v", err)
-		}
+		// Metadata controls pixel semantics (terrarium detection), so a read
+		// failure must be visible: a silent fallback to RGBA downsampling
+		// would corrupt elevation archives.
+		log.Printf("Warning: could not read source metadata: %v", err)
+		log.Printf("If this archive contains terrarium elevation tiles, pass --terrarium")
 	} else if srcMeta != nil {
 		if v, ok := srcMeta["description"].(string); ok {
 			srcDescription = v
