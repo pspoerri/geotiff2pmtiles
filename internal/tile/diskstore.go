@@ -67,7 +67,8 @@ type DiskTileStore struct {
 	index    map[[3]int]diskEntry // disk index (populated by I/O goroutine)
 
 	// Read-only file handle for Get(). Set once by ioLoop on first write,
-	// never reassigned. Readers use atomic load + ReadAt (pread, no locking).
+	// never reassigned. Readers use atomic load + ReadAt (pread, no locking;
+	// Windows has no pread, so Go emulates it and reads serialize instead).
 	readFile atomic.Pointer[os.File]
 
 	memCond  *sync.Cond     // signaled by ioLoop when memBytes decreases; nil when spilling is off
@@ -392,7 +393,9 @@ func (s *DiskTileStore) Close() {
 	if f := s.readFile.Swap(nil); f != nil {
 		name := f.Name()
 		f.Close()
-		os.Remove(name)
+		if err := os.Remove(name); err != nil {
+			log.Printf("WARNING: could not remove spill file %s: %v", name, err)
+		}
 	}
 }
 

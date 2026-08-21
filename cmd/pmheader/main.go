@@ -322,7 +322,16 @@ func patch(inputPath, outputPath string, opts patchOptions) error {
 	// TileDataLength and tile counts remain unchanged.
 
 	// Determine where to write.
+	// Compare file identity, not path strings: on Windows "map.pmtiles" and
+	// "MAP.PMTILES" name the same file.
 	inPlace := outputPath == "" || outputPath == inputPath
+	if !inPlace {
+		if ofi, oerr := os.Stat(outputPath); oerr == nil {
+			if ifi, ierr := f.Stat(); ierr == nil && os.SameFile(ofi, ifi) {
+				inPlace = true
+			}
+		}
+	}
 	writePath := outputPath
 	if inPlace {
 		tmp, err := os.CreateTemp(filepath.Dir(inputPath), ".pmheader-*.pmtiles")
@@ -341,6 +350,8 @@ func patch(inputPath, outputPath string, opts patchOptions) error {
 	}
 
 	if inPlace {
+		// Windows refuses to replace a file that still has an open handle.
+		f.Close()
 		if err := os.Rename(writePath, inputPath); err != nil {
 			os.Remove(writePath)
 			return fmt.Errorf("replacing input file: %w", err)
