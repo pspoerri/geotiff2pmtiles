@@ -21,10 +21,17 @@ COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS    += -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
 
-OUTPUT           := $(BUILD_DIR)/$(BINARY)
-OUTPUT_TRANSFORM := $(BUILD_DIR)/$(BINARY_TRANSFORM)
-OUTPUT_CHECK     := $(BUILD_DIR)/$(BINARY_CHECK)
-OUTPUT_HEADER    := $(BUILD_DIR)/$(BINARY_HEADER)
+# Native Windows build (MSYS2 UCRT64 / CLANGARM64): name the outputs .exe and link
+# libwebp statically so the binary has no DLL dependencies beyond the system ones.
+ifeq ($(OS),Windows_NT)
+EXE        := .exe
+LDFLAGS    += -extldflags=-static
+endif
+
+OUTPUT           := $(BUILD_DIR)/$(BINARY)$(EXE)
+OUTPUT_TRANSFORM := $(BUILD_DIR)/$(BINARY_TRANSFORM)$(EXE)
+OUTPUT_CHECK     := $(BUILD_DIR)/$(BINARY_CHECK)$(EXE)
+OUTPUT_HEADER    := $(BUILD_DIR)/$(BINARY_HEADER)$(EXE)
 
 # Default tile format and quality for example targets
 FORMAT     ?= webp
@@ -432,12 +439,12 @@ cross-darwin-arm64: $(BUILD_DIR)
 	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 $(CMD)
 
-## cross-windows: Build for Windows amd64 (CGO_ENABLED=0, no native WebP)
+## cross-windows: Build for Windows amd64 (CGO_ENABLED=0, no WebP — use a native MSYS2 build for that)
 cross-windows: $(BUILD_DIR)
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-windows-amd64.exe $(CMD)
 
-## cross-windows-arm64: Build for Windows arm64 (CGO_ENABLED=0, no native WebP)
+## cross-windows-arm64: Build for Windows arm64 (CGO_ENABLED=0, no WebP — use a native MSYS2 build for that)
 cross-windows-arm64: $(BUILD_DIR)
 	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-windows-arm64.exe $(CMD)

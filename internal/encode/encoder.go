@@ -42,6 +42,15 @@ func NewEncoder(format string, quality int) (Encoder, error) {
 	case "terrarium":
 		return &TerrariumEncoder{}, nil
 	default:
-		return nil, fmt.Errorf("unsupported tile format: %q (supported: jpeg, png, webp, terrarium)", format)
+		return nil, fmt.Errorf("unsupported tile format: %q (supported: %s)", format, Formats())
 	}
+}
+
+// Formats lists the tile formats this build supports. WebP needs CGo and
+// libwebp, so it is missing from CGO_ENABLED=0 builds.
+func Formats() string {
+	if webpCGOAvailable {
+		return "jpeg, png, webp, terrarium"
+	}
+	return "jpeg, png, terrarium"
 }

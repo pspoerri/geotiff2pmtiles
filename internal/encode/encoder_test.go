@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -211,5 +212,11 @@ func TestPNGEncoder_TransparentImage(t *testing.T) {
 	_, _, _, a = decoded.At(50, 10).RGBA()
 	if a>>8 != 0 {
 		t.Errorf("transparent pixel alpha = %d, want 0", a>>8)
+	}
+}
+
+func TestFormatsMatchesBuild(t *testing.T) {
+	if got := strings.Contains(Formats(), "webp"); got != webpCGOAvailable {
+		t.Errorf("Formats() = %q, lists webp = %v, want %v", Formats(), got, webpCGOAvailable)
 	}
 }

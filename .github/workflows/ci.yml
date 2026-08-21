@@ -48,13 +48,41 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-  test-windows:
-    name: Test (windows)
-    runs-on: windows-latest
+  windows:
+    name: Windows (${{ matrix.goarch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            runner: windows-latest
+            msystem: UCRT64
+            cc: gcc
+            packages: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-libwebp
+          - goarch: arm64
+            runner: windows-11-arm
+            msystem: CLANGARM64
+            cc: clang
+            packages: mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-libwebp
+    defaults:
+      run:
+        shell: msys2 {0}
     env:
-      CGO_ENABLED: "0" # no libwebp on the runner; encode/webp_stub.go covers it
+      CGO_ENABLED: "1"
+      CC: ${{ matrix.cc }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Prebuilt libwebp from MSYS2 — no cross toolchain, no libwebp source build.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          path-type: inherit # so the Go installed below is visible in the MSYS2 shell
+          install: ${{ matrix.packages }}
 
       - uses: actions/setup-go@v7
         with:
@@ -63,18 +91,51 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # No -race: the detector needs cgo, and cgo here would pull in libwebp.
-      # The Linux job covers race detection.
+      # No -race: mingw does not ship the race runtime. The Linux job covers it.
       - name: Unit tests
         run: go test -count=1 ./internal/...
 
       - name: Integration tests (synthetic)
-        run: go test -count=1 -timeout 180s ./integration/
+        run: go test -count=1 -timeout 300s ./integration/
+
+      - name: Set build metadata
+        id: meta
+        run: |
+          echo "version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # -extldflags=-static pulls libwebp, libsharpyuv and the compiler runtime into
+      # the .exe, so the released binary needs no MSYS2 DLLs alongside it.
+      - name: Build binaries
+        run: |
+          for cmd in geotiff2pmtiles pmtransform coginfo; do
+            go build \
+              -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }} -extldflags=-static" \
+              -o dist/$cmd-windows-${{ matrix.goarch }}.exe \
+              ./cmd/$cmd/
+          done
+
+      # Run it with the MSYS2 bin directory off PATH: a dynamically linked build
+      # would fail to start here, so this proves both the static link and that
+      # WebP made it into the binary.
+      - name: Smoke test
+        run: |
+          out=$(PATH=/c/Windows/System32 ./dist/geotiff2pmtiles-windows-${{ matrix.goarch }}.exe --version)
+          echo "$out"
+          echo "$out" | grep -q webp
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: binaries-windows-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 14
 
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
-    needs: [test, test-windows]
+    needs: [test, windows]
     strategy:
       fail-fast: false
       matrix:
@@ -87,12 +148,6 @@ jobs:
             goarch: amd64
           - goos: darwin
             goarch: arm64
-          - goos: windows
-            goarch: amd64
-            ext: .exe
-          - goos: windows
-            goarch: arm64
-            ext: .exe
     steps:
       - uses: actions/checkout@v7
         with:
@@ -117,7 +172,7 @@ jobs:
         run: |
           go build \
             -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }}" \
-            -o dist/geotiff2pmtiles-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} \
+            -o dist/geotiff2pmtiles-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/geotiff2pmtiles/
 
       - name: Build pmtransform
@@ -128,7 +183,7 @@ jobs:
         run: |
           go build \
             -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }}" \
-            -o dist/pmtransform-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} \
+            -o dist/pmtransform-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/pmtransform/
 
       - name: Build coginfo
@@ -139,7 +194,7 @@ jobs:
         run: |
           go build \
             -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }}" \
-            -o dist/coginfo-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} \
+            -o dist/coginfo-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/coginfo/
 
       - name: Upload artifacts
@@ -187,7 +242,7 @@ jobs:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, windows]
     permissions:
       contents: write
     steps:

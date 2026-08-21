@@ -79,12 +79,34 @@ that builds now require `CGO_ENABLED=1` and libwebp installed on the system
 
 A `!cgo` stub (`webp_stub.go`) provides graceful error messages when building with
 `CGO_ENABLED=0` — the binary compiles but WebP encode/decode returns an error at runtime.
-This allows CI cross-compilation without a C toolchain while keeping WebP available for
-native builds. The released Windows binaries ship in exactly that configuration
-(`CGO_ENABLED=0`, no libwebp), so WebP is unavailable there by design; JPEG, PNG and
-Terrarium are unaffected. Because the automatic jpeg → webp switch for nodata data would
-otherwise be fatal in such a build, it falls back to PNG (which also carries alpha) with
-a warning.
+This keeps cross-compilation possible without a C toolchain (`make cross-all CGO=0`),
+which is how the released Linux and macOS binaries are still built. Because the automatic
+jpeg → webp switch for nodata data would otherwise be fatal in such a build, it falls
+back to PNG (which also carries alpha) with a warning. `encode.Formats()` reports which
+formats a given binary actually has, and both CLIs print it under `--version`, so a
+stubbed build is identifiable without triggering the runtime error.
+
+## Windows WebP: MSYS2 prebuilts, statically linked
+
+The Windows binaries used to ship at `CGO_ENABLED=0` without WebP, because the CI build
+job cross-compiled every target from Linux and there is no packaged mingw libwebp there.
+They are now built natively instead: `windows-latest` (UCRT64) and `windows-11-arm`
+(CLANGARM64) via `msys2/setup-msys2`, installing MSYS2's prebuilt `libwebp` package. No
+cross toolchain, no libwebp source build, and — unlike a cross-build — the tests and a
+smoke run execute on the same machine and architecture that produced the binary.
+
+`-extldflags=-static` pulls libwebp, libsharpyuv and the compiler runtime into the `.exe`
+so users do not have to install MSYS2 to run it. The CI smoke test runs the binary with
+the MSYS2 `bin` directory off `PATH`: a dynamically linked build fails to start there,
+which is what makes the check meaningful rather than decorative.
+
+Windows skips `pkg-config` (`#cgo !windows pkg-config: libwebp` / `#cgo windows LDFLAGS:
+-lwebp -lsharpyuv`). Two reasons: MSYS2 puts the headers and libraries on the compiler's
+default search path anyway, and cgo invokes `pkg-config` without `--static`, so it would
+drop the `-lsharpyuv` from `Libs.private` and the static link would fail on undefined
+symbols. The usual workaround — pointing `PKG_CONFIG` at a wrapper that adds `--static` —
+does not work on Windows, because Go is a native Windows binary and cannot exec a shell
+script. Naming both libraries directly is shorter and works on every environment.
 
 ## Windows support
 

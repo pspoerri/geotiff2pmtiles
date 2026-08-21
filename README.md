@@ -41,10 +41,11 @@ Real satellite and raster test data is downloaded via `make test-integration-dow
 
 ## Platform Support
 
-Linux, macOS and Windows, on amd64 and arm64. The Linux and macOS builds link libwebp;
-the released Windows binaries are built without CGo, so JPEG, PNG and Terrarium work
-there but `--format webp` reports an error. Build Windows with CGo and a
-pkg-config-visible libwebp (MSYS2 or vcpkg) if you need WebP.
+Linux, macOS and Windows, on amd64 and arm64. The released Windows binaries link libwebp
+statically: all four tile formats in a single `.exe`, with no DLLs to copy alongside it.
+The released Linux and macOS binaries are still cross-compiled at `CGO_ENABLED=0`, so
+`--format webp` reports an error there — build from source with libwebp installed (below)
+to get it. `--version` says which formats any given binary has.
 
 ## Prerequisites
 
@@ -61,9 +62,15 @@ sudo apt-get install libwebp-dev
 sudo dnf install libwebp-devel
 ```
 
-```powershell
-# Windows (optional — only for WebP; needs pkg-config on PATH)
-vcpkg install libwebp:x64-windows
+On Windows, use [MSYS2](https://www.msys2.org) — it ships a prebuilt libwebp, so nothing
+has to be compiled. Open the UCRT64 shell on amd64 (CLANGARM64 on arm64) and run:
+
+```bash
+# amd64
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-libwebp
+
+# arm64
+pacman -S mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-libwebp
 ```
 
 Without libwebp, build with `CGO_ENABLED=0` (`make build CGO=0`): everything except WebP
@@ -76,14 +83,15 @@ go build -o geotiff2pmtiles ./cmd/geotiff2pmtiles/
 go build -o pmtransform ./cmd/pmtransform/
 ```
 
-```powershell
-# Windows: name the outputs .exe, and skip CGo unless libwebp is installed
-$env:CGO_ENABLED = "0"
-go build -o geotiff2pmtiles.exe .\cmd\geotiff2pmtiles\
-go build -o pmtransform.exe .\cmd\pmtransform\
+On Windows, build from the MSYS2 shell so libwebp is found. `-extldflags=-static` folds
+libwebp into the binary, leaving an `.exe` that runs anywhere:
+
+```bash
+go build -ldflags "-extldflags=-static" -o geotiff2pmtiles.exe ./cmd/geotiff2pmtiles/
+go build -ldflags "-extldflags=-static" -o pmtransform.exe ./cmd/pmtransform/
 ```
 
-Or using the Makefile:
+Or using the Makefile — on Windows it adds the `.exe` suffix and the static link itself:
 
 ```bash
 make build            # geotiff2pmtiles only
@@ -93,13 +101,22 @@ make build CGO=0      # without libwebp (no WebP encoder)
 make example-all      # run every example target
 ```
 
-The Makefile needs a POSIX shell — on Windows run it from Git Bash, MSYS2 or WSL, or use
-the `go build` commands above.
+The Makefile needs a POSIX shell — on Windows run it from the MSYS2 shell (Git Bash or
+WSL work too, but only MSYS2 has libwebp), or use the `go build` commands above.
+
+`--version` reports which formats a given binary actually has:
+
+```
+$ geotiff2pmtiles --version
+geotiff2pmtiles v1.2.0 (commit abc1234, built 2026-08-21T12:00:00Z)
+formats: jpeg, png, webp, terrarium
+```
 
 ### Cross-compilation
 
-Cross-compilation to Linux and macOS requires a C cross-compiler and libwebp built for
-the target platform; the Windows targets build with `CGO_ENABLED=0` and need no toolchain:
+Cross-compilation requires a C cross-compiler and libwebp built for the target platform.
+The `cross-windows*` targets skip CGo entirely (no toolchain needed, but no WebP either)
+— for a Windows binary with WebP, build natively under MSYS2 as above:
 
 ```bash
 make cross-all
@@ -112,8 +129,8 @@ make cross-linux          # Linux amd64
 make cross-linux-arm64    # Linux arm64
 make cross-darwin         # macOS amd64
 make cross-darwin-arm64   # macOS arm64
-make cross-windows        # Windows amd64 (no WebP)
-make cross-windows-arm64  # Windows arm64 (no WebP)
+make cross-windows        # Windows amd64 (CGO_ENABLED=0, no WebP)
+make cross-windows-arm64  # Windows arm64 (CGO_ENABLED=0, no WebP)
 ```
 
 ## Usage

@@ -1,7 +1,8 @@
 package encode
 
 /*
-#cgo pkg-config: libwebp
+#cgo !windows pkg-config: libwebp
+#cgo windows LDFLAGS: -lwebp -lsharpyuv
 #include <stdlib.h>
 #include <webp/encode.h>
 #include <webp/decode.h>

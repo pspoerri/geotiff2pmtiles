@@ -81,6 +81,7 @@ func main() {
 
 	if showVersion {
 		fmt.Printf("pmtransform %s (commit %s, built %s)\n", version, commit, buildDate)
+		fmt.Printf("formats: %s\n", encode.Formats())
 		os.Exit(0)
 	}
 

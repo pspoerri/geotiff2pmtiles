@@ -122,10 +122,17 @@ to three pairs of build-tagged files — `cog/mmap_*.go` (memory mapping),
 `tile/sysinfo_*.go` (total RAM) and `encode/webp{,_stub,_available}.go` (CGo
 availability); everything else is portable Go.
 
-Linux and macOS builds use `CGO_ENABLED=1` and link libwebp. The Windows
-binaries are built with `CGO_ENABLED=0`, so they carry the WebP stub: JPEG,
-PNG and Terrarium work, `--format webp` returns an error. A Windows build with
-CGo and a pkg-config-visible libwebp (MSYS2, vcpkg) gets WebP too.
+Source builds use `CGO_ENABLED=1` and link libwebp, resolved through
+`pkg-config` on Linux and macOS and named directly (`-lwebp -lsharpyuv`) on
+Windows. A `CGO_ENABLED=0` build still compiles and carries the WebP stub:
+JPEG, PNG and Terrarium work, `--format webp` returns an error, and
+`--version` lists the formats actually present.
+
+CI builds the Windows binaries natively under MSYS2 (UCRT64 on amd64,
+CLANGARM64 on arm64) with CGo on and `-extldflags=-static`, producing a
+self-contained `.exe` that includes WebP. The Linux and macOS binaries are
+still cross-compiled from the Ubuntu job at `CGO_ENABLED=0`, so the released
+builds for those platforms carry the stub.
 
 Windows keeps a file locked while a handle or mapping is open, so code that
 renames or deletes over a file it also reads closes first (`pmheader`,

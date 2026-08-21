@@ -95,6 +95,7 @@ func main() {
 
 	if showVersion {
 		fmt.Printf("geotiff2pmtiles %s (commit %s, built %s)\n", version, commit, buildDate)
+		fmt.Printf("formats: %s\n", encode.Formats())
 		os.Exit(0)
 	}
 
