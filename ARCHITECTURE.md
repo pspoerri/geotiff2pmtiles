@@ -15,6 +15,9 @@ internal/
     tfw.go                          TFW (TIFF World File) parser + EPSG inference
     tilecache.go                    LRU tile cache for decoded source tiles
     lzw.go                          LZW decompression
+    mmap_unix.go                    mmap/munmap via syscall.Mmap (unix)
+    mmap_windows.go                 mmap via CreateFileMapping/MapViewOfFile (windows)
+    mmap_other.go                   Unsupported-platform stubs
   coord/
     swiss.go                        EPSG:2056 <-> WGS84 transforms
     mercator.go                     WGS84 <-> Web Mercator tile math
@@ -29,6 +32,10 @@ internal/
     rgbapool.go                     sync.Pool for *image.RGBA reuse (keyed by dimensions)
     zoom.go                         Zoom level auto-calculation
     progress.go                     Progress reporting
+    sysinfo_linux.go                Total RAM via sysinfo (linux)
+    sysinfo_darwin.go               Total RAM via sysctl HW_MEMSIZE (darwin)
+    sysinfo_windows.go              Total RAM via GlobalMemoryStatusEx (windows)
+    sysinfo_other.go                Unsupported-platform stub
   encode/
     encoder.go                      Unified encoding interface
     jpeg.go                         JPEG encoder
@@ -107,6 +114,23 @@ skipping DiskTileStore overhead entirely.
 - Source fallthrough on nodata: transparent (alpha=0) samples are skipped and the next source is tried, preventing holes in one source from blocking valid data in another
 - PMTiles writer uses temp file for tile data (only directory entries in memory)
 - Pyramid downsampling avoids redundant source reads for lower zoom levels
+
+## Platform Support
+
+Linux, macOS and Windows on amd64 and arm64. Platform differences are confined
+to three pairs of build-tagged files — `cog/mmap_*.go` (memory mapping),
+`tile/sysinfo_*.go` (total RAM) and `encode/webp{,_stub,_available}.go` (CGo
+availability); everything else is portable Go.
+
+Linux and macOS builds use `CGO_ENABLED=1` and link libwebp. The Windows
+binaries are built with `CGO_ENABLED=0`, so they carry the WebP stub: JPEG,
+PNG and Terrarium work, `--format webp` returns an error. A Windows build with
+CGo and a pkg-config-visible libwebp (MSYS2, vcpkg) gets WebP too.
+
+Windows keeps a file locked while a handle or mapping is open, so code that
+renames or deletes over a file it also reads closes first (`pmheader`,
+`DiskTileStore.Close`), and same-file checks use `os.SameFile` rather than
+string comparison.
 
 ## Adding New Projections
 

@@ -13,6 +13,8 @@ BUILD_DIR        := dist
 GO               := go
 GOFLAGS          :=
 LDFLAGS          :=
+# Set CGO=0 to build without libwebp (no WebP encoder) — the default on Windows.
+CGO              ?= 1
 
 VERSION    := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -62,7 +64,8 @@ SWISSIMAGE_DIR           := $(TESTDATA_DIR)/swissimage
         example-copernicus example-esaworldcover example-esaworldcover-ndvi \
         example-esaworldcover-swir example-esaworldcover-gamma0 \
         example-transform example-transform-reencode example-transform-rebuild \
-        cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-all \
+        cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 \
+        cross-windows cross-windows-arm64 cross-all \
         help
 
 ## all: Build all binaries (default target)
@@ -71,13 +74,13 @@ all: build build-transform build-header
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-## build: Compile the binary (requires libwebp: brew install webp / apt-get install libwebp-dev)
+## build: Compile the binary (requires libwebp: brew install webp / apt-get install libwebp-dev; or CGO=0 without WebP)
 build: $(BUILD_DIR)
-	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
+	CGO_ENABLED=$(CGO) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
 
 ## build-transform: Compile pmtransform binary
 build-transform: $(BUILD_DIR)
-	CGO_ENABLED=1 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_TRANSFORM) $(CMD_TRANSFORM)
+	CGO_ENABLED=$(CGO) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_TRANSFORM) $(CMD_TRANSFORM)
 
 ## build-check: Compile checkpmtiles validation tool
 build-check: $(BUILD_DIR)
@@ -92,7 +95,7 @@ build-all: build build-transform build-check build-header
 
 ## install: Install to $GOPATH/bin
 install:
-	CGO_ENABLED=1 $(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
+	CGO_ENABLED=$(CGO) $(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
 
 # ---------- Testing ----------
 
@@ -405,6 +408,8 @@ example-transform-rebuild: build build-transform test-integration-download
 
 # ---------- Cross-compilation ----------
 # Requires a C cross-compiler (CC) and libwebp built for the target platform.
+# The Windows targets build with CGO_ENABLED=0 instead, so they need no toolchain
+# but have no native WebP encoder (--format webp is unavailable).
 # Example: CC=x86_64-linux-musl-gcc PKG_CONFIG_PATH=/path/to/linux-amd64/lib/pkgconfig make cross-linux
 
 ## cross-linux: Build for Linux amd64
@@ -427,8 +432,18 @@ cross-darwin-arm64: $(BUILD_DIR)
 	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 $(CMD)
 
+## cross-windows: Build for Windows amd64 (CGO_ENABLED=0, no native WebP)
+cross-windows: $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-windows-amd64.exe $(CMD)
+
+## cross-windows-arm64: Build for Windows arm64 (CGO_ENABLED=0, no native WebP)
+cross-windows-arm64: $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
+		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-windows-arm64.exe $(CMD)
+
 ## cross-all: Build for all supported platforms
-cross-all: cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64
+cross-all: cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-windows cross-windows-arm64
 
 # ---------- Cleanup ----------
 
