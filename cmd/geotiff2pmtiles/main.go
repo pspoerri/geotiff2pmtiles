@@ -141,7 +141,7 @@ func main() {
 	outputPath := args[len(args)-1]
 	inputPaths := args[:len(args)-1]
 
-	if !strings.HasSuffix(outputPath, ".pmtiles") {
+	if !strings.EqualFold(filepath.Ext(outputPath), ".pmtiles") {
 		log.Fatal("Output file must have .pmtiles extension")
 	}
 
@@ -272,7 +272,14 @@ func main() {
 			format = "webp"
 			enc, err = encode.NewEncoder(format, quality)
 			if err != nil {
-				log.Fatalf("Encoder: %v", err)
+				// No WebP in this build (CGO off, e.g. the Windows binaries).
+				// PNG carries transparency too, just at a larger size.
+				log.Printf("WARNING: WebP is unavailable in this build (%v); using PNG instead.", err)
+				format = "png"
+				enc, err = encode.NewEncoder(format, quality)
+				if err != nil {
+					log.Fatalf("Encoder: %v", err)
+				}
 			}
 		}
 	}
@@ -488,6 +495,19 @@ func collectTIFFs(paths []string) ([]string, error) {
 	for _, p := range paths {
 		info, err := os.Stat(p)
 		if err != nil {
+			// cmd.exe and PowerShell do not expand wildcards, so patterns
+			// reach us verbatim; expand them here.
+			if strings.ContainsAny(p, "*?[") {
+				matches, gerr := filepath.Glob(p)
+				if gerr == nil && len(matches) > 0 {
+					for _, m := range matches {
+						if isTIFF(m) {
+							result = append(result, m)
+						}
+					}
+					continue
+				}
+			}
 			return nil, fmt.Errorf("stat %s: %w", p, err)
 		}
 		if info.IsDir() {

@@ -121,13 +121,16 @@ func main() {
 	inputPath := args[0]
 	outputPath := args[1]
 
-	if !strings.HasSuffix(inputPath, ".pmtiles") {
+	if !strings.EqualFold(filepath.Ext(inputPath), ".pmtiles") {
 		log.Fatal("Input file must have .pmtiles extension")
 	}
-	if !strings.HasSuffix(outputPath, ".pmtiles") {
+	if !strings.EqualFold(filepath.Ext(outputPath), ".pmtiles") {
 		log.Fatal("Output file must have .pmtiles extension")
 	}
-	if inputPath == outputPath {
+	// Compare file identity, not path strings: on Windows "map.pmtiles" and
+	// "MAP.PMTILES" name the same file, and overwriting the source mid-read
+	// would corrupt it.
+	if inputPath == outputPath || sameFile(inputPath, outputPath) {
 		log.Fatal("Input and output paths must be different")
 	}
 
@@ -200,12 +203,6 @@ func main() {
 		log.Fatalf("Resampling: %v", err)
 	}
 
-	// Resolve tile encoder.
-	enc, err := encode.NewEncoder(format, quality)
-	if err != nil {
-		log.Fatalf("Encoder: %v", err)
-	}
-
 	// Parse fill color.
 	var fc *color.RGBA
 	if fillColor != "" {
@@ -228,6 +225,18 @@ func main() {
 	} else if fc != nil {
 		// Fill-only: use re-encode mode since we need the encoder.
 		mode = tile.TransformReencode
+	}
+
+	// Resolve the tile encoder — only re-encode and rebuild need one, so a
+	// passthrough of e.g. a WebP archive still works in a build without CGo.
+	var enc encode.Encoder
+	tileFormat := srcHeader.TileType
+	if mode != tile.TransformPassthrough {
+		enc, err = encode.NewEncoder(format, quality)
+		if err != nil {
+			log.Fatalf("Encoder: %v", err)
+		}
+		tileFormat = enc.PMTileType()
 	}
 
 	if terrarium && (format == "jpeg" || format == "webp") {
@@ -319,7 +328,7 @@ func main() {
 		MinZoom:     minZoom,
 		MaxZoom:     maxZoom,
 		Bounds:      cog.Bounds{MinLon: float64(bounds[0]), MinLat: float64(bounds[1]), MaxLon: float64(bounds[2]), MaxLat: float64(bounds[3])},
-		TileFormat:  enc.PMTileType(),
+		TileFormat:  tileFormat,
 		TileSize:    tileSize,
 		TempDir:     outputDir,
 		Name:        "pmtransform",
@@ -504,4 +513,17 @@ func humanSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+// sameFile reports whether two paths name the same existing file.
+func sameFile(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
 }

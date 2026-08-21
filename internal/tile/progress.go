@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // progressBar renders an in-place terminal progress bar for a zoom level.
@@ -19,6 +20,7 @@ type progressBar struct {
 	total     int64
 	processed atomic.Int64
 	barWidth  int
+	prevWidth int // rune width of the last drawn line, for padding
 	mu        sync.Mutex
 }
 
@@ -93,8 +95,18 @@ func (pb *progressBar) draw() {
 		etaStr = "0s"
 	}
 
-	fmt.Fprintf(os.Stderr, "\r%s [%s] %3.0f%%  %d/%d tiles  %.0f/s  %s  ETA %s\033[K",
+	line := fmt.Sprintf("%s [%s] %3.0f%%  %d/%d tiles  %.0f/s  %s  ETA %s",
 		pb.label, bar, frac*100, processed, total, rate, formatDuration(elapsed), etaStr)
+
+	// Pad the line out instead of using an ANSI erase-to-end-of-line: Windows
+	// consoles ignore escape sequences unless VT processing is switched on.
+	width := utf8.RuneCountInString(line)
+	if pad := pb.prevWidth - width; pad > 0 {
+		line += strings.Repeat(" ", pad)
+	}
+	pb.prevWidth = width
+
+	fmt.Fprintf(os.Stderr, "\r%s", line)
 }
 
 // formatDuration formats a duration concisely (e.g. "1m23s", "45s", "0s").
