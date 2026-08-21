@@ -378,7 +378,13 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 	case 7: // JPEG — not applicable for float tiles
 		return data, ifd, nil
 	case 1: // No compression
-		decompressed = data
+		if ifd.Predictor == 2 || ifd.Predictor == 3 {
+			// data aliases the read-only mapping and applyPredictor rewrites
+			// its argument in place, so undo the predictor on a copy.
+			decompressed = append([]byte(nil), data...)
+		} else {
+			decompressed = data
+		}
 	case 8, 32946: // Deflate / zlib
 		dec, err := decompressDeflate(data)
 		if err != nil {
