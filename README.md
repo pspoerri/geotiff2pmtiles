@@ -39,6 +39,13 @@ Real satellite and raster test data is downloaded via `make test-integration-dow
 - Source CRS: EPSG:2056 (Swiss LV95), EPSG:4326 (WGS84), EPSG:3857 (Web Mercator)
 - Extensible projection interface for adding additional CRS support
 
+## Platform Support
+
+Linux, macOS and Windows, on amd64 and arm64. The Linux and macOS builds link libwebp;
+the released Windows binaries are built without CGo, so JPEG, PNG and Terrarium work
+there but `--format webp` reports an error. Build Windows with CGo and a
+pkg-config-visible libwebp (MSYS2 or vcpkg) if you need WebP.
+
 ## Prerequisites
 
 WebP support requires libwebp to be installed:
@@ -54,11 +61,26 @@ sudo apt-get install libwebp-dev
 sudo dnf install libwebp-devel
 ```
 
+```powershell
+# Windows (optional — only for WebP; needs pkg-config on PATH)
+vcpkg install libwebp:x64-windows
+```
+
+Without libwebp, build with `CGO_ENABLED=0` (`make build CGO=0`): everything except WebP
+encoding and decoding works.
+
 ## Installation
 
 ```bash
 go build -o geotiff2pmtiles ./cmd/geotiff2pmtiles/
 go build -o pmtransform ./cmd/pmtransform/
+```
+
+```powershell
+# Windows: name the outputs .exe, and skip CGo unless libwebp is installed
+$env:CGO_ENABLED = "0"
+go build -o geotiff2pmtiles.exe .\cmd\geotiff2pmtiles\
+go build -o pmtransform.exe .\cmd\pmtransform\
 ```
 
 Or using the Makefile:
@@ -67,12 +89,17 @@ Or using the Makefile:
 make build            # geotiff2pmtiles only
 make build-transform  # pmtransform only
 make build-all        # both binaries
+make build CGO=0      # without libwebp (no WebP encoder)
 make example-all      # run every example target
 ```
 
+The Makefile needs a POSIX shell — on Windows run it from Git Bash, MSYS2 or WSL, or use
+the `go build` commands above.
+
 ### Cross-compilation
 
-Cross-compilation requires a C cross-compiler and libwebp built for the target platform:
+Cross-compilation to Linux and macOS requires a C cross-compiler and libwebp built for
+the target platform; the Windows targets build with `CGO_ENABLED=0` and need no toolchain:
 
 ```bash
 make cross-all
@@ -85,6 +112,8 @@ make cross-linux          # Linux amd64
 make cross-linux-arm64    # Linux arm64
 make cross-darwin         # macOS amd64
 make cross-darwin-arm64   # macOS arm64
+make cross-windows        # Windows amd64 (no WebP)
+make cross-windows-arm64  # Windows arm64 (no WebP)
 ```
 
 ## Usage

@@ -5,3 +5,4 @@ dist/
 integration/testdata/**/*.tif
 integration/testdata/**/*.tfw
 integration/testdata/**/*.zip
+*.exe

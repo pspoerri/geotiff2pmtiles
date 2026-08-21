@@ -80,7 +80,56 @@ that builds now require `CGO_ENABLED=1` and libwebp installed on the system
 A `!cgo` stub (`webp_stub.go`) provides graceful error messages when building with
 `CGO_ENABLED=0` — the binary compiles but WebP encode/decode returns an error at runtime.
 This allows CI cross-compilation without a C toolchain while keeping WebP available for
-native builds.
+native builds. The released Windows binaries ship in exactly that configuration
+(`CGO_ENABLED=0`, no libwebp), so WebP is unavailable there by design; JPEG, PNG and
+Terrarium are unaffected. Because the automatic jpeg → webp switch for nodata data would
+otherwise be fatal in such a build, it falls back to PNG (which also carries alpha) with
+a warning.
+
+## Windows support
+
+Windows has no `mmap(2)`; `mmap_windows.go` uses `CreateFileMapping` +
+`MapViewOfFile` (`PAGE_READONLY`/`FILE_MAP_READ`) from the standard `syscall`
+package, keeping the zero-dependency rule. The mapping handle is closed right
+after the view is created — the view holds its own reference to the section —
+so `Open` can keep closing the `os.File` immediately, as on Unix. The `[]byte`
+is assembled from a hand-written slice header rather than `unsafe.Slice`,
+because converting the `uintptr` that `MapViewOfFile` returns into an
+`unsafe.Pointer` trips `go vet`'s `unsafeptr` check; the mapping lives outside
+the Go heap, so the GC has nothing to track either way.
+
+Two POSIX habits do not survive the port and are handled explicitly rather than
+abstracted away:
+
+- **A mapped or open file is locked.** Go opens files without
+  `FILE_SHARE_DELETE`, so renaming or deleting over an open handle fails.
+  `pmheader` closes its input before the in-place rename, and
+  `DiskTileStore.Close` now warns when a spill file cannot be removed instead
+  of discarding the error.
+- **Paths are case-insensitive and accept both separators.** String equality is
+  not a same-file test, so `pmheader` and `pmtransform` compare identity with
+  `os.SameFile`, and `.pmtiles` extension checks use `strings.EqualFold` on
+  `filepath.Ext`. `collectTIFFs` also expands `*`/`?`/`[` itself, since neither
+  cmd.exe nor PowerShell globs arguments.
+
+RAM detection uses `GlobalMemoryStatusEx` through `syscall.NewLazyDLL`
+(kernel32 is already loaded in every process, so no DLL search occurs).
+
+The progress bar dropped its `\033[K` erase-to-end-of-line in favour of padding
+the redraw with spaces: Windows consoles only process VT sequences when
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING` is set, and padding needs no platform code
+at all.
+
+## Predictors are undone on a copy, never in the mapping
+
+`applyPredictor` rewrites its argument in place. For compressed tiles the
+argument is a freshly decompressed buffer, but for `Compression == 1` the tile
+bytes alias the read-only mapping — writing there is a SIGBUS on Unix and an
+access violation on Windows. The tiled 8/16-bit path already copied first; the
+float path did not, so an uncompressed float32 COG with `Predictor=2` or `3`
+crashed the process. Both paths now copy when a predictor is present, and only
+then (an uncompressed tile without a predictor is still handed out as a
+zero-copy view of the mapping).
 
 ## Performance profile
 

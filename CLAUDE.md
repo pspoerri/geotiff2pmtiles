@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Memory-efficient Go toolset for converting GeoTIFF/COG files to PMTiles v3 archives and transforming existing PMTiles archives. Pure Go stdlib — zero external Go dependencies. Requires libwebp C library for native WebP encoding (`brew install webp` / `apt-get install libwebp-dev`).
+Memory-efficient Go toolset for converting GeoTIFF/COG files to PMTiles v3 archives and transforming existing PMTiles archives. Pure Go stdlib — zero external Go dependencies. Requires libwebp C library for native WebP encoding (`brew install webp` / `apt-get install libwebp-dev`); builds without it at `CGO_ENABLED=0` (`make build CGO=0`), which is how the Windows binaries ship.
 
 ## Build & Test Commands
 
 ```bash
-make build              # Build geotiff2pmtiles (requires CGO_ENABLED=1 + libwebp)
+make build              # Build geotiff2pmtiles (requires CGO_ENABLED=1 + libwebp; CGO=0 to skip)
 make build-transform    # Build pmtransform
 make build-all          # Both binaries
 make test               # Run all tests
