@@ -1465,17 +1465,7 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj co
 	// Parse nodata values from the active sources.
 	nodataValues := make([]float64, len(tileSrcs))
 	for i := range tileSrcs {
-		nd := tileSrcs[i].reader.NoData()
-		if nd != "" {
-			v, err := strconv.ParseFloat(nd, 64)
-			if err == nil {
-				nodataValues[i] = v
-			} else {
-				nodataValues[i] = math.NaN()
-			}
-		} else {
-			nodataValues[i] = math.NaN()
-		}
+		nodataValues[i] = parseFloatNodata(tileSrcs[i].reader.NoData())
 	}
 
 	// Precompute lon per column and lat per row to avoid per-pixel trig.
@@ -1508,6 +1498,18 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj co
 		return nil
 	}
 	return img
+}
+
+// parseFloatNodata parses a GDAL_NODATA string for float rasters; NaN when
+// unset or unparseable. Pixels are float32, so the sentinel is rounded the same
+// way: otherwise values float32 cannot represent exactly (e.g. -3.4028235e+38)
+// would never compare equal to the pixels that hold them.
+func parseFloatNodata(s string) float64 {
+	v, err := strconv.ParseFloat(s, 64)
+	if s == "" || err != nil {
+		return math.NaN()
+	}
+	return float64(float32(v))
 }
 
 // sampleFromTileSourcesFloat tries each pre-filtered tile source to sample a

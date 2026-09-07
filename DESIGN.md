@@ -168,6 +168,15 @@ linear interpolation replaces the Catmull-Rom polynomial evaluation (`1.5x³ - 2
 so only the positive half is stored. While the polynomial is cheaper than Lanczos sin()
 calls, at ~3.25s cumulative CPU it was still worth eliminating.
 
+## Nodata handling for float (Terrarium) data
+
+Float kernels (bilinear, bicubic, Lanczos) skip taps that are NaN or equal to the
+source GDAL_NODATA value; Lanczos/bicubic renormalise over the remaining taps, bilinear
+falls back to nearest. An unset nodata is stored as NaN, which compares equal to nothing,
+so the check is a no-op in that case. The parsed sentinel is rounded through float32
+(`parseFloatNodata`) because pixels are float32: a float64 parse of e.g. `-3.4028235e+38`
+would otherwise never equal the widened pixel value.
+
 ## Nodata handling for image (non-float) data
 
 Pixels matching the GDAL_NODATA value are decoded as transparent (alpha=0) so downstream
