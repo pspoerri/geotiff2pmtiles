@@ -1530,15 +1530,16 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, sr
 		var val float64
 		var err error
 
+		nd := nodataValues[i]
 		switch mode {
 		case ResamplingNearest, ResamplingMode:
 			val, err = nearestSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
 		case ResamplingLanczos:
-			val, err = lanczosSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
+			val, err = lanczosSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache, nd)
 		case ResamplingBicubic:
-			val, err = bicubicSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache)
+			val, err = bicubicSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, src.tileW, src.tileH, cache, nd)
 		default:
-			val, err = bilinearSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)
+			val, err = bilinearSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache, nd)
 		}
 
 		if err != nil {
@@ -1549,7 +1550,6 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, sr
 		if math.IsNaN(val) {
 			continue
 		}
-		nd := nodataValues[i]
 		if !math.IsNaN(nd) && val == nd {
 			continue
 		}
@@ -1568,7 +1568,9 @@ func nearestSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH i
 }
 
 // bilinearSampleFloat performs bilinear interpolation on float data.
-func bilinearSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.FloatTileCache) (float64, error) {
+// nodata is the source nodata value (math.NaN when unset); pixels equal to it
+// are excluded, like NaN.
+func bilinearSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH int, cache *cog.FloatTileCache, nodata float64) (float64, error) {
 	x0 := int(math.Floor(fx))
 	y0 := int(math.Floor(fy))
 	x1 := x0 + 1
@@ -1599,8 +1601,9 @@ func bilinearSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH 
 		return math.NaN(), err
 	}
 
-	// If any neighbor is NaN, fall back to nearest.
-	if math.IsNaN(v00) || math.IsNaN(v10) || math.IsNaN(v01) || math.IsNaN(v11) {
+	// If any neighbor is NaN or nodata, fall back to nearest.
+	if math.IsNaN(v00) || math.IsNaN(v10) || math.IsNaN(v01) || math.IsNaN(v11) ||
+		v00 == nodata || v10 == nodata || v01 == nodata || v11 == nodata {
 		// Use the center pixel (nearest).
 		cx := int(math.Floor(fx + 0.5))
 		cy := int(math.Floor(fy + 0.5))
@@ -1619,12 +1622,12 @@ func bilinearSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH 
 }
 
 // lanczosSampleFloat performs Lanczos-3 interpolation on float data.
-// NaN pixels are excluded from the weighted sum; if all neighbors are NaN,
-// falls back to nearest-neighbor.
+// NaN/nodata pixels are excluded from the weighted sum; if all neighbors are
+// excluded, falls back to nearest-neighbor.
 //
 // Optimized with batched tile fetches (same approach as lanczosSampleCached)
 // and LUT-based kernel evaluation.
-func lanczosSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.FloatTileCache) (float64, error) {
+func lanczosSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.FloatTileCache, nodata float64) (float64, error) {
 	const a = 3
 	const n = 2 * a
 
@@ -1710,7 +1713,7 @@ func lanczosSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, 
 			}
 			val := float64(data[idx])
 
-			if math.IsNaN(val) {
+			if math.IsNaN(val) || val == nodata {
 				hasNaN = true
 				continue
 			}
@@ -1733,9 +1736,9 @@ func lanczosSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, 
 }
 
 // bicubicSampleFloat performs Catmull-Rom bicubic interpolation on float data.
-// NaN pixels are excluded from the weighted sum; if all neighbors are NaN,
-// falls back to nearest-neighbor.
-func bicubicSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.FloatTileCache) (float64, error) {
+// NaN/nodata pixels are excluded from the weighted sum; if all neighbors are
+// excluded, falls back to nearest-neighbor.
+func bicubicSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.FloatTileCache, nodata float64) (float64, error) {
 	const n = 4
 
 	ix0 := int(math.Floor(fx)) - 1
@@ -1819,7 +1822,7 @@ func bicubicSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, 
 			}
 			val := float64(data[idx])
 
-			if math.IsNaN(val) {
+			if math.IsNaN(val) || val == nodata {
 				hasNaN = true
 				continue
 			}
