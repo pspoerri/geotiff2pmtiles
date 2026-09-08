@@ -2,10 +2,10 @@ package cog
 
 import (
 	"bytes"
-	"compress/flate"
-	"compress/zlib"
 	"encoding/binary"
 	"fmt"
+	"github.com/klauspost/compress/flate"
+	"github.com/klauspost/compress/zlib"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // RescaleMode specifies how to rescale sample values to uint8.
@@ -167,8 +169,8 @@ func Open(path string) (*Reader, error) {
 	}
 
 	switch first.Compression {
-	case 1, 5, 7, 8, 32946:
-		// Supported: None, LZW, JPEG, Deflate
+	case 1, 5, 7, 8, 32946, 50000:
+		// Supported: None, LZW, JPEG, Deflate, ZSTD
 	default:
 		munmapFile(data)
 		return nil, fmt.Errorf("%s: unsupported compression type %d", path, first.Compression)
@@ -397,6 +399,12 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 			return nil, nil, fmt.Errorf("decompressing LZW tile: %w", err)
 		}
 		decompressed = dec
+	case 50000: // ZSTD (GDAL/libtiff)
+		dec, err := decompressZSTD(data)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decompressing zstd tile: %w", err)
+		}
+		decompressed = dec
 	default:
 		return nil, nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
 	}
@@ -502,6 +510,12 @@ func (r *Reader) readStripsRaw(ifd *IFD, start, end int) ([]byte, error) {
 				return nil, fmt.Errorf("decompressing LZW strip %d: %w", s, err)
 			}
 			combined = append(combined, dec...)
+		case 50000: // ZSTD
+			dec, err := decompressZSTD(chunk)
+			if err != nil {
+				return nil, fmt.Errorf("decompressing zstd strip %d: %w", s, err)
+			}
+			combined = append(combined, dec...)
 		default:
 			return nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
 		}
@@ -582,11 +596,13 @@ func undoFloatingPointPredictor(data []byte, width, samplesPerPixel, bytesPerSam
 		// Step 2: Byte-unshuffle.
 		// Encoded layout: MSB plane of all samples first, down to the LSB plane.
 		// Target layout: consecutive samples in the file's byte order.
+		// The interface compare is hoisted: per-byte it was ~30% of decode time.
 		sampleCount := width * samplesPerPixel
+		little := bo == binary.LittleEndian
 		for s := 0; s < sampleCount; s++ {
 			for b := 0; b < bytesPerSample; b++ {
 				plane := b // big-endian file: byte b is plane b
-				if bo == binary.LittleEndian {
+				if little {
 					plane = bytesPerSample - 1 - b
 				}
 				tmp[s*bytesPerSample+b] = row[plane*sampleCount+s]
@@ -761,6 +777,13 @@ func (r *Reader) readTileDecoded(level, col, row int) (image.Image, error) {
 		}
 		applyPredictor(ifd, decompressed, int(ifd.TileWidth), r.bo)
 		return r.decodeRawTile(ifd, decompressed)
+	case 50000: // ZSTD
+		decompressed, err := decompressZSTD(data)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing zstd tile: %w", err)
+		}
+		applyPredictor(ifd, decompressed, int(ifd.TileWidth), r.bo)
+		return r.decodeRawTile(ifd, decompressed)
 	default:
 		return nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
 	}
@@ -791,6 +814,20 @@ func decompressDeflate(data []byte) ([]byte, error) {
 // code width behavior required by the TIFF 6.0 spec.
 func decompressLZW(data []byte) ([]byte, error) {
 	return decompressTIFFLZW(data)
+}
+
+// zstdDecoder is shared across goroutines; DecodeAll is safe for concurrent use.
+// WithDecoderConcurrency(0) sizes its worker pool to GOMAXPROCS.
+var zstdDecoder = func() *zstd.Decoder {
+	d, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(0))
+	if err != nil {
+		panic(err)
+	}
+	return d
+}()
+
+func decompressZSTD(data []byte) ([]byte, error) {
+	return zstdDecoder.DecodeAll(data, nil)
 }
 
 // decodeJPEGTile decodes a JPEG-compressed tile, optionally prepending JPEG tables.
@@ -1731,6 +1768,8 @@ func (r *Reader) FormatDescription() string {
 		comp = "JPEG"
 	case 8, 32946:
 		comp = "Deflate"
+	case 50000:
+		comp = "ZSTD"
 	}
 
 	spp := int(ifd.SamplesPerPixel)

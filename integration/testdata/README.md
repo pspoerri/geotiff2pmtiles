@@ -19,6 +19,7 @@ bash integration/testdata/download.sh
 ```
 testdata/
   copernicus/            # Copernicus DEM GLO-30 (float32, ~8 MB)
+  copernicus-zstd/       # Same tile recompressed as ZSTD COG via GDAL (~39 MB)
   naturalearth/          # Natural Earth raster + TFW (8-bit RGB, ~200 MB)
   esaworldcover/         # ESA WorldCover S2 RGBNIR (16-bit 4-band, ~455 MB)
   esaworldcover-ndvi/    # ESA WorldCover S2 NDVI (single-band, ~168 MB)
@@ -32,6 +33,7 @@ testdata/
 | Directory | Source | EPSG | Depth | Description |
 |-----------|--------|------|-------|-------------|
 | `copernicus/` | [Copernicus DEM GLO-30](https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model) | 4326 | Float32 | 30m DEM tile (Swiss Alps) |
+| `copernicus-zstd/` | derived from `copernicus/` with `gdal_translate -co COMPRESS=ZSTD -co PREDICTOR=3` | 4326 | Float32 | ZSTD (compression 50000) decode path; needs GDAL |
 | `naturalearth/` | [Natural Earth](https://www.naturalearthdata.com/downloads/10m-raster-data/) | 4326 (TFW) | 8-bit RGB | Global hypsometric tints |
 | `esaworldcover/` | [ESA WorldCover S2](https://esa-worldcover.org/en/data-access) | 4326 | 16-bit 4-band | Sentinel-2 RGBNIR composite |
 | `esaworldcover-ndvi/` | [ESA WorldCover S2](https://esa-worldcover.org/en/data-access) | 4326 | 16-bit 1-band | NDVI (vegetation index) |
@@ -50,6 +52,7 @@ make test-integration-all
 
 # Per-dataset tests
 make test-integration-copernicus           # Float32 DEM -> terrarium PNG
+make test-integration-copernicus-zstd      # ZSTD COG (GDAL-derived) -> terrarium PNG
 make test-integration-naturalearth         # 8-bit RGB + TFW -> JPEG
 make test-integration-esaworldcover        # 16-bit 4-band RGBNIR -> PNG
 make test-integration-esaworldcover-ndvi   # Single-band NDVI -> grayscale PNG
