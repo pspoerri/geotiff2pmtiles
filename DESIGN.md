@@ -77,14 +77,15 @@ overhead, no per-call memory growth, and the C encoder runs 3-5x faster. The tra
 that builds now require `CGO_ENABLED=1` and libwebp installed on the system
 (`brew install webp` on macOS, `apt-get install libwebp-dev` on Linux).
 
-A `!cgo` stub (`webp_stub.go`) provides graceful error messages when building with
-`CGO_ENABLED=0` — the binary compiles but WebP encode/decode returns an error at runtime.
-This keeps cross-compilation possible without a C toolchain (`make cross-all CGO=0`),
-which is how the released Linux and macOS binaries are still built. Because the automatic
-jpeg → webp switch for nodata data would otherwise be fatal in such a build, it falls
-back to PNG (which also carries alpha) with a warning. `encode.Formats()` reports which
-formats a given binary actually has, and both CLIs print it under `--version`, so a
-stubbed build is identifiable without triggering the runtime error.
+The `!cgo` file (`webp_stub.go`) is no longer a stub: `CGO_ENABLED=0` builds decode WebP
+with `golang.org/x/image/webp` and encode with `HugoSmits86/nativewebp`, a pure-Go VP8L
+(lossless) encoder. There is no usable pure-Go lossy VP8 encoder — the only CGo-free route
+to lossy output is libwebp compiled to WASM under wazero, which was the slow path this
+project already left behind — so `--quality` is ignored in such builds. Lossless WebP is
+still smaller than PNG, so the nodata jpeg → webp switch no longer needs a PNG fallback.
+Cross-compilation without a C toolchain (`make cross-all CGO=0`) keeps working, which is
+how the released Linux and macOS binaries are still built. `encode.Formats()` says
+"webp (lossless only)" in that case and both CLIs print it under `--version`.
 
 ## Windows WebP: MSYS2 prebuilts, statically linked
 

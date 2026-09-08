@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Memory-efficient Go toolset for converting GeoTIFF/COG files to PMTiles v3 archives and transforming existing PMTiles archives. Pure Go; the only external Go dependency is `github.com/klauspost/compress` (ZSTD TIFF tiles). Requires libwebp C library for native WebP encoding (`brew install webp` / `apt-get install libwebp-dev`); builds without it at `CGO_ENABLED=0` (`make build CGO=0`), which is how the Windows binaries ship.
+Memory-efficient Go toolset for converting GeoTIFF/COG files to PMTiles v3 archives and transforming existing PMTiles archives. Pure Go deps only: `klauspost/compress` (ZSTD TIFF tiles), `golang.org/x/image` (WebP decode) and `HugoSmits86/nativewebp` (lossless WebP encode). Lossy WebP needs the libwebp C library via CGo (`brew install webp` / `apt-get install libwebp-dev`); `CGO_ENABLED=0` (`make build CGO=0`) builds still have WebP, lossless only.
 
 ## Build & Test Commands
 
