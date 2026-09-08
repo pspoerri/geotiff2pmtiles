@@ -16,6 +16,10 @@ DEM_DIR="$SCRIPT_DIR/copernicus"
 DEM_URL="https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N46_00_E008_00_DEM/Copernicus_DSM_COG_10_N46_00_E008_00_DEM.tif"
 DEM_FILE="copernicus_dem_n46_e008.tif"
 
+# --- Copernicus DEM recompressed as ZSTD COG (derived locally with GDAL) ---
+ZSTD_DIR="$SCRIPT_DIR/copernicus-zstd"
+ZSTD_FILE="copernicus_dem_n46_e008_zstd.tif"
+
 # --- Natural Earth Hypsometric Raster (8-bit RGB, EPSG:4326 via TFW, ~200 MB) ---
 NE_DIR="$SCRIPT_DIR/naturalearth"
 NE_URL="https://naciscdn.org/naturalearth/10m/raster/HYP_HR_SR_OB_DR.zip"
@@ -66,6 +70,21 @@ download_file() {
 
 # Download Copernicus DEM
 download_file "$DEM_URL" "$DEM_DIR/$DEM_FILE" "Copernicus DEM GLO-30 (N46 E008)"
+
+# Derive a ZSTD-compressed COG from the Copernicus DEM. No public dataset we
+# know of ships ZSTD tiles, so build one the way users do: gdal_translate.
+if [ -f "$ZSTD_DIR/$ZSTD_FILE" ]; then
+    echo "✓ Copernicus DEM ZSTD COG already exists: $ZSTD_DIR/$ZSTD_FILE"
+elif command -v gdal_translate >/dev/null 2>&1; then
+    mkdir -p "$ZSTD_DIR"
+    echo "🔧 Recompressing Copernicus DEM with ZSTD (gdal_translate)..."
+    gdal_translate -q -of COG -co COMPRESS=ZSTD -co PREDICTOR=3 -co BLOCKSIZE=512 \
+        "$DEM_DIR/$DEM_FILE" "$ZSTD_DIR/$ZSTD_FILE.tmp.tif"
+    mv "$ZSTD_DIR/$ZSTD_FILE.tmp.tif" "$ZSTD_DIR/$ZSTD_FILE"
+    echo "✓ Created: $ZSTD_DIR/$ZSTD_FILE"
+else
+    echo "⚠ gdal_translate not found; skipping ZSTD COG (brew install gdal / apt-get install gdal-bin)"
+fi
 
 # Download and extract Natural Earth
 download_file "$NE_URL" "$NE_DIR/$NE_ZIP" "Natural Earth Hypsometric Raster"

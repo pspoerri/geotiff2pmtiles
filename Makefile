@@ -45,6 +45,7 @@ MEM_LIMIT  ?= 0
 # Integration testdata directories (each dataset in its own folder for CLI input)
 TESTDATA_DIR     := integration/testdata
 COPERNICUS_DIR   := $(TESTDATA_DIR)/copernicus
+COPERNICUS_ZSTD_DIR := $(TESTDATA_DIR)/copernicus-zstd
 NATURALEARTH_DIR := $(TESTDATA_DIR)/naturalearth
 ESAWORLDCOVER_DIR       := $(TESTDATA_DIR)/esaworldcover
 ESAWORLDCOVER_NDVI_DIR  := $(TESTDATA_DIR)/esaworldcover-ndvi
@@ -55,7 +56,7 @@ SWISSIMAGE_DIR           := $(TESTDATA_DIR)/swissimage
 .PHONY: all build build-transform build-check build-header build-all install \
         test test-race test-cover bench \
         test-integration test-integration-download test-integration-real test-integration-all \
-        test-integration-copernicus test-integration-naturalearth \
+        test-integration-copernicus test-integration-copernicus-zstd test-integration-naturalearth \
         test-integration-esaworldcover test-integration-esaworldcover-ndvi \
         test-integration-esaworldcover-swir test-integration-esaworldcover-gamma0 \
         test-integration-swissimage \
@@ -68,7 +69,7 @@ SWISSIMAGE_DIR           := $(TESTDATA_DIR)/swissimage
         example-naturalearth example-naturalearth-full-disk \
         example-naturalearth-jpeg example-naturalearth-png example-naturalearth-webp \
         example-naturalearth-full-disk-jpeg example-naturalearth-full-disk-png example-naturalearth-full-disk-webp \
-        example-copernicus example-esaworldcover example-esaworldcover-ndvi \
+        example-copernicus example-copernicus-zstd example-esaworldcover example-esaworldcover-ndvi \
         example-esaworldcover-swir example-esaworldcover-gamma0 \
         example-transform example-transform-reencode example-transform-rebuild \
         cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 \
@@ -140,6 +141,10 @@ test-integration-real:
 test-integration-copernicus:
 	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestCopernicus ./integration/
 
+## test-integration-copernicus-zstd: Run Copernicus DEM ZSTD-compressed COG integration test
+test-integration-copernicus-zstd:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestCopernicusZSTD ./integration/
+
 ## test-integration-naturalearth: Run Natural Earth integration test (8-bit RGB + TFW → JPEG)
 test-integration-naturalearth:
 	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestNaturalEarth ./integration/
@@ -200,7 +205,7 @@ example-all: example-swissimage-jpeg example-swissimage-png example-swissimage-w
              example-swissimage-full-disk-jpeg example-swissimage-full-disk-png example-swissimage-full-disk-webp \
              example-naturalearth-jpeg example-naturalearth-png example-naturalearth-webp \
              example-naturalearth-full-disk-jpeg example-naturalearth-full-disk-png example-naturalearth-full-disk-webp \
-             example-copernicus \
+             example-copernicus example-copernicus-zstd \
              example-esaworldcover example-esaworldcover-ndvi example-esaworldcover-swir example-esaworldcover-gamma0 \
              example-transform example-transform-reencode example-transform-rebuild
 
@@ -334,6 +339,15 @@ example-copernicus: build test-integration-download
 		--resampling mode \
 		--concurrency $(CONCURRENT) \
 		$(COPERNICUS_DIR)/ $(BUILD_DIR)/example-copernicus-terrarium.pmtiles
+
+## example-copernicus-zstd: Copernicus DEM recompressed as ZSTD COG (needs GDAL at download time)
+example-copernicus-zstd: build test-integration-download
+	./$(OUTPUT) \
+		--format terrarium \
+		--tile-size $(TILE_SIZE) \
+		--resampling mode \
+		--concurrency $(CONCURRENT) \
+		$(COPERNICUS_ZSTD_DIR)/ $(BUILD_DIR)/example-copernicus-zstd-terrarium.pmtiles
 
 # ---------- ESA WorldCover Example (16-bit RGBNIR → PNG) ----------
 
@@ -493,6 +507,7 @@ help:
 	@echo "  make example-naturalearth              Natural Earth example"
 	@echo "  make example-naturalearth-webp         Natural Earth example with WebP"
 	@echo "  make example-copernicus               Copernicus DEM example (terrarium)"
+	@echo "  make example-copernicus-zstd          Copernicus DEM as ZSTD COG (terrarium)"
 	@echo "  make example-esaworldcover            ESA WorldCover RGBNIR example"
 	@echo "  make example-esaworldcover-ndvi       ESA WorldCover NDVI example"
 	@echo "  make example-esaworldcover-swir       ESA WorldCover SWIR example"

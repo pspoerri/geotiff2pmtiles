@@ -7,7 +7,7 @@ For more information on the PMTiles format, see the [PMTiles documentation](http
 
 You can visualize generated PMTiles files at [pmtiles.io](https://pmtiles.io/).
 
-Real satellite and raster test data is downloaded via `make test-integration-download` into `integration/testdata/`. Seven datasets are available: Copernicus DEM (float32), Natural Earth (8-bit RGB + TFW), ESA WorldCover S2 RGBNIR / NDVI / SWIR, ESA WorldCover S1 SAR gamma0, and swisstopo SWISSIMAGE DOP10 (EPSG:2056 mosaic).
+Real satellite and raster test data is downloaded via `make test-integration-download` into `integration/testdata/`. Eight datasets are available: Copernicus DEM (float32, plus a ZSTD-recompressed copy built with GDAL), Natural Earth (8-bit RGB + TFW), ESA WorldCover S2 RGBNIR / NDVI / SWIR, ESA WorldCover S1 SAR gamma0, and swisstopo SWISSIMAGE DOP10 (EPSG:2056 mosaic).
 
 
 ## Features
@@ -33,7 +33,7 @@ Real satellite and raster test data is downloaded via `make test-integration-dow
 - GeoTIFF / Cloud Optimized GeoTIFF (COG) files
 - Plain TIFF with TFW (TIFF World File) sidecar for georeferencing
 - Strip-based and tiled TIFF layouts, pixel- or band-interleaved (planar-separate strips: all compressions except JPEG)
-- TIFF compression: JPEG, LZW, Deflate/Zlib, and uncompressed (with predictor support)
+- TIFF compression: JPEG, LZW, Deflate/Zlib, ZSTD, and uncompressed (with predictor support)
 - Sample formats: 8-bit RGB/RGBA, 16-bit uint16 (with linear/log rescaling), Float32/Float64 (for elevation/DEM data)
 - Band reordering and alpha band selection for multi-band GeoTIFFs (e.g. RGBNIR false-color composites)
 - Source CRS: EPSG:2056 (Swiss LV95), EPSG:4326 (WGS84), EPSG:3857 (Web Mercator)
@@ -372,11 +372,12 @@ make test-integration-download   # Download all real satellite data (~1.2 GB tot
 make test-integration-all        # Download + run all tests
 ```
 
-Seven real-data datasets are used, each exercising a different input type:
+Eight real-data datasets are used, each exercising a different input type:
 
 | Dataset | Size | EPSG | Type | Description |
 |---------|------|------|------|-------------|
 | `copernicus/` | ~8 MB | 4326 | Float32 | Copernicus DEM GLO-30 — 30m elevation tile (Swiss Alps) |
+| `copernicus-zstd/` | ~39 MB | 4326 | Float32, ZSTD | Same tile recompressed with `gdal_translate -co COMPRESS=ZSTD` (needs GDAL) |
 | `naturalearth/` | ~200 MB | 4326 | 8-bit RGB + TFW | Natural Earth hypsometric tints (global, TFW sidecar) |
 | `esaworldcover/` | ~455 MB | 4326 | 16-bit 4-band | ESA WorldCover S2 RGBNIR composite (Sentinel-2) |
 | `esaworldcover-ndvi/` | ~168 MB | 4326 | 8-bit 3-band | ESA WorldCover S2 NDVI percentiles (p10/p50/p90) |
@@ -388,6 +389,7 @@ Per-dataset test targets:
 
 ```bash
 make test-integration-copernicus           # Float32 DEM → terrarium PNG
+make test-integration-copernicus-zstd      # Same DEM as ZSTD COG → terrarium PNG
 make test-integration-naturalearth         # 8-bit RGB + TFW → JPEG
 make test-integration-esaworldcover        # 16-bit 4-band RGBNIR → PNG (preset + pipeline tests)
 make test-integration-esaworldcover-ndvi   # 8-bit 3-band NDVI → grayscale PNG

@@ -112,7 +112,7 @@ script. Naming both libraries directly is shorter and works on every environment
 
 Windows has no `mmap(2)`; `mmap_windows.go` uses `CreateFileMapping` +
 `MapViewOfFile` (`PAGE_READONLY`/`FILE_MAP_READ`) from the standard `syscall`
-package, keeping the zero-dependency rule. The mapping handle is closed right
+package, avoiding a `golang.org/x/sys` dependency. The mapping handle is closed right
 after the view is created — the view holds its own reference to the section —
 so `Open` can keep closing the `os.File` immediately, as on Unix. The `[]byte`
 is assembled from a hand-written slice header rather than `unsafe.Slice`,
@@ -391,8 +391,21 @@ bilinear, bicubic, and Lanczos sampling functions.
 
 ## TIFF predictor support
 
-LZW and Deflate compressed TIFFs may use predictors to improve compression. After
+LZW, Deflate and ZSTD compressed TIFFs may use predictors to improve compression. After
 decompression, the predictor encoding is reversed before interpreting pixel values.
+
+## ZSTD compression
+
+TIFF compression 50000 (GDAL/libtiff ZSTD) stores each tile or strip as an
+independent zstd frame. Go's stdlib has no zstd decoder, so this is the one
+place the project takes an external Go dependency: `github.com/klauspost/compress/zstd`,
+pure Go, so it works in the `CGO_ENABLED=0` Windows builds. A single shared
+decoder is used via `DecodeAll`, which is safe for concurrent use.
+
+The Deflate/zlib path uses the same module's `flate`/`zlib` packages, a drop-in
+for the stdlib ones that decodes ~20–25% faster with far fewer allocations.
+LZW keeps the in-tree TIFF-variant decoder (`lzw.go`); klauspost/compress has
+no LZW.
 
 **Predictor=2** (horizontal differencing) stores each sample as the delta from the
 previous sample in the same row. Accumulating the deltas row-by-row recovers the

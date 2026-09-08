@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// writeTiledFloatTIFF writes a minimal single-tile, uncompressed float32 TIFF
-// with the given predictor tag and raw tile payload.
-func writeTiledFloatTIFF(t *testing.T, path string, w, h, predictor int, payload []byte) {
+// writeTiledFloatTIFF writes a minimal single-tile float32 TIFF with the given
+// compression and predictor tags and the (already compressed) tile payload.
+func writeTiledFloatTIFF(t *testing.T, path string, w, h, compression, predictor int, payload []byte) {
 	t.Helper()
 	bo := binary.LittleEndian
 	short := func(v uint16) []byte { b := make([]byte, 4); bo.PutUint16(b, v); return b }
@@ -23,7 +23,7 @@ func writeTiledFloatTIFF(t *testing.T, path string, w, h, predictor int, payload
 		{256, 3, 1, short(uint16(w))},           // ImageWidth
 		{257, 3, 1, short(uint16(h))},           // ImageLength
 		{258, 3, 1, short(32)},                  // BitsPerSample
-		{259, 3, 1, short(1)},                   // Compression: none
+		{259, 3, 1, short(uint16(compression))}, // Compression
 		{262, 3, 1, short(1)},                   // PhotometricInterpretation
 		{277, 3, 1, short(1)},                   // SamplesPerPixel
 		{317, 3, 1, short(uint16(predictor))},   // Predictor
@@ -71,7 +71,7 @@ func TestReadFloatTileUncompressedPredictor(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "float-predictor.tif")
-	writeTiledFloatTIFF(t, path, w, h, 3, payload)
+	writeTiledFloatTIFF(t, path, w, h, 1, 3, payload)
 
 	r, err := Open(path)
 	if err != nil {
