@@ -217,3 +217,44 @@ func TestFormatsMatchesBuild(t *testing.T) {
 		t.Errorf("Formats() = %q, says lossless = %v, cgo = %v", Formats(), got, webpCGOAvailable)
 	}
 }
+
+func TestWebPEncoder_RoundTrip(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			if x < 32 {
+				img.SetRGBA(x, y, color.RGBA{255, 0, 0, 255})
+			} else {
+				img.SetRGBA(x, y, color.RGBA{0, 0, 0, 0})
+			}
+		}
+	}
+
+	enc, err := NewEncoder("webp", 85)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	data, err := enc.Encode(img)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !bytes.HasPrefix(data, []byte("RIFF")) || string(data[8:12]) != "WEBP" {
+		t.Fatalf("output is not a WebP container: % x", data[:12])
+	}
+
+	decoded, err := DecodeImage(data, "webp")
+	if err != nil {
+		t.Fatalf("DecodeImage: %v", err)
+	}
+	if decoded.Bounds() != img.Bounds() {
+		t.Fatalf("bounds = %v, want %v", decoded.Bounds(), img.Bounds())
+	}
+	r, g, b, a := decoded.At(10, 10).RGBA()
+	if r>>8 < 240 || g>>8 > 15 || b>>8 > 15 || a>>8 != 255 {
+		t.Errorf("opaque pixel = (%d,%d,%d,%d), want ~(255,0,0,255)", r>>8, g>>8, b>>8, a>>8)
+	}
+	_, _, _, a = decoded.At(50, 10).RGBA()
+	if a>>8 != 0 {
+		t.Errorf("transparent pixel alpha = %d, want 0", a>>8)
+	}
+}
