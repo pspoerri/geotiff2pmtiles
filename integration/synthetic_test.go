@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
-	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 	"github.com/pspoerri/geotiff2pmtiles/internal/pmtiles"
 )
 
@@ -610,14 +609,9 @@ func TestTransformRebuildWithFillColor_Sparse(t *testing.T) {
 	}
 }
 
-// TestWebPEncoding generates a 512x512 8-bit RGB GeoTIFF and converts to WebP.
-// Skipped if CGO/libwebp is not available.
+// TestWebPEncoding generates a 512x512 8-bit RGB GeoTIFF and converts to WebP
+// (lossy with libwebp, lossless VP8L in CGO_ENABLED=0 builds).
 func TestWebPEncoding(t *testing.T) {
-	_, err := encode.NewEncoder("webp", 85)
-	if err != nil {
-		t.Skip("WebP encoder not available (requires CGO + libwebp)")
-	}
-
 	tiffPath := writeSyntheticGeoTIFF(t, tiffWriterConfig{
 		Width: 512, Height: 512,
 		SamplesPerPixel: 3,
