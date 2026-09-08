@@ -14,7 +14,7 @@ Real satellite and raster test data is downloaded via `make test-integration-dow
 
 - **Memory-efficient**: Reads COG tiles on-demand via memory-mapped I/O; never loads entire rasters into memory
 - **Disk-backed tile store**: Tiles are stored in encoded form (5-25x smaller than raw pixels) and continuously spilled to disk via a dedicated I/O goroutine with configurable memory backpressure
-- **Native WebP**: WebP encoding/decoding via native libwebp (CGo), eliminating WASM overhead for 3-5x faster encodes
+- **Native WebP**: lossy WebP via native libwebp (CGo); `CGO_ENABLED=0` builds fall back to a pure-Go lossless WebP encoder and decoder
 - **Multiple encodings**: JPEG, PNG, WebP, and Terrarium (for elevation/DEM data)
 - **Auto zoom detection**: Calculates maximum zoom level from source resolution
 - **Auto-detection**: Automatically detects data type and configures processing — float GeoTIFFs get Terrarium encoding for elevation/DEM data; multi-band satellite GeoTIFFs with GDAL band descriptions get automatic band ordering and rescale range. Works with Sentinel-2, PlanetScope, Google Earth Engine exports, HLS, and any GDAL-created multi-band GeoTIFF — no manual flags needed
@@ -44,8 +44,8 @@ Real satellite and raster test data is downloaded via `make test-integration-dow
 Linux, macOS and Windows, on amd64 and arm64. The released Windows binaries link libwebp
 statically: all four tile formats in a single `.exe`, with no DLLs to copy alongside it.
 The released Linux and macOS binaries are still cross-compiled at `CGO_ENABLED=0`, so
-`--format webp` reports an error there — build from source with libwebp installed (below)
-to get it. `--version` says which formats any given binary has.
+`--format webp` there produces lossless WebP (pure Go, `--quality` ignored) — build from
+source with libwebp installed (below) for lossy WebP. `--version` says which a binary has.
 
 ## Prerequisites
 
@@ -73,8 +73,8 @@ pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-libwebp
 pacman -S mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-libwebp
 ```
 
-Without libwebp, build with `CGO_ENABLED=0` (`make build CGO=0`): everything except WebP
-encoding and decoding works.
+Without libwebp, build with `CGO_ENABLED=0` (`make build CGO=0`): WebP decoding still
+works (pure Go), and WebP encoding is lossless only.
 
 ## Installation
 
@@ -97,7 +97,7 @@ Or using the Makefile — on Windows it adds the `.exe` suffix and the static li
 make build            # geotiff2pmtiles only
 make build-transform  # pmtransform only
 make build-all        # both binaries
-make build CGO=0      # without libwebp (no WebP encoder)
+make build CGO=0      # without libwebp (lossless-only WebP encoder)
 make example-all      # run every example target
 ```
 

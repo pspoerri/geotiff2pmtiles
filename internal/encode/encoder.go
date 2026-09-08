@@ -46,11 +46,11 @@ func NewEncoder(format string, quality int) (Encoder, error) {
 	}
 }
 
-// Formats lists the tile formats this build supports. WebP needs CGo and
-// libwebp, so it is missing from CGO_ENABLED=0 builds.
+// Formats lists the tile formats this build supports. Lossy WebP needs CGo and
+// libwebp; CGO_ENABLED=0 builds fall back to a pure-Go lossless WebP encoder.
 func Formats() string {
 	if webpCGOAvailable {
 		return "jpeg, png, webp, terrarium"
 	}
-	return "jpeg, png, terrarium"
+	return "jpeg, png, webp (lossless only), terrarium"
 }

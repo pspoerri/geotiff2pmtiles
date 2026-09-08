@@ -41,7 +41,7 @@ internal/
     jpeg.go                         JPEG encoder
     png.go                          PNG encoder
     webp.go                         WebP encoder/decoder (native libwebp via CGo)
-    webp_stub.go                    WebP stubs for non-CGo builds (returns errors)
+    webp_stub.go                    Pure-Go WebP for non-CGo builds (x/image/webp decode, nativewebp lossless encode)
     webp_available.go               CGo availability flag for conditional tests
     terrarium.go                    Terrarium encoder for elevation data
   pmtiles/
@@ -124,15 +124,16 @@ availability); everything else is portable Go.
 
 Source builds use `CGO_ENABLED=1` and link libwebp, resolved through
 `pkg-config` on Linux and macOS and named directly (`-lwebp -lsharpyuv`) on
-Windows. A `CGO_ENABLED=0` build still compiles and carries the WebP stub:
-JPEG, PNG and Terrarium work, `--format webp` returns an error, and
-`--version` lists the formats actually present.
+Windows. A `CGO_ENABLED=0` build swaps in pure Go: `golang.org/x/image/webp`
+decodes lossy and lossless WebP, `HugoSmits86/nativewebp` encodes lossless
+VP8L (no pure-Go lossy VP8 encoder exists, so `--quality` is ignored), and
+`--version` says which variant a binary has.
 
 CI builds the Windows binaries natively under MSYS2 (UCRT64 on amd64,
 CLANGARM64 on arm64) with CGo on and `-extldflags=-static`, producing a
 self-contained `.exe` that includes WebP. The Linux and macOS binaries are
 still cross-compiled from the Ubuntu job at `CGO_ENABLED=0`, so the released
-builds for those platforms carry the stub.
+builds for those platforms carry the pure-Go lossless variant.
 
 Windows keeps a file locked while a handle or mapping is open, so code that
 renames or deletes over a file it also reads closes first (`pmheader`,

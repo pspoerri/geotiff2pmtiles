@@ -44,9 +44,6 @@ func TestNewEncoder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.format, func(t *testing.T) {
-			if tt.format == "webp" && !webpCGOAvailable {
-				t.Skip("webp encoder requires CGO with libwebp")
-			}
 			enc, err := NewEncoder(tt.format, 85)
 			if tt.wantErr {
 				if err == nil {
@@ -216,7 +213,7 @@ func TestPNGEncoder_TransparentImage(t *testing.T) {
 }
 
 func TestFormatsMatchesBuild(t *testing.T) {
-	if got := strings.Contains(Formats(), "webp"); got != webpCGOAvailable {
-		t.Errorf("Formats() = %q, lists webp = %v, want %v", Formats(), got, webpCGOAvailable)
+	if got := strings.Contains(Formats(), "lossless"); got == webpCGOAvailable {
+		t.Errorf("Formats() = %q, says lossless = %v, cgo = %v", Formats(), got, webpCGOAvailable)
 	}
 }

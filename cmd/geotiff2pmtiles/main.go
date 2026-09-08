@@ -273,14 +273,7 @@ func main() {
 			format = "webp"
 			enc, err = encode.NewEncoder(format, quality)
 			if err != nil {
-				// No WebP in this build (CGO off, e.g. the Windows binaries).
-				// PNG carries transparency too, just at a larger size.
-				log.Printf("WARNING: WebP is unavailable in this build (%v); using PNG instead.", err)
-				format = "png"
-				enc, err = encode.NewEncoder(format, quality)
-				if err != nil {
-					log.Fatalf("Encoder: %v", err)
-				}
+				log.Fatalf("Encoder: %v", err)
 			}
 		}
 	}
