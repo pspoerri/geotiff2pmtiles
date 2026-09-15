@@ -345,7 +345,21 @@ func DeserializeDirectory(data []byte) ([]Entry, error) {
 	return entries, nil
 }
 
-// optimizeRunLengths merges consecutive entries with contiguous tile IDs and offsets.
+// optimizeRunLengths merges consecutive tile IDs that share one data blob
+// into a single run-length entry.
+//
+// PMTiles v3 semantics: an entry with RunLength N covers tile IDs
+// [TileID, TileID+N) and every one of them resolves to the SAME
+// Offset/Length. That is what pmtiles.js, go-pmtiles and the Python reader
+// implement. A run is therefore only valid for deduplicated tiles (identical
+// content, remapped to one offset by clusterTileData); tiles whose blobs are
+// merely adjacent in the data section must keep their own entries.
+//
+// Until 2026-09 this function merged adjacent-but-distinct blobs as well
+// (Offset advancing by Length each step), which only this package's own
+// reader could decode: every spec reader served the first tile's bytes for
+// the rest of the run. scripts/pmtiles_fix_runlengths.py repairs archives
+// written with that layout.
 func optimizeRunLengths(entries []Entry) []Entry {
 	if len(entries) == 0 {
 		return entries
@@ -357,12 +371,10 @@ func optimizeRunLengths(entries []Entry) []Entry {
 
 	for i := 1; i < len(entries); i++ {
 		e := entries[i]
-		// Check if this entry is contiguous with the current run.
 		expectedTileID := current.TileID + uint64(current.RunLength)
-		expectedOffset := current.Offset + uint64(current.Length)*uint64(current.RunLength)
 
 		if e.TileID == expectedTileID &&
-			e.Offset == expectedOffset &&
+			e.Offset == current.Offset &&
 			e.Length == current.Length {
 			current.RunLength++
 		} else {

@@ -79,14 +79,16 @@ func OpenReader(path string) (*Reader, error) {
 		}
 	}
 
-	// Expand run-length entries and build index.
+	// Expand run-length entries and build index. Per the PMTiles v3 spec a
+	// run of N tile IDs shares ONE blob: every ID in [TileID, TileID+N)
+	// resolves to the same Offset/Length.
 	tileIdx := make(map[uint64]tileRef, len(allEntries)*2)
 	var expanded []Entry
 	for _, e := range allEntries {
 		for r := uint32(0); r < e.RunLength; r++ {
 			tileID := e.TileID + uint64(r)
 			ref := tileRef{
-				offset: header.TileDataOffset + e.Offset + uint64(r)*uint64(e.Length),
+				offset: header.TileDataOffset + e.Offset,
 				length: e.Length,
 			}
 			tileIdx[tileID] = ref
