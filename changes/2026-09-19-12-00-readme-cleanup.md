@@ -37,4 +37,16 @@ Other documents:
   list (now including the two new documents) moved there.
 - README Layout row: tiled band-interleaved files are JPEG-only, stripped ones anything but.
 
+Makefile (519 → 358 lines):
+
+- Removed the twelve `example-*-{jpeg,png,webp}` wrapper targets; use `FORMAT=` instead
+  (`make example-swissimage FORMAT=png`). `example-all` now loops over the formats with
+  `$(MAKE)` — before, the three wrappers shared one prerequisite, which make runs only once
+  per invocation, so `example-all` only ever produced the first format.
+- Shared example flags moved into `EXAMPLE_FLAGS`; the transform examples reuse the output
+  of `example-swissimage` instead of repeating the conversion.
+- Removed unused `MIN_ZOOM` and `MEM_LIMIT` variables; `all` is now `build-all`.
+- `make help`: target list no longer breaks on descriptions containing `:`; dropped the
+  hand-maintained example list that duplicated it. `.PHONY` regenerated.
+
 No code changes; CLI help is unaffected.
