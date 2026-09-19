@@ -1052,6 +1052,10 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	bps := ifd.bytesPerSample() // 1 for 8-bit, 2 for 16-bit
 	is16 := bps == 2
 	pixelBytes := spp * bps
+	// Signed 16-bit: samples, nodata and the rescale range all move into the
+	// biased unsigned space (see signBias16).
+	bias := ifd.sampleBias()
+	fbias := float64(bias)
 
 	// Resolve band mapping from config (with defaults).
 	cfg := r.bandCfg
@@ -1069,6 +1073,10 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	bandR--
 	bandG--
 	bandB--
+	if spp == 1 {
+		// Single-band data renders as gray rather than filling only red.
+		bandR, bandG, bandB = 0, 0, 0
+	}
 
 	// Resolve alpha band: 0=auto, -1=none, >0=explicit (1-indexed).
 	alphaBand := cfg.AlphaBand
@@ -1109,16 +1117,18 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	var genNodataU16 uint16
 	var genNodataTol uint16
 	if !useLegacyNodata && r.floodMask == nil {
-		if cfg.HasNodata {
+		if nd := cfg.Nodata + fbias; cfg.HasNodata && (nd < 0 || nd > 65535) {
+			// Not representable in this raster's sample type: matches nothing.
+		} else if cfg.HasNodata {
 			genHasNodata = true
-			genNodataU16 = uint16(cfg.Nodata)
+			genNodataU16 = uint16(nd)
 			if cfg.NodataTolerance > 0 {
 				genNodataTol = uint16(cfg.NodataTolerance)
 			}
 		} else if nd := r.ifds[0].NoData; nd != "" {
-			if v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64); err == nil && v >= 0 && v <= 65535 && v == math.Floor(v) {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64); err == nil && v+fbias >= 0 && v+fbias <= 65535 && v == math.Floor(v) {
 				genHasNodata = true
-				genNodataU16 = uint16(v)
+				genNodataU16 = uint16(v + fbias)
 			}
 		}
 	}
@@ -1134,7 +1144,7 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 		rescaleMin = 0
 		rescaleMax = 65535
 	}
-	rescale := buildRescaler(rescaleMode, rescaleMin, rescaleMax)
+	rescale := buildRescaler(rescaleMode, rescaleMin+fbias, rescaleMax+fbias)
 
 	// readSample reads one sample from the pixel data at the given 0-indexed band.
 	readSample := func(pixelOff, band int) uint16 {
@@ -1143,7 +1153,7 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			return 0
 		}
 		if is16 {
-			return r.bo.Uint16(data[off : off+2])
+			return r.bo.Uint16(data[off:off+2]) ^ uint16(bias)
 		}
 		return uint16(data[off])
 	}
@@ -1191,10 +1201,10 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			if bandR < spp {
 				rV = readSample(pixelOff, bandR)
 			}
-			if spp > 1 && bandG < spp {
+			if bandG < spp {
 				gV = readSample(pixelOff, bandG)
 			}
-			if spp > 2 && bandB < spp {
+			if bandB < spp {
 				bV = readSample(pixelOff, bandB)
 			}
 

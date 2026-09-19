@@ -81,7 +81,7 @@ func main() {
 	flag.StringVar(&alphaBandStr, "alpha-band", "auto", "1-indexed band for alpha (0=auto: band 4 for 8-bit spp>=4; -1=force no alpha)")
 	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, log, linear, none (auto: linear for 16-bit, none otherwise)")
 	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (default: auto-detected from GDAL statistics, else sampled pixels; the selected range is logged)")
-	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set)")
+	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer are transparent; may be negative for signed data (auto-detected from GeoTIFF if not set)")
 	flag.StringVar(&nodataTolStr, "nodata-tolerance", "", "Per-band tolerance applied to --nodata matching (default 0 = exact match). Useful for lossy-JPEG borders where strict 0 is smeared to 1..5; try 4–8.")
 	flag.BoolVar(&nodataFlood, "nodata-flood", false, "Source-level flood-fill from the COG outer edges through near-nodata pixels. Only edge-reachable pixels are made transparent; interior dark pixels (text, shadows, canopy) stay opaque. Requires --nodata; pair with a widened --nodata-tolerance (e.g. 40) for scanned/JPEG sources. Costs ~W*H/8 bytes of RAM per source.")
 
@@ -227,7 +227,11 @@ func main() {
 		log.Fatal("Terrarium format requires float or signed-integer GeoTIFF input (elevation data)")
 	}
 
-	// Parse band config.
+	// Parse band config. Terrarium reads elevation directly, so rescaling
+	// (and its range detection) does not apply.
+	if format == "terrarium" {
+		rescaleStr = "none"
+	}
 	bandCfg, err := parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange, sources)
 	if err != nil {
 		log.Fatalf("Band config: %v", err)
@@ -236,15 +240,15 @@ func main() {
 	// Apply nodata: CLI override takes precedence, then preset/IFD auto-detection.
 	if nodataStr != "" {
 		v, err := strconv.ParseFloat(strings.TrimSpace(nodataStr), 64)
-		if err != nil || v < 0 || v > 65535 || v != math.Floor(v) {
-			log.Fatalf("--nodata: must be a non-negative integer ≤ 65535, got %q", nodataStr)
+		if err != nil || v < -32768 || v > 65535 || v != math.Floor(v) {
+			log.Fatalf("--nodata: must be an integer in [-32768, 65535], got %q", nodataStr)
 		}
 		bandCfg.HasNodata = true
 		bandCfg.Nodata = v
 	} else if !bandCfg.HasNodata {
 		// Auto-detect from the first source file if not already set by preset.
 		if nd := sources[0].NoData(); nd != "" {
-			if v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64); err == nil && v >= 0 && v <= 65535 && v == math.Floor(v) {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(nd), 64); err == nil && v >= -32768 && v <= 65535 && v == math.Floor(v) {
 				bandCfg.HasNodata = true
 				bandCfg.Nodata = v
 			}
@@ -719,7 +723,7 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, so
 		if is16 {
 			if rescaleRange == "" {
 				// Try auto-detection from GDAL metadata before erroring.
-				if preset, ok := firstSrc.DetectPreset(); ok && !bandsExplicit {
+				if preset, ok := firstSrc.DetectPreset(); ok && !bandsExplicit && preset.Format == "" {
 					log.Printf("Auto-detected: %s (%s)", preset.Name, preset.BandCfg)
 					return preset.BandCfg, nil
 				}

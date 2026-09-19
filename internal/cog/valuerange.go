@@ -11,7 +11,7 @@ import (
 // maxRangeScanTiles bounds the pixel scan in ValueRange.
 const maxRangeScanTiles = 64
 
-// ValueRange returns the min/max sample value of a 16-bit unsigned raster for
+// ValueRange returns the min/max sample value of a 16-bit (signed or unsigned) raster for
 // automatic rescaling, and where it came from. GDAL band statistics
 // (STATISTICS_MINIMUM/MAXIMUM) are used when present; otherwise pixels are scanned.
 func (r *Reader) ValueRange() (lo, hi float64, source string, err error) {
@@ -49,6 +49,8 @@ func (r *Reader) scanRange() (float64, float64, error) {
 		return 0, 0, fmt.Errorf("pixel scan supports only non-JPEG 16-bit data")
 	}
 	nodata, err := strconv.ParseFloat(strings.TrimSpace(r.ifds[0].NoData), 64)
+	bias := r.ifds[0].sampleBias()
+	nodata += float64(bias)
 	hasNodata := err == nil && nodata >= 0 && nodata <= math.MaxUint16
 
 	across, down := ifd.TilesAcross(), ifd.TilesDown()
@@ -63,7 +65,7 @@ func (r *Reader) scanRange() (float64, float64, error) {
 		}
 		validW := min(tw, int(ifd.Width)-col*tw)
 		validH := min(th, int(ifd.Height)-row*th)
-		tLo, tHi, ok := minMaxUint16(data, r.bo, int(ifd.SamplesPerPixel), tw, validW, validH, uint16(nodata), hasNodata)
+		tLo, tHi, ok := minMaxUint16(data, r.bo, int(ifd.SamplesPerPixel), tw, validW, validH, bias, uint16(nodata), hasNodata)
 		if ok {
 			found = true
 			if tLo < lo {
@@ -77,12 +79,14 @@ func (r *Reader) scanRange() (float64, float64, error) {
 	if !found || lo == hi {
 		return 0, 0, fmt.Errorf("no usable value range found in sampled pixels")
 	}
-	return float64(lo), float64(hi), nil
+	return float64(lo) - float64(bias), float64(hi) - float64(bias), nil
 }
 
 // minMaxUint16 returns the min/max of the chunky uint16 samples in the
 // validW×validH region of a tile tw pixels wide, skipping nodata samples.
-func minMaxUint16(data []byte, bo binary.ByteOrder, spp, tw, validW, validH int, nodata uint16, hasNodata bool) (lo, hi uint16, ok bool) {
+// Samples are XOR-ed with bias (see signBias16); nodata and the result are in
+// that biased space.
+func minMaxUint16(data []byte, bo binary.ByteOrder, spp, tw, validW, validH, bias int, nodata uint16, hasNodata bool) (lo, hi uint16, ok bool) {
 	lo = math.MaxUint16
 	for y := 0; y < validH; y++ {
 		rowOff := y * tw * spp * 2
@@ -90,7 +94,7 @@ func minMaxUint16(data []byte, bo binary.ByteOrder, spp, tw, validW, validH int,
 			break
 		}
 		for s := 0; s < validW*spp; s++ {
-			v := bo.Uint16(data[rowOff+s*2:])
+			v := bo.Uint16(data[rowOff+s*2:]) ^ uint16(bias)
 			if hasNodata && v == nodata {
 				continue
 			}
