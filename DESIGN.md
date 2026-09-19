@@ -114,6 +114,15 @@ negative depths wrapped to ~56000–65535 and the ocean vanished under any
 `--rescale-range` — so they decode to float32 in `decodeRawFloat32Tile` and reuse the
 whole terrarium path (nodata, resampling, pyramid) instead of growing a third pipeline.
 
+**Signed int16 as an image** (`--format webp/png/jpeg`): the RGB path keeps its uint16
+rescale/nodata machinery and biases samples instead — `raw ^ 0x8000` equals `+32768`
+and preserves order, so `decodeRawTile` shifts the rescale range and nodata by the same
+bias (`IFD.sampleBias`). Linear and log rescaling depend only on `v - min`, so the output
+is identical to true signed arithmetic. The elevation preset carries only a format, so
+`parseBandConfig` ignores it for rescaling, and `--nodata` accepts negative values.
+Single-band sources render as gray in this path (previously only the red channel was
+filled). Not covered: `--nodata-flood` on signed data.
+
 **GDAL_METADATA parsing**: TIFF tag 42112 contains an XML blob with `<Item>` elements.
 Items have a `name` attribute and optional `sample` (0-indexed band) and `role`
 attributes. The XML is parsed into `GDALMeta` with two levels: `Items` (dataset-level)

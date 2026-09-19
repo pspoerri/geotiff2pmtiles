@@ -32,7 +32,7 @@ func TestMinMaxUint16SkipsNodataAndPadding(t *testing.T) {
 	for i, v := range vals {
 		binary.LittleEndian.PutUint16(data[i*2:], v)
 	}
-	lo, hi, ok := minMaxUint16(data, binary.LittleEndian, spp, tw, 2, 2, 65535, true)
+	lo, hi, ok := minMaxUint16(data, binary.LittleEndian, spp, tw, 2, 2, 0, 65535, true)
 	if !ok || lo != 500 || hi != 900 {
 		t.Fatalf("got [%d, %d] ok=%v, want [500, 900]", lo, hi, ok)
 	}

@@ -92,6 +92,19 @@ type GDALMeta struct {
 	BandItems map[int]map[string]string // per-band: sample (0-indexed) → name → value
 }
 
+// signBias16 maps signed 16-bit samples onto the unsigned range while keeping
+// their order: XOR-ing the raw bits with it equals adding 32768. The uint16
+// rescale/nodata machinery then handles Int16 data (e.g. GEBCO) unchanged.
+const signBias16 = 0x8000
+
+// sampleBias returns signBias16 for signed 16-bit data, 0 otherwise.
+func (ifd *IFD) sampleBias() int {
+	if ifd.bytesPerSample() == 2 && len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 2 {
+		return signBias16
+	}
+	return 0
+}
+
 // bytesPerSample returns the number of bytes per sample based on BitsPerSample.
 func (ifd *IFD) bytesPerSample() int {
 	if len(ifd.BitsPerSample) > 0 {
