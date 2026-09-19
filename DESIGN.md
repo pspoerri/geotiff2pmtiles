@@ -145,6 +145,21 @@ The CLI tries auto-detection in `parseBandConfig` only when `--rescale auto` (de
 16-bit data, no explicit `--rescale-range`, and no explicit `--bands` override. Explicit
 flags always take precedence.
 
+### Automatic rescale range
+
+When `--rescale-range` is omitted and no preset applies, `Reader.ValueRange()` picks
+the range and the CLI logs it (`Auto rescale range: [min, max] (from …)`) instead of
+erroring — the old "run gdalinfo yourself" hint was work the tool can do. Per source:
+
+1. GDAL `STATISTICS_MINIMUM/MAXIMUM` band items (free, exact, min/max across bands).
+2. Otherwise a pixel scan of the coarsest IFD, strided to at most 64 tiles, skipping
+   nodata and edge-tile padding. Bounded so a multi-GB source without overviews still
+   starts instantly; the cost is that an extreme value in an unsampled tile clips.
+
+Ranges are unioned across all sources so every tile shares one mapping (per-source
+ranges would show seams). Plain min/max rather than percentiles: deterministic and
+matches what `gdalinfo -mm` reports; outlier-heavy data still has `--rescale-range`.
+
 ## Projections
 
 ### Native fast paths, wroge/crs fallback

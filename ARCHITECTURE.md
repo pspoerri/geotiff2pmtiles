@@ -21,6 +21,7 @@ internal/
     geotags.go                      GeoTIFF metadata extraction
     tfw.go                          TFW (TIFF World File) parser + EPSG inference
     tilecache.go                    LRU tile cache for decoded source tiles
+    valuerange.go                   Auto rescale range (GDAL statistics, else bounded pixel scan)
     flood.go                        Source-level nodata flood mask (--nodata-flood)
     lzw.go                          LZW decompression (ZSTD via klauspost/compress in reader.go)
     mmap_unix.go                    mmap/munmap via syscall.Mmap (unix)
