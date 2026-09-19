@@ -96,7 +96,7 @@ jobs:
         run: go test -count=1 ./internal/...
 
       - name: Integration tests (synthetic)
-        run: go test -count=1 -timeout 300s ./integration/
+        run: go test -count=1 -timeout 300s -v ./integration/
 
       - name: Set build metadata
         id: meta
@@ -164,38 +164,18 @@ jobs:
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - name: Build geotiff2pmtiles
+      - name: Build binaries
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          go build \
-            -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }}" \
-            -o dist/geotiff2pmtiles-${{ matrix.goos }}-${{ matrix.goarch }} \
-            ./cmd/geotiff2pmtiles/
-
-      - name: Build pmtransform
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-        run: |
-          go build \
-            -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }}" \
-            -o dist/pmtransform-${{ matrix.goos }}-${{ matrix.goarch }} \
-            ./cmd/pmtransform/
-
-      - name: Build coginfo
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-        run: |
-          go build \
-            -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }}" \
-            -o dist/coginfo-${{ matrix.goos }}-${{ matrix.goarch }} \
-            ./cmd/coginfo/
+          for cmd in geotiff2pmtiles pmtransform coginfo; do
+            go build \
+              -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }}" \
+              -o dist/$cmd-${{ matrix.goos }}-${{ matrix.goarch }} \
+              ./cmd/$cmd/
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
