@@ -28,7 +28,7 @@ You can visualize generated PMTiles files at [pmtiles.io](https://pmtiles.io/).
 | **Files** | GeoTIFF and Cloud Optimized GeoTIFF. TIFF with a `.tfw` world file. Directories are scanned recursively |
 | **Layout** | Tiled or stripped; pixel-interleaved, or band-interleaved (tiled: JPEG only; stripped: anything but JPEG) |
 | **Compression** | JPEG, LZW, Deflate, ZSTD, uncompressed — with predictors |
-| **Pixel types** | 8-bit RGB/RGBA · 16-bit unsigned (linear or log rescaling) · 32/64-bit float (elevation) |
+| **Pixel types** | 8-bit RGB/RGBA · 16-bit unsigned (linear or log rescaling) · 32/64-bit float and 16/32-bit signed integer (elevation) |
 | **Bands** | Any band can be mapped to R, G, B or alpha, e.g. NIR-R-G false color |
 | **CRS** | Native: UTM (EPSG:326xx, 327xx, 258xx), Swiss LV95 (2056), WGS84 (4326), Web Mercator (3857). Any other EPSG code known to [wroge/crs](https://github.com/wroge/crs) works through a slower fallback, which is logged when used. |
 
@@ -113,7 +113,7 @@ Same source but the boundary still shows JPEG-smear speckles — flood-fill from
 # Flood masks built in 710ms
 ```
 
-Elevation data (auto-detects float GeoTIFF and selects Terrarium encoding):
+Elevation data (auto-detects float or signed-integer GeoTIFF, e.g. GEBCO bathymetry, and selects Terrarium encoding):
 
 ```bash
 ./geotiff2pmtiles --verbose dem/ elevation.pmtiles

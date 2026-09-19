@@ -653,13 +653,20 @@ func (r *Reader) decodeRawFloat32Tile(ifd *IFD, data []byte) ([]float32, int, in
 
 	// We extract just the first band (elevation).
 	result := make([]float32, pixelCount)
+	signedInt := len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 2
 	for i := 0; i < pixelCount; i++ {
 		off := i * spp * bytesPerSample
-		switch bps {
-		case 32:
+		switch {
+		case signedInt && bps == 16:
+			result[i] = float32(int16(r.bo.Uint16(data[off : off+2])))
+		case signedInt && bps == 32:
+			result[i] = float32(int32(r.bo.Uint32(data[off : off+4])))
+		case signedInt:
+			return nil, 0, 0, fmt.Errorf("unsupported signed int bits per sample: %d", bps)
+		case bps == 32:
 			bits := r.bo.Uint32(data[off : off+4])
 			result[i] = math.Float32frombits(bits)
-		case 64:
+		case bps == 64:
 			bits := r.bo.Uint64(data[off : off+8])
 			result[i] = float32(math.Float64frombits(bits))
 		default:
@@ -1760,20 +1767,24 @@ func (r *Reader) FormatDescription() string {
 	}
 
 	sampleType := "uint"
-	if r.IsFloat() {
+	if len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 2 {
+		sampleType = "int"
+	} else if r.IsFloat() {
 		sampleType = "float"
 	}
 
 	return fmt.Sprintf("%s, %dx %s%d", comp, spp, sampleType, bps)
 }
 
-// IsFloat returns true if the raster data is floating-point (e.g. Float32 elevation data).
+// IsFloat returns true if the raster is read through the float (elevation)
+// path: IEEE floating point, or signed integer (e.g. GEBCO Int16 bathymetry),
+// which has no meaningful uint/RGB interpretation.
 func (r *Reader) IsFloat() bool {
 	ifd := &r.ifds[0]
-	if len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 3 { // 3 = IEEE floating point
-		return true
+	if len(ifd.SampleFormat) == 0 {
+		return false
 	}
-	return false
+	return ifd.SampleFormat[0] == 3 || ifd.SampleFormat[0] == 2 // 3 = IEEE float, 2 = signed int
 }
 
 // NoData returns the GDAL nodata string, or "" if not set.
