@@ -53,9 +53,15 @@ Core packages in `internal/`:
 
 ## After Completing a Task
 
-Per AGENTS.md:
 1. Document changes in `changes/yyyy-mm-dd-hh-mm-title.md`
 2. Update design decisions in `DESIGN.md`
 3. Update architecture in `ARCHITECTURE.md`
 4. Update CLI help text
 5. Update `README.md`
+
+Each doc has a distinct scope — avoid duplicating content across them:
+- **README.md**: User-facing — what it does, how to install, how to use
+- **BUILDING.md**: Building from source — libwebp, Windows/MSYS2, cross-compilation
+- **DEVELOPMENT.md**: Tests, integration test data, profiling
+- **ARCHITECTURE.md**: Developer-facing — code structure, pipeline, memory model, extension points
+- **DESIGN.md**: Rationale — why decisions were made, tradeoffs, bug fixes
