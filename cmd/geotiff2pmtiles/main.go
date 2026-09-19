@@ -6,11 +6,13 @@ import (
 	"image/color"
 	"io/fs"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,8 +79,8 @@ func main() {
 	flag.StringVar(&layerType, "type", "baselayer", "Layer type: baselayer, overlay")
 	flag.StringVar(&bandsStr, "bands", "1,2,3", "1-indexed band numbers for R,G,B output (e.g. \"4,1,2\" for NIR-R-G)")
 	flag.StringVar(&alphaBandStr, "alpha-band", "auto", "1-indexed band for alpha (0=auto: band 4 for 8-bit spp>=4; -1=force no alpha)")
-	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, log, linear, none (auto: requires --rescale-range for 16-bit)")
-	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (required for 16-bit data)")
+	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, log, linear, none (auto: linear for 16-bit, none otherwise)")
+	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (default: auto-detected from GDAL statistics, else sampled pixels; the selected range is logged)")
 	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set)")
 	flag.StringVar(&nodataTolStr, "nodata-tolerance", "", "Per-band tolerance applied to --nodata matching (default 0 = exact match). Useful for lossy-JPEG borders where strict 0 is smeared to 1..5; try 4–8.")
 	flag.BoolVar(&nodataFlood, "nodata-flood", false, "Source-level flood-fill from the COG outer edges through near-nodata pixels. Only edge-reachable pixels are made transparent; interior dark pixels (text, shadows, canopy) stay opaque. Requires --nodata; pair with a widened --nodata-tolerance (e.g. 40) for scanned/JPEG sources. Costs ~W*H/8 bytes of RAM per source.")
@@ -226,7 +228,7 @@ func main() {
 	}
 
 	// Parse band config.
-	bandCfg, err := parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange, sources[0])
+	bandCfg, err := parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange, sources)
 	if err != nil {
 		log.Fatalf("Band config: %v", err)
 	}
@@ -680,7 +682,8 @@ func parseHexColor(s string) (color.RGBA, error) {
 }
 
 // parseBandConfig parses CLI flags into a cog.BandConfig.
-func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, firstSrc *cog.Reader) (cog.BandConfig, error) {
+func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, sources []*cog.Reader) (cog.BandConfig, error) {
+	firstSrc := sources[0]
 	var cfg cog.BandConfig
 
 	// Parse --bands.
@@ -720,14 +723,11 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, fi
 					log.Printf("Auto-detected: %s (%s)", preset.Name, preset.BandCfg)
 					return preset.BandCfg, nil
 				}
-				return cfg, fmt.Errorf("16-bit GeoTIFF detected: --rescale-range min,max is required\n" +
-					"  Hint: use gdalinfo or inspect the data to find the value range.\n" +
-					"  Example: --rescale linear --rescale-range 0,5000")
 			}
 			cfg.Rescale = cog.RescaleLinear
-			minV, maxV, err := parseRange(rescaleRange)
+			minV, maxV, err := resolveRescaleRange(rescaleRange, sources)
 			if err != nil {
-				return cfg, fmt.Errorf("--rescale-range: %w", err)
+				return cfg, err
 			}
 			cfg.RescaleMin = minV
 			cfg.RescaleMax = maxV
@@ -735,23 +735,17 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, fi
 			cfg.Rescale = cog.RescaleNone
 		}
 	case "linear":
-		if rescaleRange == "" {
-			return cfg, fmt.Errorf("--rescale-range is required when --rescale is set to %q", rescaleStr)
-		}
-		minV, maxV, err := parseRange(rescaleRange)
+		minV, maxV, err := resolveRescaleRange(rescaleRange, sources)
 		if err != nil {
-			return cfg, fmt.Errorf("--rescale-range: %w", err)
+			return cfg, err
 		}
 		cfg.Rescale = cog.RescaleLinear
 		cfg.RescaleMin = minV
 		cfg.RescaleMax = maxV
 	case "log":
-		if rescaleRange == "" {
-			return cfg, fmt.Errorf("--rescale-range is required when --rescale is set to %q", rescaleStr)
-		}
-		minV, maxV, err := parseRange(rescaleRange)
+		minV, maxV, err := resolveRescaleRange(rescaleRange, sources)
 		if err != nil {
-			return cfg, fmt.Errorf("--rescale-range: %w", err)
+			return cfg, err
 		}
 		cfg.Rescale = cog.RescaleLog
 		cfg.RescaleMin = minV
@@ -763,6 +757,32 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, fi
 	}
 
 	return cfg, nil
+}
+
+// resolveRescaleRange returns the --rescale-range values, or when the flag is
+// unset, the combined value range of all sources (GDAL statistics, else a
+// pixel scan), logging what was selected.
+func resolveRescaleRange(rescaleRange string, sources []*cog.Reader) (float64, float64, error) {
+	if rescaleRange != "" {
+		minV, maxV, err := parseRange(rescaleRange)
+		if err != nil {
+			return 0, 0, fmt.Errorf("--rescale-range: %w", err)
+		}
+		return minV, maxV, nil
+	}
+	minV, maxV := math.Inf(1), math.Inf(-1)
+	origins := map[string]bool{}
+	for _, src := range sources {
+		lo, hi, origin, err := src.ValueRange()
+		if err != nil {
+			return 0, 0, fmt.Errorf("auto rescale range: %s: %w\n"+
+				"  Hint: set it explicitly, e.g. --rescale-range 0,5000", src.Path(), err)
+		}
+		minV, maxV = math.Min(minV, lo), math.Max(maxV, hi)
+		origins[origin] = true
+	}
+	log.Printf("Auto rescale range: [%g, %g] (from %s)", minV, maxV, strings.Join(slices.Sorted(maps.Keys(origins)), " + "))
+	return minV, maxV, nil
 }
 
 // parseRange parses a "min,max" string into two float64 values.

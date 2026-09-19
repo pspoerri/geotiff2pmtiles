@@ -57,8 +57,8 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--type`        | `baselayer`   | Layer type: `baselayer`, `overlay`                 |
 | `--bands`       | `1,2,3`       | 1-indexed band numbers for R,G,B output (e.g. `4,1,2` for NIR-R-G false color) |
 | `--alpha-band`  | `auto`        | Alpha band: `auto` (band 4 for 8-bit spp>=4), `-1` (none), or 1-indexed band |
-| `--rescale`     | `auto`        | Rescale mode: `auto`, `linear`, `log`, `none` (auto requires `--rescale-range` for 16-bit) |
-| `--rescale-range` |             | Input value range `min,max` for rescaling (required for 16-bit data) |
+| `--rescale`     | `auto`        | Rescale mode: `auto`, `linear`, `log`, `none` (auto: linear for 16-bit, none otherwise) |
+| `--rescale-range` |             | Input value range `min,max` for rescaling (default: auto-detected from GDAL statistics, else sampled pixels; the selected range is logged) |
 | `--nodata`      |               | Nodata value: pixels with all bands equal to this integer are transparent (auto-detected from GeoTIFF if not set). When set without `--format`, output auto-switches from `jpeg` to `webp` so transparency is preserved. |
 | `--nodata-tolerance` | `0`      | Per-band tolerance for `--nodata` matching. Use 4–8 for borders that come from lossy JPEG sources, where the strict nodata value is smeared by compression. |
 | `--nodata-flood` | `false`     | Source-level flood-fill from the COG outer edges through near-nodata pixels. Only the connected component reachable from the image boundary becomes transparent; interior dark pixels (text, shadows, canopy) stay opaque even when tolerance is widened. Pair with a generous `--nodata-tolerance` (e.g. 40) to clean up JPEG-smeared boundaries. Costs ~W·H/8 bytes RAM per source plus an upfront decode pass (parallelized across `--concurrency` workers and up to 4 sources at once). |
