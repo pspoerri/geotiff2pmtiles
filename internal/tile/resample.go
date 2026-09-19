@@ -140,6 +140,9 @@ func tileCRSBounds(z, tx, ty int, proj coord.Projection) (minX, minY, maxX, maxY
 // with pixel X and latitude depends only on pixel Y, so we reduce trig calls
 // from O(tileSize²) to O(tileSize).
 func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.TileCache, mode Resampling, luts *gammaLUTs) *image.RGBA {
+	// Per-pixel lookups go through a goroutine-local view to stay off the shard locks.
+	cache = cache.Local()
+
 	// Pre-compute the output pixel size in CRS units for selecting the best overview level.
 	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
 	outputResMeters := coord.ResolutionAtLat(midLat, z, tileSize)
@@ -1448,6 +1451,9 @@ func (g *gammaLUTs) encode(v float64) uint8 {
 // renderTileTerrarium renders a single web map tile from float GeoTIFF data,
 // converting elevation values to Terrarium RGB encoding.
 func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.FloatTileCache, mode Resampling) *image.RGBA {
+	// Per-pixel lookups go through a goroutine-local view to stay off the shard locks.
+	cache = cache.Local()
+
 	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
 	outputResMeters := coord.ResolutionAtLat(midLat, z, tileSize)
 	outputResCRS := coord.MetersToPixelSizeCRS(outputResMeters, proj.EPSG(), midLat)

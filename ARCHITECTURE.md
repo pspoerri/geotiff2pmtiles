@@ -113,7 +113,7 @@ skipping DiskTileStore overhead entirely.
 ## Memory Efficiency
 
 - Memory-mapped file access (no full-image decode)
-- Sharded LRU tile cache prevents redundant reads (~256 tiles, configurable): Get promotes entries on a per-shard recency list; eviction removes the least-recently-used entry
+- Sharded LRU tile cache prevents redundant reads (~256 tiles, configurable): Get promotes entries on a per-shard recency list; eviction removes the least-recently-used entry. `renderTile` / `renderTileTerrarium` read through a goroutine-local view (`TileCache.Local()` / `FloatTileCache.Local()`) that memoizes the last 2×2 source tiles, keeping per-pixel lookups off the shard locks
 - Tiles stored as encoded bytes (PNG/WebP/JPEG) in memory: 5-25x smaller than raw pixels
 - Continuous disk spilling via dedicated I/O goroutine with configurable memory backpressure (auto ~90% of RAM)
 - Uniform tiles (single color) stored as 4 bytes, never spilled to disk
