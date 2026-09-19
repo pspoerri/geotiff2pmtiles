@@ -2,6 +2,7 @@ package tile
 
 import (
 	"image"
+	"log"
 	"math"
 	"strconv"
 	"sync"
@@ -10,6 +11,17 @@ import (
 	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
 	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
+
+var readErrOnce sync.Once
+
+// warnReadError logs the first source tile read error. Samplers treat a failed
+// read as nodata so another source can fill in, which otherwise hides decoder
+// bugs entirely (and, since failures are not cached, makes them very slow).
+func warnReadError(err error) {
+	readErrOnce.Do(func() {
+		log.Printf("Warning: source tile read failed, treating as nodata (further errors suppressed): %v", err)
+	})
+}
 
 // lonLatPool recycles paired longitude/latitude arrays used by renderTile and
 // renderTileTerrarium. Each pool entry is a single []float64 of length
@@ -235,6 +247,7 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 		}
 
 		if err != nil {
+			warnReadError(err)
 			continue
 		}
 		if aa == 0 {
@@ -1545,6 +1558,7 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, sr
 		}
 
 		if err != nil {
+			warnReadError(err)
 			continue
 		}
 
@@ -1669,6 +1683,9 @@ func lanczosSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, 
 				var w, h int
 				var err error
 				tileData, w, h, err = src.ReadFloatTile(level, c, r)
+				if err != nil {
+					warnReadError(err)
+				}
 				if err != nil || tileData == nil {
 					continue
 				}
@@ -1778,6 +1795,9 @@ func bicubicSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, 
 				var w, h int
 				var err error
 				tileData, w, h, err = src.ReadFloatTile(level, c, r)
+				if err != nil {
+					warnReadError(err)
+				}
 				if err != nil || tileData == nil {
 					continue
 				}

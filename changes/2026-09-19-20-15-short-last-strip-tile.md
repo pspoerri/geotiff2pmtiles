@@ -14,5 +14,8 @@ Found by profiling `--resampling mode --format terrarium` on GEBCO 2026
 - GEBCO z0-8: 15m38s -> 1m17s wall, 12760s -> 845s user CPU.
 - Test: `TestDecodeFloatShortLastStripTile`.
 
+- Samplers now log the first source tile read error instead of silently treating
+  it as nodata, so this class of bug is visible.
+
 Remaining hotspot: `FloatTileCache.Get` takes a shard mutex per sampled pixel
 (~40% of CPU in the new profile).
