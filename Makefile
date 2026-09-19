@@ -13,7 +13,7 @@ BUILD_DIR        := dist
 GO               := go
 GOFLAGS          :=
 LDFLAGS          :=
-# Set CGO=0 to build without libwebp (no WebP encoder) — the default on Windows.
+# Set CGO=0 to build without libwebp (WebP encoding is then lossless only).
 CGO              ?= 1
 
 VERSION    := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -82,7 +82,7 @@ all: build build-transform build-header
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-## build: Compile the binary (requires libwebp: brew install webp / apt-get install libwebp-dev; or CGO=0 without WebP)
+## build: Compile the binary (requires libwebp: brew install webp / apt-get install libwebp-dev; or CGO=0 for lossless-only WebP)
 build: $(BUILD_DIR)
 	CGO_ENABLED=$(CGO) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
 
@@ -430,7 +430,7 @@ example-transform-rebuild: build build-transform test-integration-download
 # ---------- Cross-compilation ----------
 # Requires a C cross-compiler (CC) and libwebp built for the target platform.
 # The Windows targets build with CGO_ENABLED=0 instead, so they need no toolchain
-# but have no native WebP encoder (--format webp is unavailable).
+# but WebP encoding is lossless only.
 # Example: CC=x86_64-linux-musl-gcc PKG_CONFIG_PATH=/path/to/linux-amd64/lib/pkgconfig make cross-linux
 
 ## cross-linux: Build for Linux amd64
@@ -453,12 +453,12 @@ cross-darwin-arm64: $(BUILD_DIR)
 	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 $(CMD)
 
-## cross-windows: Build for Windows amd64 (CGO_ENABLED=0, no WebP — use a native MSYS2 build for that)
+## cross-windows: Build for Windows amd64 (CGO_ENABLED=0, lossless-only WebP — use a native MSYS2 build for lossy)
 cross-windows: $(BUILD_DIR)
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-windows-amd64.exe $(CMD)
 
-## cross-windows-arm64: Build for Windows arm64 (CGO_ENABLED=0, no WebP — use a native MSYS2 build for that)
+## cross-windows-arm64: Build for Windows arm64 (CGO_ENABLED=0, lossless-only WebP — use a native MSYS2 build for lossy)
 cross-windows-arm64: $(BUILD_DIR)
 	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-windows-arm64.exe $(CMD)
