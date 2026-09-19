@@ -195,3 +195,29 @@ func TestStripTIFF(t *testing.T) {
 		})
 	}
 }
+
+// The last virtual tile of a strip TIFF is short when the image height is
+// not a multiple of the virtual tile height (GEBCO: 21600 rows, 256-row
+// tiles). The float decoder must accept it rather than error out.
+func TestDecodeFloatShortLastStripTile(t *testing.T) {
+	r := &Reader{bo: binary.LittleEndian, strip: &stripLayout{}}
+	ifd := &IFD{TileWidth: 4, TileHeight: 256, SamplesPerPixel: 1,
+		BitsPerSample: []uint16{16}, SampleFormat: []uint16{2}}
+	data := make([]byte, 2*4*2) // 2 of 256 rows
+	for i := 0; i < len(data); i += 2 {
+		binary.LittleEndian.PutUint16(data[i:], uint16(0xFFFB)) // -5
+	}
+	px, w, h, err := r.decodeRawFloat32Tile(ifd, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w != 4 || h != 256 || len(px) != 4*256 || px[7] != -5 {
+		t.Fatalf("got w=%d h=%d len=%d px[7]=%v", w, h, len(px), px[7])
+	}
+
+	// Tiled sources keep the strict length check.
+	r.strip = nil
+	if _, _, _, err := r.decodeRawFloat32Tile(ifd, data); err == nil {
+		t.Fatal("expected error for truncated tile of a tiled source")
+	}
+}

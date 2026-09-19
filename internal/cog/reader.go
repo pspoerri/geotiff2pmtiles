@@ -476,7 +476,18 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 // readStripsRaw decompresses and concatenates strips [start, end).
 func (r *Reader) readStripsRaw(ifd *IFD, start, end int) ([]byte, error) {
 	sl := r.strip
-	var combined []byte
+
+	// Size the buffer up front: exact for uncompressed strips, a lower bound
+	// otherwise. Growing an ~10 MB slice strip by strip (RowsPerStrip=1)
+	// copies it several times over and contends on the heap lock.
+	var total uint64
+	for s := start; s < end && s < len(sl.byteCounts); s++ {
+		total += sl.byteCounts[s]
+	}
+	if total > uint64(len(r.data)) {
+		total = 0 // corrupt byte counts; the per-strip bounds check below reports it
+	}
+	combined := make([]byte, 0, total)
 
 	for s := start; s < end; s++ {
 		if s >= len(sl.offsets) || s >= len(sl.byteCounts) {
@@ -647,14 +658,21 @@ func (r *Reader) decodeRawFloat32Tile(ifd *IFD, data []byte) ([]float32, int, in
 	bytesPerSample := bps / 8
 	expectedSize := pixelCount * spp * bytesPerSample
 
+	// The last virtual tile of a strip TIFF is legitimately short when the
+	// image height is not a multiple of the virtual tile height; decode the
+	// rows present and leave the rest zero (never sampled: outside the image).
+	decodeCount := pixelCount
 	if len(data) < expectedSize {
-		return nil, 0, 0, fmt.Errorf("float tile data too short: got %d, need %d", len(data), expectedSize)
+		if r.strip == nil {
+			return nil, 0, 0, fmt.Errorf("float tile data too short: got %d, need %d", len(data), expectedSize)
+		}
+		decodeCount = len(data) / (spp * bytesPerSample)
 	}
 
 	// We extract just the first band (elevation).
 	result := make([]float32, pixelCount)
 	signedInt := len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 2
-	for i := 0; i < pixelCount; i++ {
+	for i := 0; i < decodeCount; i++ {
 		off := i * spp * bytesPerSample
 		switch {
 		case signedInt && bps == 16:
