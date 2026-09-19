@@ -591,3 +591,29 @@ across zooms, first-tile image decoding, clustering flag, and metadata key prese
 Each dataset defines a `plausibilityExpectation` with approximate bounds and tolerances.
 This catches regressions that simple "tile count > 0" checks would miss — e.g. bounds
 shifted by a projection bug, missing metadata keys, or broken tile encoding.
+
+## Projections: native fast paths, wroge/crs fallback
+
+`FromWGS84` runs once per output pixel, so the common CRSs are hand-written: LV95,
+Web Mercator, WGS84 and UTM (Krüger series to n³, agrees with wroge/crs to < 1 mm,
+~90 ns/call). ETRS89 UTM (EPSG:258xx) is treated as WGS84; the < 1 m offset does not
+matter for tiles.
+
+Every other EPSG code goes through `CRSFallback`, backed by `github.com/wroge/crs`
+(pure Go, embedded EPSG registry; roughly doubles the binary to ~14 MB). The library
+searches for the best datum transformation path on every call (~50 µs), because the
+best path depends on the location. Per pixel that is ~3 s per tile, so the fallback
+splits the work: the WGS84 → source datum shift is evaluated with the exact transform
+only at the nodes of a 0.05° grid, cached and interpolated bilinearly, and only the
+projection math (same datum, no path search) runs per pixel. Result: ~250 ns/call and
+< 1 cm from the exact transform (tested with OSGB36, a ~100 m shift). Nearest-node
+lookup without interpolation was off by 23 cm, hence the interpolation. `ToWGS84` is
+only used for bounds and uses the exact transform.
+
+Transform errors (point outside the CRS domain) return +Inf, which lies outside every
+source and so becomes nodata. No grid files are downloaded: `crs.SetGridCDN` is never
+called, so datums that need NTv2 grids use the library's best grid-free path. The CLI
+logs a note when the fallback is active.
+
+`cog.MergedBoundsWGS84` used to carry its own copy of the EPSG switch and silently
+treated unknown codes as lon/lat; it now uses `coord.ForEPSG` too.

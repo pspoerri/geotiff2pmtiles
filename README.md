@@ -36,8 +36,8 @@ Real satellite and raster test data is downloaded via `make test-integration-dow
 - TIFF compression: JPEG, LZW, Deflate/Zlib, ZSTD, and uncompressed (with predictor support)
 - Sample formats: 8-bit RGB/RGBA, 16-bit uint16 (with linear/log rescaling), Float32/Float64 (for elevation/DEM data)
 - Band reordering and alpha band selection for multi-band GeoTIFFs (e.g. RGBNIR false-color composites)
-- Source CRS: EPSG:2056 (Swiss LV95), EPSG:4326 (WGS84), EPSG:3857 (Web Mercator)
-- Extensible projection interface for adding additional CRS support
+- Source CRS, native fast paths: UTM (EPSG:326xx/327xx WGS84, EPSG:258xx ETRS89 — typical drone imagery), EPSG:2056 (Swiss LV95), EPSG:4326 (WGS84), EPSG:3857 (Web Mercator)
+- Any other EPSG code known to [wroge/crs](https://github.com/wroge/crs) works through a slower fallback (a note is logged when it is used)
 
 ## Platform Support
 

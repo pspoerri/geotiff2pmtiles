@@ -333,6 +333,10 @@ func main() {
 		log.Printf("Flood masks built in %v", time.Since(buildStart).Round(time.Millisecond))
 	}
 
+	if _, ok := coord.ForEPSG(sources[0].EPSG()).(*coord.CRSFallback); ok {
+		log.Printf("Note: EPSG:%d has no native implementation, falling back to github.com/wroge/crs projection.", sources[0].EPSG())
+	}
+
 	// Compute merged bounds in WGS84.
 	mergedBounds := cog.MergedBoundsWGS84(sources)
 	if verbose {

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Memory-efficient Go toolset for converting GeoTIFF/COG files to PMTiles v3 archives and transforming existing PMTiles archives. Pure Go deps only: `klauspost/compress` (ZSTD TIFF tiles), `golang.org/x/image` (WebP decode) and `HugoSmits86/nativewebp` (lossless WebP encode). Lossy WebP needs the libwebp C library via CGo (`brew install webp` / `apt-get install libwebp-dev`); `CGO_ENABLED=0` (`make build CGO=0`) builds still have WebP, lossless only.
+Memory-efficient Go toolset for converting GeoTIFF/COG files to PMTiles v3 archives and transforming existing PMTiles archives. Pure Go deps only: `klauspost/compress` (ZSTD TIFF tiles), `golang.org/x/image` (WebP decode), `HugoSmits86/nativewebp` (lossless WebP encode) and `wroge/crs` (fallback for EPSG codes without a native projection). Lossy WebP needs the libwebp C library via CGo (`brew install webp` / `apt-get install libwebp-dev`); `CGO_ENABLED=0` (`make build CGO=0`) builds still have WebP, lossless only.
 
 ## Build & Test Commands
 
@@ -32,7 +32,7 @@ Two CLI tools in `cmd/`:
 
 Core packages in `internal/`:
 - **cog/** — Memory-mapped TIFF/COG reader, IFD parsing, GeoTIFF tags, TFW sidecar, LRU tile cache, strip-to-tile promotion
-- **coord/** — Projection interface + implementations (Swiss LV95, WGS84, Web Mercator), Hilbert curve ordering, EPSG inference from coordinate ranges
+- **coord/** — Projection interface + native implementations (UTM, Swiss LV95, WGS84, Web Mercator), wroge/crs fallback for other EPSG codes, Hilbert curve ordering, EPSG inference from coordinate ranges
 - **encode/** — Encoder interface + JPEG/PNG/WebP/Terrarium implementations. WebP uses CGo (`webp.go`) with a stub fallback (`webp_stub.go`) for `CGO_ENABLED=0` builds
 - **tile/** — Tile generation pipeline: `generator.go` (parallel COG→tile), `transform.go` (PMTiles→PMTiles), `resample.go` (Lanczos-3/bicubic/bilinear/nearest/mode with LUT acceleration), `downsample.go` (pyramid building with gray fast path), `diskstore.go` (disk-backed store with memory backpressure), `tiledata.go` (compact uniform/gray/RGBA representation), `rgbapool.go` (sync.Pool buffer reuse)
 - **pmtiles/** — PMTiles v3 reader/writer. Two-pass writer: collect entries → sort by Hilbert ID → cluster tile data. FNV-64a deduplication.
