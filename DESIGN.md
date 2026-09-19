@@ -32,6 +32,16 @@ undone at samplesPerPixel=1) and interleaved into chunky order so downstream
 decoding is layout-agnostic. JPEG-compressed planar strips are rejected, since
 encoded planes cannot be byte-interleaved.
 
+The last virtual tile is short whenever the image height is not a multiple of the
+virtual tile height (GEBCO: 21600 rows, RowsPerStrip=1, 256-row tiles → 96 rows).
+The float decoder accepts that for strip sources and zero-fills the rows outside the
+image; tiled sources keep the strict length check. It used to reject the tile, and
+because the sampler maps read errors to nodata without caching them, every pixel in
+those rows re-read ~8 MB of strips: the bottom 96 rows of each GEBCO file were
+nodata and the conversion took 15m38s instead of 1m17s. The concatenation buffer is
+sized from the strip byte counts up front, since growing it strip by strip copied
+the tile several times over and contended on the heap lock.
+
 ### TIFF predictor support
 
 LZW, Deflate and ZSTD compressed TIFFs may use predictors to improve compression. After
