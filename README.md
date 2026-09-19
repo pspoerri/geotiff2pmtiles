@@ -26,7 +26,7 @@ You can visualize generated PMTiles files at [pmtiles.io](https://pmtiles.io/).
 | | |
 | --- | --- |
 | **Files** | GeoTIFF and Cloud Optimized GeoTIFF. TIFF with a `.tfw` world file. Directories are scanned recursively |
-| **Layout** | Tiled or stripped; pixel- or band-interleaved (band-interleaved strips) |
+| **Layout** | Tiled or stripped; pixel-interleaved, or band-interleaved (tiled: JPEG only; stripped: anything but JPEG) |
 | **Compression** | JPEG, LZW, Deflate, ZSTD, uncompressed — with predictors |
 | **Pixel types** | 8-bit RGB/RGBA · 16-bit unsigned (linear or log rescaling) · 32/64-bit float (elevation) |
 | **Bands** | Any band can be mapped to R, G, B or alpha, e.g. NIR-R-G false color |

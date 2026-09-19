@@ -19,4 +19,22 @@ pure-Go WebP fallback landed:
 - Moved the Development section (integration tests, profiling) into a new
   `DEVELOPMENT.md`, linked from the README.
 
-No code changes; DESIGN.md, ARCHITECTURE.md and CLI help are unaffected.
+Other documents:
+
+- `DESIGN.md`: sections grouped by topic (input, projections, nodata, resampling, memory,
+  encoding/platforms, PMTiles output, pmtransform, testing) instead of chronological order.
+  Removed the "not yet implemented" fill-color bullet that contradicted the one after it,
+  the claim that zstd is the only external dependency, the reference to CGo-free Windows
+  builds, and `make cross-all CGO=0` (the `cross-*` targets ignore `CGO`). Predictor 2/3
+  details moved from under "ZSTD compression" to "TIFF predictor support"; "Performance
+  profile" folded into the libwebp and bicubic sections.
+- `ARCHITECTURE.md`: layout lists `pmheader`, `flood.go`, `memlimit.go`, `tiledata.go`,
+  `decode.go` and the newer integration tests; nodata bullets moved out of "Memory
+  Efficiency" into their own section and shortened; duplicate `--fill-color` paragraph removed.
+- `integration/testdata/README.md`: NDVI/SWIR/gamma0 depth and band counts corrected
+  (were listed as 16-bit single-band); duplicated target lists replaced by a link.
+- `AGENTS.md` deleted; its task checklist was already in `CLAUDE.md` and its doc-scope
+  list (now including the two new documents) moved there.
+- README Layout row: tiled band-interleaved files are JPEG-only, stripped ones anything but.
+
+No code changes; CLI help is unaffected.

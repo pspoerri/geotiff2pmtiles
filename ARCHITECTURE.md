@@ -1,10 +1,17 @@
 # Architecture
 
+Code structure, pipelines and memory model. For the reasoning behind them see
+[DESIGN.md](DESIGN.md); for building and testing see [BUILDING.md](BUILDING.md) and
+[DEVELOPMENT.md](DEVELOPMENT.md).
+
+## Layout
+
 ```
 cmd/
   geotiff2pmtiles/main.go          CLI: GeoTIFF/COG → PMTiles conversion
   pmtransform/main.go              CLI: PMTiles → PMTiles transformation
   checkpmtiles/main.go              PMTiles v3 archive validator (local + HTTP)
+  pmheader/main.go                  Patch PMTiles header/metadata/directories without touching tile data
   coginfo/main.go                   COG metadata inspector
   debug/main.go                     Low-level COG debug utility
 internal/
@@ -14,6 +21,7 @@ internal/
     geotags.go                      GeoTIFF metadata extraction
     tfw.go                          TFW (TIFF World File) parser + EPSG inference
     tilecache.go                    LRU tile cache for decoded source tiles
+    flood.go                        Source-level nodata flood mask (--nodata-flood)
     lzw.go                          LZW decompression (ZSTD via klauspost/compress in reader.go)
     mmap_unix.go                    mmap/munmap via syscall.Mmap (unix)
     mmap_windows.go                 mmap via CreateFileMapping/MapViewOfFile (windows)
@@ -31,6 +39,8 @@ internal/
     resample.go                     Lanczos/bicubic/bilinear/nearest/mode interpolation + reprojection (LUT-accelerated, optional gamma encode)
     downsample.go                   Pyramid downsampling for lower zoom levels
     diskstore.go                    Disk-backed tile store with memory backpressure
+    memlimit.go                     Auto memory limit (~90% of RAM)
+    tiledata.go                     Compact tile representation (uniform / gray / RGBA)
     rgbapool.go                     sync.Pool for *image.RGBA reuse (keyed by dimensions)
     zoom.go                         Zoom level auto-calculation
     progress.go                     Progress reporting
@@ -40,6 +50,7 @@ internal/
     sysinfo_other.go                Unsupported-platform stub
   encode/
     encoder.go                      Unified encoding interface
+    decode.go                       Decode encoded tiles back to images (pyramid building, pmtransform)
     jpeg.go                         JPEG encoder
     png.go                          PNG encoder
     webp.go                         WebP encoder/decoder (native libwebp via CGo)
@@ -53,11 +64,11 @@ internal/
     directory.go                    Hilbert-curve tile IDs, directory serialization/deserialization, 16 KiB root budget enforcement
 integration/
   helpers_test.go                 Synthetic GeoTIFF writer, pipeline runners, PMTiles validation, plausibility checks
-  synthetic_test.go               12 end-to-end tests using generated GeoTIFFs
+  synthetic_test.go               End-to-end tests using generated GeoTIFFs
+  flood_test.go                   --nodata-flood end-to-end tests
+  transform_terrarium_test.go     pmtransform terrarium rebuild tests
   satellite_*_test.go             Per-dataset tests using real COGs (skipped if data absent)
-  testdata/
-    download.sh                   Script to fetch real satellite/raster test data
-    swissimage/                   swisstopo SWISSIMAGE DOP10 (8-bit RGB, EPSG:2056 LV95)
+  testdata/                       download.sh + one directory per dataset (see DEVELOPMENT.md)
 ```
 
 ## Pipeline
@@ -72,10 +83,7 @@ integration/
 8. **Encode**: JPEG/PNG/WebP/Terrarium encoding
 9. **Write**: Two-pass PMTiles assembly (temp file for tile data, then final archive with clustering)
 
-Empty tile filling (`--fill-color`) uses the same color transformation model as
-`pmtransform`: transparent/nodata pixels in rendered tiles are substituted with
-the target color, nil-child quadrants during downsampling become fill tiles, and
-solid-color tiles are generated for tile positions with no source data.
+`--fill-color` works the same way as in `pmtransform` (below).
 
 ## Transform Pipeline (pmtransform)
 
@@ -110,17 +118,29 @@ skipping DiskTileStore overhead entirely.
 - Continuous disk spilling via dedicated I/O goroutine with configurable memory backpressure (auto ~90% of RAM)
 - Uniform tiles (single color) stored as 4 bytes, never spilled to disk
 - `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers instead of allocating/GC'ing per tile
-- Nodata pixels (all bands within `BandConfig.NodataTolerance` of `BandConfig.Nodata`) decoded as transparent (alpha=0). Honoured by the raw, Deflate, LZW, ZSTD, and JPEG decode paths; planar-separate JPEG applies it after the per-plane merge. Auto-detected from the GDAL_NODATA tag; overridable with `--nodata` and `--nodata-tolerance` (use 4–8 for lossy-JPEG borders). When `--nodata` is set and `--format` is left at its default, the CLI switches output from `jpeg` → `webp` so transparency survives the encode step.
-- Source-level nodata flood fill (`--nodata-flood`): per-COG packed bitmap (1 bit per source pixel, ~W·H/8 bytes) built once via 4-connected scanline flood seeded from the COG's outer boundary. Pixels in `BandConfig.NodataTolerance` of nodata that are *reachable from the image edge* become transparent; interior speckles (text, shadows, canopy) stay opaque even when tolerance is widened to absorb JPEG-smeared boundaries. Built in `cog.Reader.BuildFloodMask` with a parallel tile-decode pass (atomic word merges into the shared bitmap); the CLI builds up to 4 source masks concurrently. Decode paths skip per-pixel tolerance matching when the mask is present; `ReadTile` zeroes alpha post-decode — word-skipping at level 0 (`applyFloodMaskRGBA`), center-of-footprint sampling at overview levels (`applyFloodMaskRGBAScaled`).
-- Planar-separate (`PlanarConfiguration=2`) JPEG COGs: each band is decoded from its own per-plane JPEG tile and merged into RGBA at read time. Plane 0→R, 1→G, 2→B, 3→A; missing channels are duplicated from plane 0 (grayscale).
-- Source fallthrough on nodata: transparent (alpha=0) samples are skipped and the next source is tried, preventing holes in one source from blocking valid data in another
 - PMTiles writer uses temp file for tile data (only directory entries in memory)
 - Pyramid downsampling avoids redundant source reads for lower zoom levels
+
+## Nodata and Transparency
+
+- Nodata pixels (all bands within `--nodata-tolerance` of the nodata value) are decoded as
+  transparent (alpha=0) on every decode path. The value is auto-detected from GDAL_NODATA
+  and overridable with `--nodata`. With nodata active and `--format` left at its default,
+  output switches `jpeg` → `webp` so transparency survives encoding.
+- `--nodata-flood` builds a per-source bitmap (1 bit per pixel) by flood-filling from the
+  image edge through near-nodata pixels (`cog.Reader.BuildFloodMask`, parallel decode, up
+  to 4 sources at once). Only edge-connected pixels become transparent; `ReadTile` applies
+  the mask after decoding, sampling it at footprint centers for overview levels.
+- Resampling and downsampling exclude alpha=0 pixels. When one source yields a transparent
+  sample the next source is tried, so holes in one file don't hide data in another.
+- Planar-separate JPEG COGs are decoded plane by plane and merged into RGBA at read time.
+
+Details and trade-offs: DESIGN.md, "Nodata and transparency".
 
 ## Platform Support
 
 Linux, macOS and Windows on amd64 and arm64. Platform differences are confined
-to three pairs of build-tagged files — `cog/mmap_*.go` (memory mapping),
+to three groups of build-tagged files — `cog/mmap_*.go` (memory mapping),
 `tile/sysinfo_*.go` (total RAM) and `encode/webp{,_stub,_available}.go` (CGo
 availability); everything else is portable Go.
 
