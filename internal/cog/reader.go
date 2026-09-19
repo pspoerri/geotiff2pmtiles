@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
 )
 
 // RescaleMode specifies how to rescale sample values to uint8.
@@ -1617,7 +1618,7 @@ func CheckCoverageGaps(sources []*Reader) []CoverageGap {
 }
 
 // MergedBoundsWGS84 computes the WGS84 bounding box that covers all sources.
-// Requires that sources have a known projection (currently supports EPSG:2056).
+// Sources with an unknown projection are assumed to already be in WGS84.
 func MergedBoundsWGS84(sources []*Reader) Bounds {
 	if len(sources) == 0 {
 		return Bounds{}
@@ -1630,9 +1631,21 @@ func MergedBoundsWGS84(sources []*Reader) Bounds {
 		MaxLat: -90,
 	}
 
+	// Sources usually share one CRS; build each projection once.
+	projs := map[int]coord.Projection{}
+
 	for _, src := range sources {
 		minX, minY, maxX, maxY := src.BoundsInCRS()
 		epsg := src.EPSG()
+		proj, ok := projs[epsg]
+		if !ok {
+			proj = coord.ForEPSG(epsg)
+			if proj == nil {
+				// Assume the coordinates are already in WGS84 as a fallback.
+				proj = &coord.WGS84Identity{}
+			}
+			projs[epsg] = proj
+		}
 
 		// Convert corners to WGS84.
 		corners := [][2]float64{
@@ -1643,18 +1656,7 @@ func MergedBoundsWGS84(sources []*Reader) Bounds {
 		}
 
 		for _, c := range corners {
-			var lon, lat float64
-			switch epsg {
-			case 2056:
-				lon, lat = lv95ToWGS84(c[0], c[1])
-			case 4326:
-				lon, lat = c[0], c[1]
-			case 3857:
-				lon, lat = webMercatorToWGS84(c[0], c[1])
-			default:
-				// Assume the coordinates are already in WGS84 as a fallback.
-				lon, lat = c[0], c[1]
-			}
+			lon, lat := proj.ToWGS84(c[0], c[1])
 
 			if lon < merged.MinLon {
 				merged.MinLon = lon
@@ -1672,27 +1674,6 @@ func MergedBoundsWGS84(sources []*Reader) Bounds {
 	}
 
 	return merged
-}
-
-// lv95ToWGS84 converts Swiss LV95 (EPSG:2056) coordinates to WGS84 lon/lat.
-// Uses swisstopo approximate formulas.
-func lv95ToWGS84(easting, northing float64) (lon, lat float64) {
-	y := (easting - 2_600_000) / 1_000_000
-	x := (northing - 1_200_000) / 1_000_000
-
-	lonSec := 2.6779094 + 4.728982*y + 0.791484*y*x + 0.1306*y*x*x - 0.0436*y*y*y
-	latSec := 16.9023892 + 3.238272*x - 0.270978*y*y - 0.002528*x*x - 0.0447*y*y*x - 0.0140*x*x*x
-
-	lon = lonSec * 100 / 36
-	lat = latSec * 100 / 36
-	return
-}
-
-// webMercatorToWGS84 converts Web Mercator (EPSG:3857) to WGS84.
-func webMercatorToWGS84(x, y float64) (lon, lat float64) {
-	lon = x * 180 / 20037508.342789244
-	lat = (math.Atan(math.Exp(y*math.Pi/20037508.342789244))*360/math.Pi - 90)
-	return
 }
 
 func max(a, b int) int {

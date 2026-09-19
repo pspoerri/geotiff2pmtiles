@@ -20,6 +20,8 @@ internal/
     mmap_other.go                   Unsupported-platform stubs
   coord/
     swiss.go                        EPSG:2056 <-> WGS84 transforms
+    utm.go                          UTM zones (EPSG:326xx/327xx/258xx) <-> WGS84, Krüger series
+    fallback.go                     Any other EPSG code via wroge/crs, with a cached datum-shift grid
     mercator.go                     WGS84 <-> Web Mercator tile math
     projection.go                   Extensible projection interface
     hilbert.go                      Hilbert curve for spatial tile ordering
@@ -152,4 +154,6 @@ type Projection interface {
 }
 ```
 
-Then register it in `coord.ForEPSG()`.
+Then register it in `coord.ForEPSG()`. Codes without a native implementation already
+work through `CRSFallback` (wroge/crs); add a native one when the fallback is too slow
+for a CRS you use a lot. `utm_test.go` shows how to cross-check against wroge/crs.

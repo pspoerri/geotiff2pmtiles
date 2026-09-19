@@ -14,7 +14,11 @@ func TestForEPSG(t *testing.T) {
 		{2056, false, 2056},
 		{4326, false, 4326},
 		{3857, false, 3857},
-		{32632, true, 0}, // UTM 32N — unsupported
+		{32632, false, 32632}, // UTM 32N
+		{32733, false, 32733}, // UTM 33S
+		{25832, false, 25832}, // ETRS89 / UTM 32N
+		{2154, false, 2154},   // RGF93 / Lambert-93 — wroge/crs fallback
+		{999999, true, 0},
 		{0, true, 0},
 	}
 	for _, tt := range tests {
