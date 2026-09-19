@@ -2,7 +2,7 @@
 
 Build instructions: [BUILDING.md](BUILDING.md). Code structure: [ARCHITECTURE.md](ARCHITECTURE.md).
 
-`make check` runs fmt, vet and the unit tests; `make help` lists every target.
+`make check` runs fmt, vet and the unit tests; plain `make` lists every target, grouped by purpose.
 
 ## Integration Tests
 

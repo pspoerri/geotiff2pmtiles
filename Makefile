@@ -70,36 +70,52 @@ SWISSIMAGE_DIR           := $(TESTDATA_DIR)/swissimage
   cross-darwin cross-darwin-arm64 cross-windows cross-windows-arm64 cross-all clean \
   clean-all help
 
-## all: Build all binaries (default target)
+.DEFAULT_GOAL := help
+
+##@ Build
+
+## all: Build all binaries
 all: build-all
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-## build: Compile the binary (requires libwebp: brew install webp / apt-get install libwebp-dev; or CGO=0 for lossless-only WebP)
+## build: Build geotiff2pmtiles (needs libwebp; CGO=0 builds without it, WebP lossless only)
 build: $(BUILD_DIR)
 	CGO_ENABLED=$(CGO) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT) $(CMD)
 
-## build-transform: Compile pmtransform binary
+## build-transform: Build pmtransform
 build-transform: $(BUILD_DIR)
 	CGO_ENABLED=$(CGO) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_TRANSFORM) $(CMD_TRANSFORM)
 
-## build-check: Compile checkpmtiles validation tool
+## build-check: Build checkpmtiles (archive validator)
 build-check: $(BUILD_DIR)
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_CHECK) $(CMD_CHECK)
 
-## build-header: Compile pmheader header-patching tool (no CGo required)
+## build-header: Build pmheader (header/metadata patching)
 build-header: $(BUILD_DIR)
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_HEADER) $(CMD_HEADER)
 
-## build-all: Build geotiff2pmtiles, pmtransform, checkpmtiles, and pmheader
+## build-all: Build all four tools into dist/
 build-all: build build-transform build-check build-header
 
-## install: Install to $GOPATH/bin
+## install: Install geotiff2pmtiles to GOPATH/bin
 install:
 	CGO_ENABLED=$(CGO) $(GO) install $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
 
-# ---------- Testing ----------
+## run: Build and run geotiff2pmtiles, e.g. make run ARGS="--verbose in/ out.pmtiles"
+run: build
+	./$(OUTPUT) $(ARGS)
+
+## clean: Remove build artifacts
+clean:
+	rm -rf $(BUILD_DIR)
+
+## clean-all: Remove build artifacts plus Go build/test caches
+clean-all: clean
+	$(GO) clean -cache -testcache
+
+##@ Test and code quality
 
 ## test: Run all tests
 test:
@@ -118,55 +134,6 @@ test-cover:
 ## bench: Run benchmarks
 bench:
 	$(GO) test $(GOFLAGS) -bench=. -benchmem ./...
-
-## test-integration: Run synthetic integration tests (no download needed)
-test-integration:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 120s -v ./integration/
-
-## test-integration-download: Download real satellite test data
-test-integration-download:
-	bash integration/testdata/download.sh
-
-## test-integration-real: Run all integration tests (synthetic + real satellite data)
-test-integration-real:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v ./integration/
-
-## test-integration-copernicus: Run Copernicus DEM integration test (float32 → terrarium)
-test-integration-copernicus:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestCopernicus ./integration/
-
-## test-integration-copernicus-zstd: Run Copernicus DEM ZSTD-compressed COG integration test
-test-integration-copernicus-zstd:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestCopernicusZSTD ./integration/
-
-## test-integration-naturalearth: Run Natural Earth integration test (8-bit RGB + TFW → JPEG)
-test-integration-naturalearth:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestNaturalEarth ./integration/
-
-## test-integration-esaworldcover: Run ESA WorldCover RGBNIR integration test (16-bit RGBNIR → PNG)
-test-integration-esaworldcover:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run 'TestESAWorldCover(Preset|Pipeline)$$' ./integration/
-
-## test-integration-esaworldcover-ndvi: Run ESA WorldCover NDVI integration test (8-bit 3-band → PNG)
-test-integration-esaworldcover-ndvi:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestESAWorldCoverNDVI ./integration/
-
-## test-integration-esaworldcover-swir: Run ESA WorldCover SWIR integration test (8-bit 2-band → PNG)
-test-integration-esaworldcover-swir:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestESAWorldCoverSWIR ./integration/
-
-## test-integration-esaworldcover-gamma0: Run ESA WorldCover Gamma0 integration test (SAR VV/VH → PNG)
-test-integration-esaworldcover-gamma0:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestESAWorldCoverGamma0 ./integration/
-
-## test-integration-swissimage: Run SWISSIMAGE DOP10 integration test (8-bit RGB LV95 multi-source → JPEG)
-test-integration-swissimage:
-	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestSwissImage ./integration/
-
-## test-integration-all: Download data and run all integration tests
-test-integration-all: test-integration-download test-integration-real
-
-# ---------- Code quality ----------
 
 ## fmt: Format all Go source files
 fmt:
@@ -188,15 +155,58 @@ tidy:
 ## check: Run fmt, vet, and tests in one shot
 check: fmt vet test
 
-# ---------- Run / Examples ----------
+##@ Integration tests (real-data tests skip themselves until the data is downloaded)
 
-## run: Build and run with ARGS (e.g. make run ARGS="--verbose integration/testdata/swissimage/ out.pmtiles")
-run: build
-	./$(OUTPUT) $(ARGS)
+## test-integration: Synthetic tests only (no download, ~8s)
+test-integration:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 120s -v ./integration/
 
-# Pick the tile format with FORMAT=jpeg|png|webp (default webp).
+## test-integration-download: Download the real test data (~1.2 GB)
+test-integration-download:
+	bash integration/testdata/download.sh
 
-## example-all: Run every example (SWISSIMAGE and Natural Earth in all three formats)
+## test-integration-real: All integration tests (synthetic + downloaded data)
+test-integration-real:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v ./integration/
+
+## test-integration-copernicus: Copernicus DEM (float32 → terrarium)
+test-integration-copernicus:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestCopernicus ./integration/
+
+## test-integration-copernicus-zstd: Copernicus DEM ZSTD-compressed COG
+test-integration-copernicus-zstd:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestCopernicusZSTD ./integration/
+
+## test-integration-naturalearth: Natural Earth (8-bit RGB + TFW → JPEG)
+test-integration-naturalearth:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestNaturalEarth ./integration/
+
+## test-integration-esaworldcover: ESA WorldCover RGBNIR (16-bit RGBNIR → PNG)
+test-integration-esaworldcover:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run 'TestESAWorldCover(Preset|Pipeline)$$' ./integration/
+
+## test-integration-esaworldcover-ndvi: ESA WorldCover NDVI (8-bit 3-band → PNG)
+test-integration-esaworldcover-ndvi:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestESAWorldCoverNDVI ./integration/
+
+## test-integration-esaworldcover-swir: ESA WorldCover SWIR (8-bit 2-band → PNG)
+test-integration-esaworldcover-swir:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 300s -v -run TestESAWorldCoverSWIR ./integration/
+
+## test-integration-esaworldcover-gamma0: ESA WorldCover Gamma0 (SAR VV/VH → PNG)
+test-integration-esaworldcover-gamma0:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestESAWorldCoverGamma0 ./integration/
+
+## test-integration-swissimage: SWISSIMAGE DOP10 (8-bit RGB LV95 multi-source → JPEG)
+test-integration-swissimage:
+	$(GO) test $(GOFLAGS) -race -count=1 -timeout 600s -v -run TestSwissImage ./integration/
+
+## test-integration-all: Download, then run everything
+test-integration-all: test-integration-download test-integration-real
+
+##@ Examples (download test data, convert it to dist/example-*.pmtiles; FORMAT=jpeg|png|webp)
+
+## example-all: Every example below (SWISSIMAGE and Natural Earth in all three formats)
 example-all:
 	for f in jpeg png webp; do \
 		$(MAKE) example-swissimage example-swissimage-full-disk \
@@ -206,68 +216,53 @@ example-all:
 	        example-esaworldcover example-esaworldcover-ndvi example-esaworldcover-swir example-esaworldcover-gamma0 \
 	        example-transform example-transform-reencode example-transform-rebuild
 
-## example-swissimage: SWISSIMAGE DOP10 example (8-bit RGB EPSG:2056 mosaic)
+## example-swissimage: SWISSIMAGE DOP10 (8-bit RGB, EPSG:2056 mosaic)
 example-swissimage: build test-integration-download
 	./$(OUTPUT) $(EXAMPLE_FLAGS) --max-zoom $(MAX_ZOOM) \
 		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/example-swissimage-$(FORMAT).pmtiles
 
-## example-swissimage-full-disk: SWISSIMAGE example with aggressive disk spilling (1 MB memory limit)
+## example-swissimage-full-disk: Same with a 1 MB memory limit, forcing disk spill
 example-swissimage-full-disk: build test-integration-download
 	./$(OUTPUT) $(EXAMPLE_FLAGS) --max-zoom $(MAX_ZOOM) --mem-limit 1 \
 		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/example-swissimage-full-disk-$(FORMAT).pmtiles
 
-## example-swissimage-profile: SWISSIMAGE example with CPU and memory profiling
-example-swissimage-profile: build test-integration-download
-	./$(OUTPUT) $(EXAMPLE_FLAGS) --max-zoom $(MAX_ZOOM) \
-		--cpuprofile $(BUILD_DIR)/cpu.prof --memprofile $(BUILD_DIR)/mem.prof \
-		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/example-swissimage.pmtiles
-	@echo "Profiles written to $(BUILD_DIR)/cpu.prof and $(BUILD_DIR)/mem.prof — view with: make pprof-cpu / make pprof-mem"
-
-## pprof-cpu: Open CPU profile in browser (interactive flame graph)
-pprof-cpu:
-	$(GO) tool pprof -http=:8080 $(BUILD_DIR)/cpu.prof
-
-## pprof-mem: Open memory profile in browser (interactive flame graph)
-pprof-mem:
-	$(GO) tool pprof -http=:8081 $(BUILD_DIR)/mem.prof
-
-## example-naturalearth: Natural Earth example (global raster with TFW sidecar)
+## example-naturalearth: Natural Earth (global raster with TFW sidecar)
 example-naturalearth: build test-integration-download
 	./$(OUTPUT) $(EXAMPLE_FLAGS) \
 		$(NATURALEARTH_DIR)/ $(BUILD_DIR)/example-naturalearth-$(FORMAT).pmtiles
 
-## example-naturalearth-full-disk: Natural Earth example with aggressive disk spilling (1 MB memory limit)
+## example-naturalearth-full-disk: Same with a 1 MB memory limit, forcing disk spill
 example-naturalearth-full-disk: build test-integration-download
 	./$(OUTPUT) $(EXAMPLE_FLAGS) --mem-limit 1 \
 		$(NATURALEARTH_DIR)/ $(BUILD_DIR)/example-naturalearth-full-disk-$(FORMAT).pmtiles
 
-## example-copernicus: Copernicus DEM example (float32 → terrarium PNG)
+## example-copernicus: Copernicus DEM (float32 → terrarium)
 example-copernicus: build test-integration-download
 	./$(OUTPUT) --format terrarium --tile-size $(TILE_SIZE) --resampling mode --concurrency $(CONCURRENT) \
 		$(COPERNICUS_DIR)/ $(BUILD_DIR)/example-copernicus-terrarium.pmtiles
 
-## example-copernicus-zstd: Copernicus DEM recompressed as ZSTD COG (needs GDAL at download time)
+## example-copernicus-zstd: Same DEM as a ZSTD COG (download needs GDAL)
 example-copernicus-zstd: build test-integration-download
 	./$(OUTPUT) --format terrarium --tile-size $(TILE_SIZE) --resampling mode --concurrency $(CONCURRENT) \
 		$(COPERNICUS_ZSTD_DIR)/ $(BUILD_DIR)/example-copernicus-zstd-terrarium.pmtiles
 
-## example-esaworldcover: ESA WorldCover S2 RGBNIR example (16-bit 4-band, auto-detected)
+## example-esaworldcover: ESA WorldCover RGBNIR (16-bit 4-band, auto-detected)
 example-esaworldcover: build test-integration-download
 	./$(OUTPUT) $(EXAMPLE_FLAGS) --resampling-gamma 1.8 \
 		$(ESAWORLDCOVER_DIR)/ $(BUILD_DIR)/example-esaworldcover-$(FORMAT).pmtiles
 
-## example-esaworldcover-ndvi: ESA WorldCover NDVI example (3-band p90/p50/p10 composite → PNG)
+## example-esaworldcover-ndvi: ESA WorldCover NDVI (8-bit 3-band → PNG)
 example-esaworldcover-ndvi: build test-integration-download
 	./$(OUTPUT) --format png --tile-size $(TILE_SIZE) --concurrency $(CONCURRENT) \
 		$(ESAWORLDCOVER_NDVI_DIR)/ $(BUILD_DIR)/example-esaworldcover-ndvi.pmtiles
 
-## example-esaworldcover-swir: ESA WorldCover SWIR example (2-band B11/B12 composite → PNG)
+## example-esaworldcover-swir: ESA WorldCover SWIR (8-bit 2-band → PNG)
 example-esaworldcover-swir: build test-integration-download
 	./$(OUTPUT) --format png --tile-size $(TILE_SIZE) --concurrency $(CONCURRENT) \
 		--bands 1,2,1 --alpha-band -1 \
 		$(ESAWORLDCOVER_SWIR_DIR)/ $(BUILD_DIR)/example-esaworldcover-swir.pmtiles
 
-## example-esaworldcover-gamma0: ESA WorldCover S1 Gamma0 VV/VH ratio example (SAR → PNG)
+## example-esaworldcover-gamma0: ESA WorldCover Gamma0 (16-bit SAR VV/VH → PNG)
 example-esaworldcover-gamma0: build test-integration-download
 	./$(OUTPUT) --format png --tile-size $(TILE_SIZE) --concurrency $(CONCURRENT) \
 		--alpha-band -1 --rescale-range 0,65535 \
@@ -275,22 +270,40 @@ example-esaworldcover-gamma0: build test-integration-download
 
 # The transform examples run on the output of example-swissimage.
 
-## example-transform: Transform passthrough example (copy tiles, no re-encode)
+## example-transform: pmtransform passthrough (copy tiles, no re-encode)
 example-transform: example-swissimage build-transform
 	./$(OUTPUT_TRANSFORM) --verbose \
 		$(BUILD_DIR)/example-swissimage-$(FORMAT).pmtiles $(BUILD_DIR)/example-transform-passthrough.pmtiles
 
-## example-transform-reencode: Transform format conversion example (to PNG)
+## example-transform-reencode: pmtransform re-encode to PNG
 example-transform-reencode: example-swissimage build-transform
 	./$(OUTPUT_TRANSFORM) --verbose --format png \
 		$(BUILD_DIR)/example-swissimage-$(FORMAT).pmtiles $(BUILD_DIR)/example-transform-png.pmtiles
 
-## example-transform-rebuild: Transform pyramid rebuild example with extended zoom range
+## example-transform-rebuild: pmtransform pyramid rebuild down to zoom 10
 example-transform-rebuild: example-swissimage build-transform
 	./$(OUTPUT_TRANSFORM) --verbose --rebuild --min-zoom 10 \
 		$(BUILD_DIR)/example-swissimage-$(FORMAT).pmtiles $(BUILD_DIR)/example-transform-rebuild.pmtiles
 
-# ---------- Cross-compilation ----------
+##@ Profiling
+
+## example-swissimage-profile: Run the SWISSIMAGE example, writing dist/cpu.prof and dist/mem.prof
+example-swissimage-profile: build test-integration-download
+	./$(OUTPUT) $(EXAMPLE_FLAGS) --max-zoom $(MAX_ZOOM) \
+		--cpuprofile $(BUILD_DIR)/cpu.prof --memprofile $(BUILD_DIR)/mem.prof \
+		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/example-swissimage.pmtiles
+	@echo "Profiles written to $(BUILD_DIR)/cpu.prof and $(BUILD_DIR)/mem.prof — view with: make pprof-cpu / make pprof-mem"
+
+## pprof-cpu: Open the CPU profile in a browser
+pprof-cpu:
+	$(GO) tool pprof -http=:8080 $(BUILD_DIR)/cpu.prof
+
+## pprof-mem: Open the memory profile in a browser
+pprof-mem:
+	$(GO) tool pprof -http=:8081 $(BUILD_DIR)/mem.prof
+
+##@ Cross-compilation (geotiff2pmtiles only, into dist/)
+
 # Requires a C cross-compiler (CC) and libwebp built for the target platform.
 # The Windows targets build with CGO_ENABLED=0 instead, so they need no toolchain
 # but WebP encoding is lossless only.
@@ -316,43 +329,37 @@ cross-darwin-arm64: $(BUILD_DIR)
 	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 $(CMD)
 
-## cross-windows: Build for Windows amd64 (CGO_ENABLED=0, lossless-only WebP — use a native MSYS2 build for lossy)
+## cross-windows: Build for Windows amd64 (CGO_ENABLED=0: WebP lossless only)
 cross-windows: $(BUILD_DIR)
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-windows-amd64.exe $(CMD)
 
-## cross-windows-arm64: Build for Windows arm64 (CGO_ENABLED=0, lossless-only WebP — use a native MSYS2 build for lossy)
+## cross-windows-arm64: Build for Windows arm64 (CGO_ENABLED=0: WebP lossless only)
 cross-windows-arm64: $(BUILD_DIR)
 	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 \
 		$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY)-windows-arm64.exe $(CMD)
 
-## cross-all: Build for all supported platforms
+## cross-all: All six of the above
 cross-all: cross-linux cross-linux-arm64 cross-darwin cross-darwin-arm64 cross-windows cross-windows-arm64
 
-# ---------- Cleanup ----------
-
-## clean: Remove build artifacts
-clean:
-	rm -rf $(BUILD_DIR)
-
-## clean-all: Remove build artifacts plus Go build/test caches
-clean-all: clean
-	$(GO) clean -cache -testcache
-
-# ---------- Help ----------
-
-## help: Show this help message
+# help is the default goal. Sections come from '##@' lines, targets from '## name: text'.
 help:
-	@echo "Usage: make [target] [VAR=value ...]"
+	@echo "Usage: make <target> [VAR=value ...]"
 	@echo ""
-	@echo "Targets:"
-	@awk '/^## /{t=substr($$2,1,length($$2)-1); sub(/^## [^ ]+ /,""); printf "  %-38s %s\n", t, $$0}' $(MAKEFILE_LIST)
+	@echo "Common"
+	@echo "  make build-all                         Build all tools into dist/"
+	@echo "  make build CGO=0                       Build without libwebp"
+	@echo "  make check                             fmt + vet + tests, before committing"
+	@echo "  make test-integration                  End-to-end tests, no download needed"
+	@echo "  make example-swissimage FORMAT=png     Download sample data and convert it"
+	@awk '/^##@ /{printf "\n%s\n", substr($$0,5)} \
+	      /^## /{t=substr($$2,1,length($$2)-1); sub(/^## [^ ]+ /,""); printf "  %-38s %s\n", t, $$0}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables (override with VAR=value):"
-	@echo "  CGO         1 = link libwebp, 0 = pure Go       (default: 1)"
-	@echo "  FORMAT      Example tile encoding: jpeg, png, webp (default: webp)"
-	@echo "  QUALITY     JPEG/WebP quality 1-100              (default: 85)"
-	@echo "  MAX_ZOOM    SWISSIMAGE example maximum zoom      (default: 18)"
-	@echo "  TILE_SIZE   Output tile size in pixels           (default: 512)"
-	@echo "  CONCURRENT  Number of parallel workers           (default: NumCPU)"
-	@echo "  ARGS        Arguments for 'make run'"
+	@echo "Variables"
+	@echo "  CGO=1         0 builds without libwebp (WebP lossless only)"
+	@echo "  ARGS=         Arguments for 'make run'"
+	@echo "  FORMAT=webp   Example tile format: jpeg, png, webp"
+	@echo "  QUALITY=85    Example JPEG/WebP quality"
+	@echo "  TILE_SIZE=512 Example tile size in pixels"
+	@echo "  MAX_ZOOM=18   SWISSIMAGE example maximum zoom"
+	@echo "  CONCURRENT=   Example worker count (default: number of CPUs)"

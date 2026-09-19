@@ -48,5 +48,9 @@ Makefile (519 → 358 lines):
 - Removed unused `MIN_ZOOM` and `MEM_LIMIT` variables; `all` is now `build-all`.
 - `make help`: target list no longer breaks on descriptions containing `:`; dropped the
   hand-maintained example list that duplicated it. `.PHONY` regenerated.
+- `help` is now the default goal (plain `make` no longer builds; use `make all`). Its output
+  starts with a short "Common" list, then targets grouped as Build / Test and code quality /
+  Integration tests / Examples / Profiling / Cross-compilation, driven by `##@ Section`
+  lines in the Makefile. `run`, `clean` and `clean-all` moved into Build.
 
 No code changes; CLI help is unaffected.
