@@ -95,21 +95,44 @@ func TestOptimizeRunLengths_SingleEntry(t *testing.T) {
 }
 
 func TestOptimizeRunLengths_Consecutive(t *testing.T) {
-	// Three consecutive tiles with same length and contiguous offsets.
+	// Three consecutive tiles with the same length whose blobs are merely
+	// adjacent in the data section. These are DISTINCT tiles: a spec reader
+	// resolves every ID of a run to the run's single Offset, so merging them
+	// would serve tile 10's bytes for 11 and 12. They must stay separate.
 	entries := []Entry{
 		{TileID: 10, Offset: 0, Length: 100, RunLength: 1},
 		{TileID: 11, Offset: 100, Length: 100, RunLength: 1},
 		{TileID: 12, Offset: 200, Length: 100, RunLength: 1},
 	}
 	result := optimizeRunLengths(entries)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 merged entry, got %d", len(result))
+	if len(result) != 3 {
+		t.Fatalf("expected 3 separate entries for adjacent-but-distinct blobs, got %d", len(result))
 	}
-	if result[0].TileID != 10 {
-		t.Errorf("TileID = %d, want 10", result[0].TileID)
+	for i, e := range result {
+		if e.RunLength != 1 {
+			t.Errorf("entry %d RunLength = %d, want 1", i, e.RunLength)
+		}
 	}
-	if result[0].RunLength != 3 {
-		t.Errorf("RunLength = %d, want 3", result[0].RunLength)
+}
+
+func TestOptimizeRunLengths_SharedBlob(t *testing.T) {
+	// Three consecutive tile IDs deduplicated onto one blob: the spec case
+	// for a run-length entry.
+	entries := []Entry{
+		{TileID: 10, Offset: 300, Length: 100, RunLength: 1},
+		{TileID: 11, Offset: 300, Length: 100, RunLength: 1},
+		{TileID: 12, Offset: 300, Length: 100, RunLength: 1},
+		{TileID: 13, Offset: 400, Length: 100, RunLength: 1}, // different blob
+	}
+	result := optimizeRunLengths(entries)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 entries (run of 3 + 1), got %d", len(result))
+	}
+	if result[0].TileID != 10 || result[0].RunLength != 3 || result[0].Offset != 300 {
+		t.Errorf("run entry = %+v, want TileID 10 / RunLength 3 / Offset 300", result[0])
+	}
+	if result[1].TileID != 13 || result[1].RunLength != 1 {
+		t.Errorf("tail entry = %+v, want TileID 13 / RunLength 1", result[1])
 	}
 }
 

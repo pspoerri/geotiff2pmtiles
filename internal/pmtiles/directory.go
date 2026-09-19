@@ -345,7 +345,7 @@ func DeserializeDirectory(data []byte) ([]Entry, error) {
 	return entries, nil
 }
 
-// optimizeRunLengths merges consecutive entries with contiguous tile IDs and offsets.
+// optimizeRunLengths merges consecutive tile IDs that share one data blob into a single run-length entry.
 func optimizeRunLengths(entries []Entry) []Entry {
 	if len(entries) == 0 {
 		return entries
@@ -357,12 +357,10 @@ func optimizeRunLengths(entries []Entry) []Entry {
 
 	for i := 1; i < len(entries); i++ {
 		e := entries[i]
-		// Check if this entry is contiguous with the current run.
 		expectedTileID := current.TileID + uint64(current.RunLength)
-		expectedOffset := current.Offset + uint64(current.Length)*uint64(current.RunLength)
 
 		if e.TileID == expectedTileID &&
-			e.Offset == expectedOffset &&
+			e.Offset == current.Offset &&
 			e.Length == current.Length {
 			current.RunLength++
 		} else {
