@@ -58,7 +58,7 @@ func main() {
 		resamplingGamma float64
 	)
 
-	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium")
+	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium (auto-selected for float/signed-int elevation data)")
 	flag.IntVar(&quality, "quality", 85, "JPEG/WebP quality 1-100")
 	flag.IntVar(&minZoom, "min-zoom", -1, "Minimum zoom level (default: auto)")
 	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (default: auto from resolution)")
@@ -220,9 +220,9 @@ func main() {
 		}
 	}
 
-	// Validate terrarium requires float input.
+	// Validate terrarium requires float or signed-integer input.
 	if format == "terrarium" && !sources[0].IsFloat() {
-		log.Fatal("Terrarium format requires float GeoTIFF input (elevation data)")
+		log.Fatal("Terrarium format requires float or signed-integer GeoTIFF input (elevation data)")
 	}
 
 	// Parse band config.

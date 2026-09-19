@@ -108,6 +108,12 @@ returns the `float-terrarium` preset with `Format: "terrarium"`. The CLI applies
 this format override when using the default format (jpeg), replacing the previous
 inline float detection logic.
 
+**Signed integers count as float**: `IsFloat()` is also true for SampleFormat=2
+(e.g. GEBCO Int16 bathymetry). Signed samples have no sensible uint/RGB reading —
+negative depths wrapped to ~56000–65535 and the ocean vanished under any
+`--rescale-range` — so they decode to float32 in `decodeRawFloat32Tile` and reuse the
+whole terrarium path (nodata, resampling, pyramid) instead of growing a third pipeline.
+
 **GDAL_METADATA parsing**: TIFF tag 42112 contains an XML blob with `<Item>` elements.
 Items have a `name` attribute and optional `sample` (0-indexed band) and `role`
 attributes. The XML is parsed into `GDALMeta` with two levels: `Items` (dataset-level)
