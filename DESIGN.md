@@ -415,6 +415,28 @@ pixels where source data is found, so unfound pixels must be transparent (0,0,0,
 without clearing, recycled images retain stale pixel data from previous tiles, causing
 visible artifacts at data boundaries.
 
+### Per-tile local view in front of the source tile cache
+
+The resamplers look up the source tile once per output pixel. With the shared
+cache that is a shard mutex, a map lookup and an LRU `MoveToFront` per pixel —
+262k times per 512 px tile, per worker. Sharding does not help much: Hilbert
+batching makes neighbouring workers read the *same* source tiles, hence the
+same shards. On an 18-core SWISSIMAGE run the lock traffic (and the scheduler
+spinning it caused, visible as `runtime.usleep`) was over a third of all CPU
+samples.
+
+`renderTile` now wraps the cache in `TileCache.Local()`: a goroutine-local
+view with a 4-slot direct-mapped memo indexed by `(col&1, row&1)`, so the 2×2
+tile neighbourhood a kernel can straddle never collides. Only a memo miss
+touches the shared cache. Result: 22 s → ~15.5 s wall, user CPU 300 s → 190 s,
+tile data byte-identical.
+
+Tradeoffs: memo hits do not promote the entry in the shared LRU (harmless — the
+view pins the tile for the duration of the render anyway).
+`FloatTileCache.Local()` and `renderTileTerrarium` mirror this for consistency;
+the available DEM test set is too small to show contention, so that half is
+verified for identical output only, not for speed.
+
 ### Disk tile store memory accounting
 
 The disk tile store tracks memory usage to enforce the configured limit. Three fixes:

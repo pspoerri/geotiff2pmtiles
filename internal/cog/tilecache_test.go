@@ -92,3 +92,63 @@ func TestTileCachePutExistingRefreshes(t *testing.T) {
 		t.Error("k1 should have been evicted as least-recently used")
 	}
 }
+
+func TestTileCacheLocal(t *testing.T) {
+	tc := NewTileCache(256)
+	a := image.NewGray(image.Rect(0, 0, 1, 1))
+	b := image.NewGray(image.Rect(0, 0, 1, 1))
+	tc.Put(1, 0, 2, 2, a)
+
+	l := tc.Local()
+	if l.Get(1, 0, 2, 2) != a {
+		t.Fatal("local view should read through to the shared cache")
+	}
+	// Same memo slot (even col, even row), different key: must not return a.
+	if got := l.Get(1, 0, 4, 2); got != nil {
+		t.Fatalf("slot collision returned a stale tile: %v", got)
+	}
+	if got := l.Get(2, 0, 2, 2); got != nil {
+		t.Fatalf("different reader id returned a stale tile: %v", got)
+	}
+	l.Put(1, 0, 4, 2, b)
+	if tc.Get(1, 0, 4, 2) != b {
+		t.Fatal("Put through a local view should reach the shared cache")
+	}
+	if l.Get(1, 0, 4, 2) != b || l.Get(1, 0, 2, 2) != a {
+		t.Fatal("local view returned the wrong tile after slot reuse")
+	}
+	if (*TileCache)(nil).Local() != nil {
+		t.Fatal("Local on a nil cache should stay nil")
+	}
+}
+
+func TestFloatTileCacheLocal(t *testing.T) {
+	fc := NewFloatTileCache(256)
+	a, b := []float32{1}, []float32{2, 3}
+	fc.Put(1, 0, 2, 2, a, 1, 1)
+
+	l := fc.Local()
+	if d, w, h := l.Get(1, 0, 2, 2); &d[0] != &a[0] || w != 1 || h != 1 {
+		t.Fatal("local view should read through to the shared cache")
+	}
+	// Same memo slot (even col, even row), different key: must not return a.
+	if d, _, _ := l.Get(1, 0, 4, 2); d != nil {
+		t.Fatalf("slot collision returned a stale tile: %v", d)
+	}
+	if d, _, _ := l.Get(2, 0, 2, 2); d != nil {
+		t.Fatalf("different reader id returned a stale tile: %v", d)
+	}
+	l.Put(1, 0, 4, 2, b, 2, 1)
+	if d, w, h := fc.Get(1, 0, 4, 2); &d[0] != &b[0] || w != 2 || h != 1 {
+		t.Fatal("Put through a local view should reach the shared cache")
+	}
+	if d, w, _ := l.Get(1, 0, 4, 2); &d[0] != &b[0] || w != 2 {
+		t.Fatal("local view returned the wrong tile after slot reuse")
+	}
+	if d, _, _ := l.Get(1, 0, 2, 2); &d[0] != &a[0] {
+		t.Fatal("local view lost the evicted slot's tile from the shared cache")
+	}
+	if (*FloatTileCache)(nil).Local() != nil {
+		t.Fatal("Local on a nil cache should stay nil")
+	}
+}

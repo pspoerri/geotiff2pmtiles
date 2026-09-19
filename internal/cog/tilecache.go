@@ -46,7 +46,28 @@ func tileKeyHash(key tileKey) uint64 {
 // evicts from the back when the shard is full.
 type TileCache struct {
 	shards [shardCount]tileCacheShard
+
+	// Set only on views created by Local.
+	parent *TileCache
+	memo   [4]cacheEntry
 }
+
+// Local returns a single-goroutine view of tc that remembers the last few
+// tiles it returned, so per-pixel lookups that keep hitting the same source
+// tile skip the shard mutex and LRU update entirely. At high concurrency that
+// lock traffic otherwise dominates: neighbouring output tiles read the same
+// source tiles and therefore the same shards. Create one per rendered tile;
+// the view must not be shared between goroutines.
+func (tc *TileCache) Local() *TileCache {
+	if tc == nil {
+		return nil
+	}
+	return &TileCache{parent: tc}
+}
+
+// memoSlot maps the 2×2 tile neighbourhood a resampling kernel can straddle
+// to four distinct slots.
+func memoSlot(col, row int) int { return col&1 | row&1<<1 }
 
 type tileCacheShard struct {
 	cache   map[tileKey]*list.Element
@@ -84,6 +105,16 @@ func NewTileCache(maxEntries int) *TileCache {
 // Returns nil if not found.
 func (tc *TileCache) Get(id int, level, col, row int) image.Image {
 	key := tileKey{id: id, level: level, col: col, row: row}
+	if tc.parent != nil {
+		m := &tc.memo[memoSlot(col, row)]
+		if m.img == nil || m.key != key {
+			if m.img = tc.parent.Get(id, level, col, row); m.img == nil {
+				return nil
+			}
+			m.key = key
+		}
+		return m.img
+	}
 	s := &tc.shards[tileKeyHash(key)&(shardCount-1)]
 	s.mu.Lock()
 	var img image.Image
@@ -99,6 +130,11 @@ func (tc *TileCache) Get(id int, level, col, row int) image.Image {
 // its shard if full.
 func (tc *TileCache) Put(id int, level, col, row int, img image.Image) {
 	key := tileKey{id: id, level: level, col: col, row: row}
+	if tc.parent != nil {
+		tc.memo[memoSlot(col, row)] = cacheEntry{img: img, key: key}
+		tc.parent.Put(id, level, col, row, img)
+		return
+	}
 	s := &tc.shards[tileKeyHash(key)&(shardCount-1)]
 	s.mu.Lock()
 	if el, ok := s.cache[key]; ok {
@@ -150,6 +186,18 @@ func (cr *CachedReader) ReadTileCached(level, col, row int) (image.Image, error)
 // FloatTileCache provides a sharded LRU cache for decoded float32 COG tiles.
 type FloatTileCache struct {
 	shards [shardCount]floatCacheShard
+
+	// Set only on views created by Local.
+	parent *FloatTileCache
+	memo   [4]floatCacheEntry
+}
+
+// Local returns a single-goroutine view of fc; see TileCache.Local.
+func (fc *FloatTileCache) Local() *FloatTileCache {
+	if fc == nil {
+		return nil
+	}
+	return &FloatTileCache{parent: fc}
 }
 
 type floatCacheShard struct {
@@ -190,6 +238,16 @@ func NewFloatTileCache(maxEntries int) *FloatTileCache {
 // Returns nil if not found.
 func (fc *FloatTileCache) Get(id int, level, col, row int) ([]float32, int, int) {
 	key := tileKey{id: id, level: level, col: col, row: row}
+	if fc.parent != nil {
+		m := &fc.memo[memoSlot(col, row)]
+		if m.data == nil || m.key != key {
+			if m.data, m.width, m.height = fc.parent.Get(id, level, col, row); m.data == nil {
+				return nil, 0, 0
+			}
+			m.key = key
+		}
+		return m.data, m.width, m.height
+	}
 	s := &fc.shards[tileKeyHash(key)&(shardCount-1)]
 	s.mu.Lock()
 	var data []float32
@@ -207,6 +265,11 @@ func (fc *FloatTileCache) Get(id int, level, col, row int) ([]float32, int, int)
 // entry in its shard if full.
 func (fc *FloatTileCache) Put(id int, level, col, row int, data []float32, width, height int) {
 	key := tileKey{id: id, level: level, col: col, row: row}
+	if fc.parent != nil {
+		fc.memo[memoSlot(col, row)] = floatCacheEntry{data: data, key: key, width: width, height: height}
+		fc.parent.Put(id, level, col, row, data, width, height)
+		return
+	}
 	s := &fc.shards[tileKeyHash(key)&(shardCount-1)]
 	s.mu.Lock()
 	if el, ok := s.cache[key]; ok {
