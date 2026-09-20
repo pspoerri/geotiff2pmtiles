@@ -1,7 +1,6 @@
 package cog
 
 import (
-	"encoding/binary"
 	"testing"
 )
 
@@ -21,18 +20,14 @@ func TestValueRangeFromGDALStatistics(t *testing.T) {
 }
 
 // The scan must ignore nodata and the padding of edge tiles.
-func TestMinMaxUint16SkipsNodataAndPadding(t *testing.T) {
+func TestMinMaxSamplesSkipsNodataAndPadding(t *testing.T) {
 	const tw, spp = 4, 1
 	vals := []uint16{
 		500, 900, 0, 0, // validW=2: last two columns are padding
 		65535, 700, 0, 0, // 65535 is nodata
 		0, 0, 0, 0, // validH=2: padding row
 	}
-	data := make([]byte, len(vals)*2)
-	for i, v := range vals {
-		binary.LittleEndian.PutUint16(data[i*2:], v)
-	}
-	lo, hi, ok := minMaxUint16(data, binary.LittleEndian, spp, tw, 2, 2, 0, 65535, true)
+	lo, hi, ok := minMaxSamples(vals, spp, tw, 2, 2, 0, 65535, true)
 	if !ok || lo != 500 || hi != 900 {
 		t.Fatalf("got [%d, %d] ok=%v, want [500, 900]", lo, hi, ok)
 	}

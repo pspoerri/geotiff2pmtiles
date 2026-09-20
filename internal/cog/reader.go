@@ -695,6 +695,137 @@ func (r *Reader) decodeRawFloat32Tile(ifd *IFD, data []byte) ([]float32, int, in
 	return result, w, h, nil
 }
 
+// ReadUint16Tile reads one tile's samples without the rescaling to 8 bits that
+// every other integer read path applies. `decodeRawTile` understands 16-bit
+// sources perfectly well, but it exists to produce an *image*: it runs every
+// sample through `buildRescaler` and hands back an `*image.RGBA`, so the
+// original values are gone by the time a caller sees them. `ReadFloatTile` is
+// the equivalent escape hatch for float32 data; this is the integer one.
+//
+// Samples come back chunky, exactly as they are stored: sample s of pixel i is
+// at samples[i*spp+s]. 8-bit sources are widened rather than rejected, so a
+// caller can read 8- and 16-bit assets through one path.
+//
+// Two things are deliberately left to the caller. Signed data (SampleFormat 2)
+// is returned as raw bits, to be reinterpreted with int16 -- unlike
+// decodeRawTile, which folds it into unsigned space via sampleBias so its
+// rescaler can order it; a raw accessor that silently shifted values by 32768
+// would be a trap. And nodata is not applied, because for reflectance the
+// sentinel has to be tested before any offset is subtracted.
+//
+// An empty tile returns nil samples with the dimensions still filled in, as
+// ReadFloatTile does.
+func (r *Reader) ReadUint16Tile(level, col, row int) (samples []uint16, w, h, spp int, err error) {
+	data, ifd, err := r.readTileRaw(level, col, row)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+
+	w = int(ifd.TileWidth)
+	h = int(ifd.TileHeight)
+	spp = int(ifd.SamplesPerPixel)
+	if spp <= 0 {
+		spp = 1
+	}
+	if data == nil {
+		return nil, w, h, spp, nil // empty tile
+	}
+
+	if len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 3 {
+		return nil, 0, 0, 0, fmt.Errorf("tile is IEEE float; use ReadFloatTile")
+	}
+	// readTileRaw returns JPEG payloads undecoded, and interleaves
+	// planar-separate *strips* into chunky order but not planar-separate
+	// tiles. Either would be misread as chunky samples here.
+	if ifd.Compression == 7 {
+		return nil, 0, 0, 0, fmt.Errorf("JPEG-compressed tiles have no raw integer samples")
+	}
+	if ifd.PlanarConfig == 2 && r.strip == nil {
+		return nil, 0, 0, 0, fmt.Errorf("planar-separate (PlanarConfiguration=2) tiles are not supported")
+	}
+
+	bits := ifd.bitsPerSample()
+	if bits < 1 || bits > 16 {
+		return nil, 0, 0, 0, fmt.Errorf("unsupported bits per sample: %d", bits)
+	}
+
+	count := w * h * spp
+	samples = make([]uint16, count)
+
+	// A depth that is not a multiple of eight may be stored either bit-packed
+	// or padded out to whole bytes, and the tag does not say which. The tile
+	// length does: Planetary Computer's Sentinel-2 L2A reflectance is
+	// BitsPerSample=15 and its 512x512 tiles are exactly 512*512*15/8 bytes,
+	// so it is genuinely packed. Rows in a packed tile start on a byte
+	// boundary, per the TIFF spec.
+	rowBytes := (w*spp*bits + 7) / 8
+	packed := rowBytes * h
+	padded := count * ((bits + 7) / 8)
+
+	switch {
+	case bits%8 == 0 && len(data) >= padded:
+		bps := bits / 8
+		if bps == 1 {
+			for i := 0; i < count; i++ {
+				samples[i] = uint16(data[i])
+			}
+		} else {
+			for i := 0; i < count; i++ {
+				samples[i] = r.bo.Uint16(data[i*2 : i*2+2])
+			}
+		}
+	case len(data) >= padded:
+		// Not a byte multiple, but long enough to be padded rather than packed.
+		for i := 0; i < count; i++ {
+			samples[i] = r.bo.Uint16(data[i*2 : i*2+2])
+		}
+	case len(data) >= packed:
+		unpackBits(samples, data, w*spp, h, bits, rowBytes)
+	default:
+		// A strip TIFF's last virtual tile is legitimately short when the
+		// height is not a multiple of the tile height; the missing rows are
+		// outside the image and are never sampled.
+		if r.strip == nil {
+			return nil, 0, 0, 0, fmt.Errorf("tile data too short: got %d, need %d", len(data), min(packed, padded))
+		}
+		rows := len(data) / rowBytes
+		unpackBits(samples, data, w*spp, rows, bits, rowBytes)
+	}
+	return samples, w, h, spp, nil
+}
+
+// unpackBits reads row-aligned, MSB-first packed samples of the given depth.
+//
+// TIFF packs samples most-significant bit first and restarts each row on a
+// byte boundary, independent of the file's byte order -- that governs whole
+// words, not the bit stream. FillOrder 2 (LSB first) is vanishingly rare and
+// is not handled.
+func unpackBits(dst []uint16, data []byte, perRow, rows, bits, rowBytes int) {
+	for y := 0; y < rows; y++ {
+		base := y * rowBytes
+		bit := 0
+		for i := 0; i < perRow; i++ {
+			var v uint32
+			for need := bits; need > 0; {
+				idx := base + bit>>3
+				if idx >= len(data) {
+					break
+				}
+				avail := 8 - bit&7
+				take := avail
+				if need < take {
+					take = need
+				}
+				chunk := (data[idx] >> (avail - take)) & byte((1<<take)-1)
+				v = v<<take | uint32(chunk)
+				bit += take
+				need -= take
+			}
+			dst[y*perRow+i] = uint16(v)
+		}
+	}
+}
+
 // ReadTile reads and decodes a single tile at the given column and row from the specified IFD level.
 // Level 0 is the full resolution; higher levels are overviews.
 // This is safe for concurrent use — the underlying data is memory-mapped read-only.
@@ -1068,8 +1199,33 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	h := int(ifd.TileHeight)
 	spp := int(ifd.SamplesPerPixel)
 	bps := ifd.bytesPerSample() // 1 for 8-bit, 2 for 16-bit
-	is16 := bps == 2
-	pixelBytes := spp * bps
+	bits := ifd.bitsPerSample()
+	// A depth that is not a multiple of eight is bit-packed, so no whole
+	// number of bytes addresses a sample and bytesPerSample is meaningless
+	// (15 truncates to 1, 4 to 0). Unpack the tile once and index samples
+	// directly; everything below then works in sample indices rather than
+	// byte offsets, which is the same arithmetic in the byte-aligned case.
+	packed := bits%8 != 0
+	// Only 9..16 bits are read as wide samples. Deeper aligned types (24, 32)
+	// keep their previous single-byte behaviour rather than being silently
+	// reinterpreted here.
+	is16 := bits > 8 && bits <= 16
+
+	var unpacked []uint16
+	var availPixels int
+	if packed {
+		rowBytes := (w*spp*bits + 7) / 8
+		rows := h
+		if avail := len(data) / rowBytes; avail < rows {
+			rows = avail
+		}
+		unpacked = make([]uint16, w*h*spp)
+		unpackBits(unpacked, data, w*spp, rows, bits, rowBytes)
+		availPixels = rows * w
+	} else if pixelBytes := spp * bps; pixelBytes > 0 {
+		availPixels = len(data) / pixelBytes
+	}
+
 	// Signed 16-bit: samples, nodata and the rescale range all move into the
 	// biased unsigned space (see signBias16).
 	bias := ifd.sampleBias()
@@ -1164,9 +1320,17 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	}
 	rescale := buildRescaler(rescaleMode, rescaleMin+fbias, rescaleMax+fbias)
 
-	// readSample reads one sample from the pixel data at the given 0-indexed band.
-	readSample := func(pixelOff, band int) uint16 {
-		off := pixelOff + band*bps
+	// readSample reads one sample, given the index of the pixel's first
+	// sample and a 0-indexed band.
+	readSample := func(base, band int) uint16 {
+		i := base + band
+		if packed {
+			if i >= len(unpacked) {
+				return 0
+			}
+			return unpacked[i] ^ uint16(bias)
+		}
+		off := i * bps
 		if off+bps > len(data) {
 			return 0
 		}
@@ -1181,17 +1345,18 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			pixelOff := (y*w + x) * pixelBytes
-			if pixelOff+pixelBytes > len(data) {
+			idx := y*w + x
+			if idx >= availPixels {
 				break
 			}
-			pixIdx := (y*w + x) * 4
+			base := idx * spp
+			pixIdx := idx * 4
 
 			if useLegacyNodata {
 				// Legacy path for 8-bit spp≤2 with default config.
 				switch spp {
 				case 1:
-					v := data[pixelOff]
+					v := uint8(readSample(base, 0))
 					pix[pixIdx+0] = v
 					pix[pixIdx+1] = v
 					pix[pixIdx+2] = v
@@ -1201,11 +1366,11 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 						pix[pixIdx+3] = 255
 					}
 				case 2:
-					v := data[pixelOff]
+					v := uint8(readSample(base, 0))
 					pix[pixIdx+0] = v
 					pix[pixIdx+1] = v
 					pix[pixIdx+2] = v
-					a := data[pixelOff+1]
+					a := uint8(readSample(base, 1))
 					if hasNodata && v == nodataVal {
 						a = 0
 					}
@@ -1217,13 +1382,13 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			// General path: band reordering + rescaling.
 			var rV, gV, bV uint16
 			if bandR < spp {
-				rV = readSample(pixelOff, bandR)
+				rV = readSample(base, bandR)
 			}
 			if bandG < spp {
-				gV = readSample(pixelOff, bandG)
+				gV = readSample(base, bandG)
 			}
 			if bandB < spp {
-				bV = readSample(pixelOff, bandB)
+				bV = readSample(base, bandB)
 			}
 
 			// Nodata check: if all file bands equal the nodata value, emit transparent.
@@ -1232,7 +1397,7 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			if genHasNodata && effectiveAlpha < 0 {
 				isNodata := true
 				for b := 0; b < spp; b++ {
-					s := readSample(pixelOff, b)
+					s := readSample(base, b)
 					var diff uint16
 					if s >= genNodataU16 {
 						diff = s - genNodataU16
@@ -1256,7 +1421,7 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			// Alpha.
 			var a uint8 = 255
 			if effectiveAlpha >= 0 && effectiveAlpha < spp {
-				rawAlpha := readSample(pixelOff, effectiveAlpha)
+				rawAlpha := readSample(base, effectiveAlpha)
 				if rawAlpha == 0 {
 					// Transparent source pixel: leave as alpha=0.
 					pix[pixIdx+0] = 0

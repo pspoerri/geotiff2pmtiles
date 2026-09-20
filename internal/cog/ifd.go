@@ -97,15 +97,32 @@ type GDALMeta struct {
 // rescale/nodata machinery then handles Int16 data (e.g. GEBCO) unchanged.
 const signBias16 = 0x8000
 
-// sampleBias returns signBias16 for signed 16-bit data, 0 otherwise.
+// sampleBias returns signBias16 for signed data 9..16 bits deep, 0 otherwise.
+//
+// Keyed on the declared depth rather than on bytesPerSample, so that a
+// bit-packed signed depth such as 15 is recognised; bytesPerSample truncates
+// that to 1 and would report no bias. Depths above 16 keep 0, as before.
 func (ifd *IFD) sampleBias() int {
-	if ifd.bytesPerSample() == 2 && len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 2 {
+	if b := ifd.bitsPerSample(); b > 8 && b <= 16 && len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 2 {
 		return signBias16
 	}
 	return 0
 }
 
+// bitsPerSample returns the declared sample depth, defaulting to 8.
+func (ifd *IFD) bitsPerSample() int {
+	if len(ifd.BitsPerSample) > 0 {
+		return int(ifd.BitsPerSample[0])
+	}
+	return 8
+}
+
 // bytesPerSample returns the number of bytes per sample based on BitsPerSample.
+//
+// Note that this is only meaningful for depths that are a multiple of eight.
+// A depth such as 15 may be bit-packed on disk, in which case no whole number
+// of bytes describes a sample; ReadUint16Tile determines the real layout from
+// the tile length instead of asking this.
 func (ifd *IFD) bytesPerSample() int {
 	if len(ifd.BitsPerSample) > 0 {
 		return int(ifd.BitsPerSample[0]) / 8
