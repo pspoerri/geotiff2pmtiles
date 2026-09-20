@@ -1,7 +1,6 @@
 package cog
 
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
 	"strconv"
@@ -45,8 +44,10 @@ func (r *Reader) statisticsRange() (lo, hi float64, ok bool) {
 func (r *Reader) scanRange() (float64, float64, error) {
 	level := len(r.ifds) - 1
 	ifd := &r.ifds[level]
-	if ifd.bytesPerSample() != 2 || ifd.Compression == 7 {
-		return 0, 0, fmt.Errorf("pixel scan supports only non-JPEG 16-bit data")
+	// Depth rather than bytesPerSample, so bit-packed widths such as 15 are
+	// scanned too; the tile read below unpacks them.
+	if bits := ifd.bitsPerSample(); bits <= 8 || bits > 16 || ifd.Compression == 7 {
+		return 0, 0, fmt.Errorf("pixel scan supports only non-JPEG 9..16-bit data")
 	}
 	nodata, err := strconv.ParseFloat(strings.TrimSpace(r.ifds[0].NoData), 64)
 	bias := r.ifds[0].sampleBias()
@@ -59,13 +60,13 @@ func (r *Reader) scanRange() (float64, float64, error) {
 	lo, hi, found := uint16(math.MaxUint16), uint16(0), false
 	for i := 0; i < across*down; i += stride {
 		col, row := i%across, i/across
-		data, _, err := r.readTileRaw(level, col, row)
+		samples, _, _, sppTile, err := r.ReadUint16Tile(level, col, row)
 		if err != nil {
 			return 0, 0, err
 		}
 		validW := min(tw, int(ifd.Width)-col*tw)
 		validH := min(th, int(ifd.Height)-row*th)
-		tLo, tHi, ok := minMaxUint16(data, r.bo, int(ifd.SamplesPerPixel), tw, validW, validH, bias, uint16(nodata), hasNodata)
+		tLo, tHi, ok := minMaxSamples(samples, sppTile, tw, validW, validH, bias, uint16(nodata), hasNodata)
 		if ok {
 			found = true
 			if tLo < lo {
@@ -82,19 +83,19 @@ func (r *Reader) scanRange() (float64, float64, error) {
 	return float64(lo) - float64(bias), float64(hi) - float64(bias), nil
 }
 
-// minMaxUint16 returns the min/max of the chunky uint16 samples in the
+// minMaxSamples returns the min/max of the chunky samples in the
 // validW×validH region of a tile tw pixels wide, skipping nodata samples.
 // Samples are XOR-ed with bias (see signBias16); nodata and the result are in
 // that biased space.
-func minMaxUint16(data []byte, bo binary.ByteOrder, spp, tw, validW, validH, bias int, nodata uint16, hasNodata bool) (lo, hi uint16, ok bool) {
+func minMaxSamples(samples []uint16, spp, tw, validW, validH, bias int, nodata uint16, hasNodata bool) (lo, hi uint16, ok bool) {
 	lo = math.MaxUint16
 	for y := 0; y < validH; y++ {
-		rowOff := y * tw * spp * 2
-		if rowOff+validW*spp*2 > len(data) {
+		rowOff := y * tw * spp
+		if rowOff+validW*spp > len(samples) {
 			break
 		}
 		for s := 0; s < validW*spp; s++ {
-			v := bo.Uint16(data[rowOff+s*2:]) ^ uint16(bias)
+			v := samples[rowOff+s] ^ uint16(bias)
 			if hasNodata && v == nodata {
 				continue
 			}
