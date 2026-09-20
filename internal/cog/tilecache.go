@@ -288,3 +288,125 @@ func (fc *FloatTileCache) Put(id int, level, col, row int, data []float32, width
 	s.cache[key] = s.order.PushFront(&floatCacheEntry{data: data, key: key, width: width, height: height})
 	s.mu.Unlock()
 }
+
+// --- Uint16TileCache (raw integer tiles) ---
+//
+// A cache for ReadUint16Tile's raw samples. It differs from FloatTileCache in one way that matters: a hit is reported
+// by an explicit ok, not by a non-nil slice. ReadUint16Tile legitimately
+// returns nil samples for an empty tile, and there are a great many empty
+// tiles at the edge of a Sentinel-2 datastrip, so treating nil as a miss
+// would re-read those on every single pixel that lands in one.
+
+// Uint16TileCache provides a sharded LRU cache for decoded uint16 COG tiles.
+type Uint16TileCache struct {
+	shards [shardCount]uint16CacheShard
+
+	// Set only on views created by Local.
+	parent *Uint16TileCache
+	memo   [4]uint16CacheEntry
+}
+
+// Local returns a single-goroutine view of uc; see TileCache.Local.
+func (uc *Uint16TileCache) Local() *Uint16TileCache {
+	if uc == nil {
+		return nil
+	}
+	return &Uint16TileCache{parent: uc}
+}
+
+type uint16CacheShard struct {
+	cache   map[tileKey]*list.Element
+	order   *list.List // front = most recently used; values are *uint16CacheEntry
+	maxSize int
+	mu      sync.Mutex
+}
+
+type uint16CacheEntry struct {
+	data   []uint16
+	key    tileKey
+	width  int
+	height int
+	spp    int
+	// present distinguishes a cached empty tile from an empty memo slot.
+	present bool
+}
+
+// NewUint16TileCache creates a sharded uint16 tile cache with the given
+// maximum total entries.
+func NewUint16TileCache(maxEntries int) *Uint16TileCache {
+	if maxEntries <= 0 {
+		maxEntries = 256
+	}
+	perShard := maxEntries / shardCount
+	if perShard < 4 {
+		perShard = 4
+	}
+	uc := &Uint16TileCache{}
+	for i := range uc.shards {
+		uc.shards[i] = uint16CacheShard{
+			cache:   make(map[tileKey]*list.Element, perShard),
+			order:   list.New(),
+			maxSize: perShard,
+		}
+	}
+	return uc
+}
+
+// Get retrieves a uint16 tile from the cache and marks it most-recently used.
+// ok reports whether the tile was cached at all; data may be nil for a cached
+// empty tile.
+func (uc *Uint16TileCache) Get(id int, level, col, row int) (data []uint16, width, height, spp int, ok bool) {
+	key := tileKey{id: id, level: level, col: col, row: row}
+	if uc.parent != nil {
+		m := &uc.memo[memoSlot(col, row)]
+		if !m.present || m.key != key {
+			d, w, h, s, hit := uc.parent.Get(id, level, col, row)
+			if !hit {
+				return nil, 0, 0, 0, false
+			}
+			*m = uint16CacheEntry{data: d, key: key, width: w, height: h, spp: s, present: true}
+		}
+		return m.data, m.width, m.height, m.spp, true
+	}
+	sh := &uc.shards[tileKeyHash(key)&(shardCount-1)]
+	sh.mu.Lock()
+	if el, found := sh.cache[key]; found {
+		sh.order.MoveToFront(el)
+		e := el.Value.(*uint16CacheEntry)
+		data, width, height, spp, ok = e.data, e.width, e.height, e.spp, true
+	}
+	sh.mu.Unlock()
+	return data, width, height, spp, ok
+}
+
+// Put stores a uint16 tile in the cache, evicting the least-recently-used
+// entry in its shard if full.
+func (uc *Uint16TileCache) Put(id int, level, col, row int, data []uint16, width, height, spp int) {
+	key := tileKey{id: id, level: level, col: col, row: row}
+	if uc.parent != nil {
+		uc.memo[memoSlot(col, row)] = uint16CacheEntry{
+			data: data, key: key, width: width, height: height, spp: spp, present: true,
+		}
+		uc.parent.Put(id, level, col, row, data, width, height, spp)
+		return
+	}
+	sh := &uc.shards[tileKeyHash(key)&(shardCount-1)]
+	sh.mu.Lock()
+	if el, found := sh.cache[key]; found {
+		sh.order.MoveToFront(el)
+		sh.mu.Unlock()
+		return // already cached
+	}
+	for len(sh.cache) >= sh.maxSize {
+		oldest := sh.order.Back()
+		if oldest == nil {
+			break
+		}
+		sh.order.Remove(oldest)
+		delete(sh.cache, oldest.Value.(*uint16CacheEntry).key)
+	}
+	sh.cache[key] = sh.order.PushFront(&uint16CacheEntry{
+		data: data, key: key, width: width, height: height, spp: spp, present: true,
+	})
+	sh.mu.Unlock()
+}

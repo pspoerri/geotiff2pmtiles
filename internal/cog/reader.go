@@ -1520,6 +1520,70 @@ func (r *Reader) ReadRegion(level, startX, startY, width, height int) (*image.RG
 	return dst, nil
 }
 
+// ReadUint16Region reads a rectangular region as raw samples. ReadRegion
+// cannot be reused for this: it goes through color.RGBA and so truncates
+// every sample to eight bits by construction, and it assigns band four as
+// alpha, neither of which survives a 16-bit multi-band chunk. This mirrors
+// its tile-overlap arithmetic exactly and copies uint16 samples instead.
+//
+// Samples come back chunky, as ReadUint16Tile returns them: sample s of pixel
+// i is at samples[i*spp+s], with i counted row-major over the region. Empty
+// tiles leave their part of the region zero.
+func (r *Reader) ReadUint16Region(level, startX, startY, width, height int) ([]uint16, int, error) {
+	if level < 0 || level >= len(r.ifds) {
+		return nil, 0, fmt.Errorf("invalid level %d", level)
+	}
+	ifd := &r.ifds[level]
+	tw := int(ifd.TileWidth)
+	th := int(ifd.TileHeight)
+	spp := int(ifd.SamplesPerPixel)
+	if spp <= 0 {
+		spp = 1
+	}
+
+	dst := make([]uint16, width*height*spp)
+
+	colStart := startX / tw
+	colEnd := (startX + width - 1) / tw
+	rowStart := startY / th
+	rowEnd := (startY + height - 1) / th
+
+	for row := rowStart; row <= rowEnd; row++ {
+		for col := colStart; col <= colEnd; col++ {
+			tile, tileW, _, tileSpp, err := r.ReadUint16Tile(level, col, row)
+			if err != nil {
+				return nil, 0, err
+			}
+			if tileSpp != spp {
+				return nil, 0, fmt.Errorf("tile (%d,%d) has %d samples per pixel, want %d", col, row, tileSpp, spp)
+			}
+			if tile == nil {
+				continue // empty tile: leave the region zero
+			}
+
+			tileMinX := col * tw
+			tileMinY := row * th
+
+			srcMinX := max(startX, tileMinX) - tileMinX
+			srcMinY := max(startY, tileMinY) - tileMinY
+			srcMaxX := min(startX+width, tileMinX+tw) - tileMinX
+			srcMaxY := min(startY+height, tileMinY+th) - tileMinY
+
+			dstMinX := max(startX, tileMinX) - startX
+			dstMinY := max(startY, tileMinY) - startY
+
+			run := (srcMaxX - srcMinX) * spp
+			for y := srcMinY; y < srcMaxY; y++ {
+				so := (y*tileW + srcMinX) * spp
+				do := ((dstMinY+(y-srcMinY))*width + dstMinX) * spp
+				copy(dst[do:do+run], tile[so:so+run])
+			}
+		}
+	}
+
+	return dst, spp, nil
+}
+
 // SampleBilinear samples a pixel at fractional coordinates using bilinear interpolation.
 // fx, fy are in pixel coordinates of the given IFD level.
 func (r *Reader) SampleBilinear(level int, fx, fy float64) (uint8, uint8, uint8, uint8, error) {
