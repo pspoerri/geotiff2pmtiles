@@ -1,8 +1,10 @@
 package main
 
 import (
+	"image/color"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
@@ -62,5 +64,13 @@ func TestDerivedMetadataKeysCoverTheWriter(t *testing.T) {
 		if !slices.Contains(derivedMetadataKeys, k) {
 			t.Errorf("the writer derives %q, which derivedMetadataKeys lacks", k)
 		}
+	}
+}
+
+// JPEG drops the alpha of a fill or nodata colour and writes its RGB.
+func TestJPEGAlphaWarning(t *testing.T) {
+	msg := jpegAlphaWarning("--nodata-color", &color.RGBA{0, 255, 0, 128})
+	if !strings.Contains(msg, "--nodata-color alpha 128") || !strings.Contains(msg, "rgb(0,255,0)") || strings.Contains(msg, "black") {
+		t.Errorf("warning %q, want the colour written: rgb(0,255,0)", msg)
 	}
 }

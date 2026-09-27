@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"image/color"
 	"math"
 	"os"
 	"path/filepath"
@@ -193,5 +194,13 @@ func TestMergeValueRanges(t *testing.T) {
 	}
 	if _, _, err := mergeValueRanges([]sourceRange{ok(0, 1), broken}); err == nil || !strings.Contains(err.Error(), "broken.tif") {
 		t.Errorf("a failing source: err = %v", err)
+	}
+}
+
+// JPEG drops the alpha of a fill or nodata colour and writes its RGB.
+func TestJPEGAlphaWarning(t *testing.T) {
+	msg := jpegAlphaWarning("--fill-missing", &color.RGBA{255, 0, 0, 128})
+	if !strings.Contains(msg, "--fill-missing alpha 128") || !strings.Contains(msg, "rgb(255,0,0)") || strings.Contains(msg, "black") {
+		t.Errorf("warning %q, want the colour written: rgb(255,0,0)", msg)
 	}
 }
