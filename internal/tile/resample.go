@@ -235,6 +235,10 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 			continue
 		}
 
+		// Pixel i covers [i, i+1); the samplers put its centre at i.
+		pixX -= 0.5
+		pixY -= 0.5
+
 		var rr, gg, bb, aa uint8
 		var err error
 
@@ -261,11 +265,10 @@ func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.
 	return 0, 0, 0, 0, false
 }
 
-// nearestSampleCached reads the nearest (closest) source pixel.
-// imgW and imgH are the image dimensions at this level, used to clamp
-// the rounded pixel coordinate so it never exceeds the valid range.
-// Without clamping, Floor(fx+0.5) can produce imgW when fx >= imgW-0.5,
-// reading from the zero-padded overhang of the last COG tile.
+// nearestSampleCached reads the nearest (closest) source pixel. fx and fy are
+// centre-based: pixel i is centred at i. imgW and imgH are the image
+// dimensions at this level; the rounded coordinate is clamped to them so it
+// can never reach the zero-padded overhang of the last COG tile.
 // tw and th are the source tile dimensions (pre-computed by prepareTileSources).
 func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache) (uint8, uint8, uint8, uint8, error) {
 	px := clamp(int(math.Floor(fx+0.5)), 0, imgW-1)
@@ -1322,7 +1325,7 @@ func lanczos3(x float64) float64 {
 	if x == 0 {
 		return 1
 	}
-	if x < -3 || x > 3 {
+	if x <= -3 || x >= 3 {
 		return 0
 	}
 	xPi := x * math.Pi
@@ -1334,12 +1337,13 @@ func lanczos3(x float64) float64 {
 // sufficient for sub-pixel resampling accuracy.
 const lanczos3LUTSize = 1024
 
-// lanczos3Table stores precomputed Lanczos-3 kernel values for x in [0, 3).
+// lanczos3Table stores precomputed Lanczos-3 kernel values for x in [0, 3],
+// including the zero at x = 3 so interpolation tapers to 0 at the support edge.
 // The kernel is symmetric so we only store the positive half.
-var lanczos3Table [lanczos3LUTSize]float64
+var lanczos3Table [lanczos3LUTSize + 1]float64
 
 func init() {
-	for i := 0; i < lanczos3LUTSize; i++ {
+	for i := 0; i <= lanczos3LUTSize; i++ {
 		x := float64(i) * 3.0 / float64(lanczos3LUTSize)
 		lanczos3Table[i] = lanczos3(x)
 	}
@@ -1358,8 +1362,8 @@ func lanczos3LUT(x float64) float64 {
 	// Map x from [0, 3) to table index.
 	pos := x * (lanczos3LUTSize / 3.0)
 	idx := int(pos)
-	if idx >= lanczos3LUTSize-1 {
-		return lanczos3Table[lanczos3LUTSize-1]
+	if idx >= lanczos3LUTSize { // x rounded up to 3
+		return 0
 	}
 	frac := pos - float64(idx)
 	return lanczos3Table[idx]*(1-frac) + lanczos3Table[idx+1]*frac
@@ -1389,12 +1393,13 @@ func bicubic(x float64) float64 {
 // 1024 entries over [0, 2] gives a step of ~0.00195.
 const bicubicLUTSize = 1024
 
-// bicubicTable stores precomputed Catmull-Rom kernel values for x in [0, 2).
+// bicubicTable stores precomputed Catmull-Rom kernel values for x in [0, 2],
+// including the zero at x = 2 so interpolation tapers to 0 at the support edge.
 // The kernel is symmetric so we only store the positive half.
-var bicubicTable [bicubicLUTSize]float64
+var bicubicTable [bicubicLUTSize + 1]float64
 
 func init() {
-	for i := 0; i < bicubicLUTSize; i++ {
+	for i := 0; i <= bicubicLUTSize; i++ {
 		x := float64(i) * 2.0 / float64(bicubicLUTSize)
 		bicubicTable[i] = bicubic(x)
 	}
@@ -1412,8 +1417,8 @@ func bicubicLUT(x float64) float64 {
 	}
 	pos := x * (bicubicLUTSize / 2.0)
 	idx := int(pos)
-	if idx >= bicubicLUTSize-1 {
-		return bicubicTable[bicubicLUTSize-1]
+	if idx >= bicubicLUTSize { // x rounded up to 2
+		return 0
 	}
 	frac := pos - float64(idx)
 	return bicubicTable[idx]*(1-frac) + bicubicTable[idx+1]*frac
@@ -1548,6 +1553,10 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, sr
 			continue
 		}
 
+		// Pixel i covers [i, i+1); the samplers put its centre at i.
+		pixX -= 0.5
+		pixY -= 0.5
+
 		var val float64
 		var err error
 
@@ -1642,6 +1651,11 @@ func bilinearSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH 
 	bot := lerp(v01, v11, dx)
 	return lerp(top, bot, dy), nil
 }
+
+// minFloatKernelWeight is the smallest total weight of valid (non-nodata) taps
+// the float samplers renormalise by. Below it the point lies mostly over
+// nodata and the nearest pixel is used instead.
+const minFloatKernelWeight = 0.25
 
 // lanczosSampleFloat performs Lanczos-3 interpolation on float data.
 // NaN/nodata pixels are excluded from the weighted sum; if all neighbors are
@@ -1748,7 +1762,10 @@ func lanczosSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, 
 		}
 	}
 
-	if wTotal == 0 {
+	// Valid taps whose weights nearly cancel (all near kernel zeros, e.g. at
+	// an integer fx next to nodata) would blow sum/wTotal up into a spike;
+	// treat them like all-nodata taps.
+	if math.Abs(wTotal) < minFloatKernelWeight {
 		if hasNaN {
 			cx := clamp(int(math.Floor(fx+0.5)), 0, imgW-1)
 			cy := clamp(int(math.Floor(fy+0.5)), 0, imgH-1)
@@ -1860,7 +1877,10 @@ func bicubicSampleFloat(src *cog.Reader, level int, fx, fy float64, imgW, imgH, 
 		}
 	}
 
-	if wTotal == 0 {
+	// Valid taps whose weights nearly cancel (all near kernel zeros, e.g. at
+	// an integer fx next to nodata) would blow sum/wTotal up into a spike;
+	// treat them like all-nodata taps.
+	if math.Abs(wTotal) < minFloatKernelWeight {
 		if hasNaN {
 			cx := clamp(int(math.Floor(fx+0.5)), 0, imgW-1)
 			cy := clamp(int(math.Floor(fy+0.5)), 0, imgH-1)

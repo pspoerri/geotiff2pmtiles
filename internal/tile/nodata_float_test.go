@@ -122,3 +122,67 @@ func TestParseFloatNodataRoundsThroughFloat32(t *testing.T) {
 		}
 	}
 }
+
+// Columns 0-5 are 100, 6 is 200, 7 is 20, 8+ are nodata. At (near-)integer fx
+// next to the edge the only valid taps sit at kernel zeros; renormalising by
+// their tiny weight sum used to return spikes such as -52.5 or 1502 m.
+func TestFloatKernelsNearNodataEdge(t *testing.T) {
+	const w, h, nd = 16, 16, -9999
+	px := make([]float32, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			switch {
+			case x <= 5:
+				px[y*w+x] = 100
+			case x == 6:
+				px[y*w+x] = 200
+			case x == 7:
+				px[y*w+x] = 20
+			default:
+				px[y*w+x] = nd
+			}
+		}
+	}
+	path := filepath.Join(t.TempDir(), "edge.tif")
+	writeFloatTIFF(t, path, w, h, px)
+	r, err := cog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	cache := cog.NewFloatTileCache(4)
+
+	kernels := map[string]func(fx float64) (float64, error){
+		"lanczos": func(fx float64) (float64, error) {
+			return lanczosSampleFloat(r, 0, fx, 8, w, h, w, h, cache, nd)
+		},
+		"bicubic": func(fx float64) (float64, error) {
+			return bicubicSampleFloat(r, 0, fx, 8, w, h, w, h, cache, nd)
+		},
+	}
+	for name, k := range kernels {
+		for _, fx := range []float64{8, 7.99999, 7.999999, 8.999999, 8.999999999999} {
+			v, err := k(fx)
+			if err != nil {
+				t.Fatal(name, err)
+			}
+			// The nearest pixel is nodata, so the result must be too.
+			if v != nd && !math.IsNaN(v) {
+				t.Errorf("%s at fx=%v: got %v, want nodata", name, fx, v)
+			}
+		}
+	}
+}
+
+// The kernel tables end at the support edge, where the kernel is 0; the last
+// table entry used to be returned for the whole final interval.
+func TestKernelLUTTapersToSupportEdge(t *testing.T) {
+	for _, d := range []float64{1e-5, 1e-6} {
+		if got, want := lanczos3LUT(3-d), lanczos3(3-d); math.Abs(got-want) > 2e-8 {
+			t.Errorf("lanczos3LUT(3-%g) = %g, want %g", d, got, want)
+		}
+		if got, want := bicubicLUT(2-d), bicubic(2-d); math.Abs(got-want) > 2e-8 {
+			t.Errorf("bicubicLUT(2-%g) = %g, want %g", d, got, want)
+		}
+	}
+}

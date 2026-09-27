@@ -8,6 +8,10 @@ const (
 	gkProjectedCSTypeGeoKey = 3072
 )
 
+// rasterPixelIsPoint is the GTRasterTypeGeoKey value for rasters whose
+// tiepoint refers to a pixel centre (RasterPixelIsArea, 1, is the default).
+const rasterPixelIsPoint = 2
+
 // GeoInfo holds parsed GeoTIFF metadata.
 type GeoInfo struct {
 	EPSG       int     // EPSG code (e.g. 2056)
@@ -33,12 +37,40 @@ func parseGeoInfo(ifd *IFD) GeoInfo {
 		// Origin is at (0,0) pixel, so:
 		info.OriginX = ifd.ModelTiepoint[3] - ifd.ModelTiepoint[0]*info.PixelSizeX
 		info.OriginY = ifd.ModelTiepoint[4] + ifd.ModelTiepoint[1]*info.PixelSizeY
+
+		// PixelIsPoint: the tiepoint is the centre of pixel (I,J), not its
+		// upper-left corner. Move the origin to the corner, as GDAL does.
+		if geoKey(ifd.GeoKeys, gkRasterTypeGeoKey) == rasterPixelIsPoint {
+			info.OriginX -= info.PixelSizeX / 2
+			info.OriginY += info.PixelSizeY / 2
+		}
 	}
 
 	// Parse GeoKeys for EPSG code.
 	info.EPSG = parseEPSG(ifd.GeoKeys)
 
 	return info
+}
+
+// geoKey returns the value of a GeoKey stored inline in the key directory
+// (TIFFTagLocation 0), or 0 when the key is absent.
+func geoKey(geoKeys []uint16, id uint16) int {
+	if len(geoKeys) < 4 {
+		return 0
+	}
+	// Header: [KeyDirectoryVersion, KeyRevision, MinorRevision, NumberOfKeys],
+	// then one [KeyID, TIFFTagLocation, Count, Value] entry per key.
+	numKeys := int(geoKeys[3])
+	for i := 0; i < numKeys; i++ {
+		base := 4 + i*4
+		if base+3 >= len(geoKeys) {
+			break
+		}
+		if geoKeys[base] == id && geoKeys[base+1] == 0 {
+			return int(geoKeys[base+3])
+		}
+	}
+	return 0
 }
 
 // parseEPSG extracts the EPSG code from GeoKey directory entries.
