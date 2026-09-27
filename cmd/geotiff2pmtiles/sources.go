@@ -55,18 +55,19 @@ type crsGap struct {
 	epsg int
 }
 
-// coverageGaps looks for holes among the sources of each CRS separately:
-// boxes in different CRSs cannot be compared.
+// coverageGaps looks for holes among the sources when they share one CRS.
+// With mixed CRSs it looks for none: boxes in different CRSs cannot be
+// compared, and a hole among the sources of one CRS may be filled by a
+// source in another.
 func coverageGaps(sources []*cog.Reader) []crsGap {
-	byEPSG := map[int][]*cog.Reader{}
-	for _, src := range sources {
-		byEPSG[src.EPSG()] = append(byEPSG[src.EPSG()], src)
+	epsgs := sourceEPSGs(sources)
+	if len(epsgs) > 1 {
+		log.Printf("Note: the inputs are in %d CRSs; the coverage hole check compares boxes within one CRS and is skipped.", len(epsgs))
+		return nil
 	}
 	var gaps []crsGap
-	for _, epsg := range sourceEPSGs(sources) {
-		for _, g := range cog.CheckCoverageGaps(byEPSG[epsg]) {
-			gaps = append(gaps, crsGap{g, epsg})
-		}
+	for _, g := range cog.CheckCoverageGaps(sources) {
+		gaps = append(gaps, crsGap{g, epsgs[0]})
 	}
 	return gaps
 }

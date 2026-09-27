@@ -122,8 +122,8 @@ func TestCheckSourceCRSs(t *testing.T) {
 	}
 }
 
-// Coverage boxes are compared only within one CRS: a degree box next to a
-// metre box is not a hole.
+// Coverage boxes are compared only when all sources share one CRS: a degree
+// box next to a metre box is not a hole.
 func TestCoverageGapsPerCRS(t *testing.T) {
 	a := writeGeoTIFF(t, 4326, 100, 100, 8, 47, 0.01)
 	b := writeGeoTIFF(t, 32632, 100, 100, 500000, 5200000, 10)
@@ -133,7 +133,7 @@ func TestCoverageGapsPerCRS(t *testing.T) {
 
 	// Two 4326 tiles with a tile-sized hole between them.
 	c := writeGeoTIFF(t, 4326, 100, 100, 10, 47, 0.01)
-	gaps := coverageGaps([]*cog.Reader{a, b, c})
+	gaps := coverageGaps([]*cog.Reader{a, c})
 	if len(gaps) == 0 {
 		t.Fatal("hole between two EPSG:4326 sources not found")
 	}
@@ -141,6 +141,38 @@ func TestCoverageGapsPerCRS(t *testing.T) {
 		if g.epsg != 4326 || g.MinX < 8 || g.MaxX > 11 {
 			t.Errorf("gap %+v, want one in EPSG:4326 between 9 and 10°E", g)
 		}
+	}
+	if gaps := coverageGaps([]*cog.Reader{a, b, c}); len(gaps) != 0 {
+		t.Errorf("coverageGaps with mixed CRSs = %v, want none: they are not looked for", gaps)
+	}
+}
+
+// A hole among the sources of one CRS that a source in another CRS fills
+// is no hole.
+func TestCoverageGapsFilledByAnotherCRS(t *testing.T) {
+	// Three 1 km UTM tiles in an L; the fourth corner, 501-502 km E,
+	// 5198-5199 km N, lies at about 9.013-9.026°E, 46.936-46.945°N.
+	utm := []*cog.Reader{
+		writeGeoTIFF(t, 32632, 100, 100, 500000, 5200000, 10),
+		writeGeoTIFF(t, 32632, 100, 100, 501000, 5200000, 10),
+		writeGeoTIFF(t, 32632, 100, 100, 500000, 5199000, 10),
+	}
+	if gaps := coverageGaps(utm); len(gaps) != 1 {
+		t.Fatalf("coverageGaps of the L = %v, want its corner", gaps)
+	}
+	wgs := writeGeoTIFF(t, 4326, 50, 40, 8.99, 46.96, 0.001) // 8.99-9.04°E, 46.92-46.96°N
+	sources := append(utm, wgs)
+	if gaps := coverageGaps(sources); len(gaps) != 0 {
+		t.Errorf("coverageGaps = %v, want none: the EPSG:4326 source covers the corner", gaps)
+	}
+	bounds := cog.Bounds{MinLon: 8.99, MinLat: 46.92, MaxLon: 9.04, MaxLat: 46.96}
+	desc := buildDescription(sources, bounds, nil, "png", 85, 256, 0, 10, "bicubic", 1, nil, nil, cog.BandConfig{Bands: [3]int{1, 2, 3}})
+	if strings.Contains(desc, "Holes") {
+		t.Errorf("description of mixed CRSs reports holes:\n%s", desc)
+	}
+	desc = buildDescription(utm, bounds, nil, "png", 85, 256, 0, 10, "bicubic", 1, nil, nil, cog.BandConfig{Bands: [3]int{1, 2, 3}})
+	if !strings.HasSuffix(desc, "\n  Holes: none") {
+		t.Errorf("single-CRS description lacks the hole count:\n%s", desc)
 	}
 }
 
