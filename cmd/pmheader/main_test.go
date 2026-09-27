@@ -4,6 +4,9 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
@@ -211,5 +214,111 @@ func TestPatchUncompressedNestedArchive(t *testing.T) {
 	h, meta, n := readBack(t, rebuilt)
 	if h.InternalCompression != pmtiles.CompressionGzip || meta["name"] != "nested" || n != 3 {
 		t.Errorf("--rebuild-dirs: compression %d, metadata %v, %d tiles", h.InternalCompression, meta, n)
+	}
+}
+
+// A header edit whose synced metadata still fits its section is written in
+// place: the file keeps its inode and size, and no tile byte is copied.
+func TestPatchInPlaceKeepsFile(t *testing.T) {
+	for name, path := range map[string]string{"gzip": writeArchive(t), "none": writeNestedUncompressed(t)} {
+		t.Run(name, func(t *testing.T) {
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := patch(path, "", patchOptions{syncMetadata: true, maxZoom: optI(0)}); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(before, after) || after.Size() != before.Size() {
+				t.Errorf("the archive was rewritten (size %d -> %d)", before.Size(), after.Size())
+			}
+			if h, meta, _ := readBack(t, path); h.MaxZoom != 0 || meta["maxzoom"] != "0" {
+				t.Errorf("header max zoom %d, metadata %v; want 0 in both", h.MaxZoom, meta["maxzoom"])
+			}
+		})
+	}
+}
+
+// fitMetadata pads to every size from the encoded one up, including a gzip
+// section one byte larger, and decodes to the same metadata.
+func TestFitMetadata(t *testing.T) {
+	meta := map[string]any{"name": "fit", "maxzoom": "12", "bounds": []any{1.0, 2.0, 3.0, 4.0}}
+	for _, c := range []uint8{pmtiles.CompressionNone, pmtiles.CompressionGzip} {
+		enc, err := encodeMetadata(meta, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := fitMetadata(meta, c, len(enc)-1); got != nil || err != nil {
+			t.Errorf("compression %d: fits a section smaller than its encoding: %d bytes, %v", c, len(got), err)
+		}
+		for size := len(enc); size < len(enc)+40; size++ {
+			got, err := fitMetadata(meta, c, size)
+			if err != nil || len(got) != size {
+				t.Fatalf("compression %d, size %d: %d bytes, %v", c, size, len(got), err)
+			}
+			back, err := loadMetadata(got, c, "")
+			if err != nil || !reflect.DeepEqual(back, meta) {
+				t.Fatalf("compression %d, size %d: decodes to %v, %v", c, size, back, err)
+			}
+		}
+	}
+}
+
+// The rewrite replaces the file a symlink points to, not the link, and
+// keeps its mode.
+func TestPatchRewriteFollowsSymlink(t *testing.T) {
+	target := writeArchive(t)
+	if err := os.Chmod(target, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "map.pmtiles")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("no symlinks: %v", err)
+	}
+	// A long value that cannot fit the old metadata section.
+	long := strings.Repeat("attribution ", 50)
+	if err := patch(link, "", patchOptions{setKV: []string{"attribution=" + long}}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the symlink was replaced: %v, %v", fi.Mode(), err)
+	}
+	if _, meta, n := readBack(t, target); meta["attribution"] != long || n != 2 {
+		t.Errorf("target: attribution %q, %d tiles", meta["attribution"], n)
+	}
+	if fi, err := os.Stat(target); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o644) {
+		t.Errorf("target mode %v, %v; want 0644", fi.Mode(), err)
+	}
+}
+
+// Metadata in a compression pmheader cannot decode leaves a header edit to
+// the header, with a warning; an explicit metadata edit still fails.
+func TestPatchUnsupportedMetadataCompression(t *testing.T) {
+	path := writeNestedUncompressed(t)
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf[97] = pmtiles.CompressionZstd
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := patch(path, "", patchOptions{syncMetadata: true, maxZoom: optI(0)}); err != nil {
+		t.Fatalf("header edit: %v", err)
+	}
+	buf, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, err := pmtiles.DeserializeHeader(buf); err != nil || h.MaxZoom != 0 {
+		t.Errorf("header max zoom %d, %v; want 0", h.MaxZoom, err)
+	}
+	if err := patch(path, "", patchOptions{setKV: []string{"name=x"}}); err == nil || !strings.Contains(err.Error(), "zstd") {
+		t.Errorf("--set on zstd metadata: err = %v", err)
 	}
 }

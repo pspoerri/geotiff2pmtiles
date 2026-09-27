@@ -4,21 +4,30 @@
 //
 //	pmheader [flags] input.pmtiles [output.pmtiles]
 //
-// When output is omitted, changes are applied in-place.
-// Header-only patches (no metadata changes) are applied with a 127-byte seek-and-write.
-// Metadata changes rewrite the pre-tile sections and stream the tile data verbatim.
+// When output is omitted, changes are applied in place. The header is
+// patched with a 127-byte seek-and-write, and changed metadata (--set,
+// --unset, --metadata-file, or the keys --sync-metadata updates) is
+// overwritten where it is when its new encoding, padded with JSON
+// whitespace and a gzip header comment, fits the old section. Otherwise,
+// and for --rebuild-dirs or an output path, the pre-tile sections are
+// rewritten and the tile data streamed verbatim; in place, into a temp file
+// that replaces the file a symlink points to and keeps its mode.
+// Metadata in a compression pmheader cannot decode (brotli, zstd) is left
+// as it is by a header edit, with a warning.
 package main
 
 import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -116,7 +125,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "pmheader %s (%s, %s)\n\n", version, commit, buildDate)
 		fmt.Fprintf(os.Stderr, "Usage: pmheader [flags] input.pmtiles [output.pmtiles]\n\n")
 		fmt.Fprintf(os.Stderr, "Patch PMTiles v3 header fields and metadata without re-encoding tile data.\n")
-		fmt.Fprintf(os.Stderr, "When output is omitted, changes are applied in-place.\n\n")
+		fmt.Fprintf(os.Stderr, "When output is omitted, changes are applied in-place: header and metadata\n")
+		fmt.Fprintf(os.Stderr, "are overwritten where they are when the new metadata fits the old section,\n")
+		fmt.Fprintf(os.Stderr, "else the file is rewritten (through a symlink, keeping its mode).\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
@@ -279,45 +290,75 @@ func patch(inputPath, outputPath string, opts patchOptions) error {
 		outCompression = pmtiles.CompressionGzip
 	}
 
+	// Compare file identity, not path strings: on Windows "map.pmtiles" and
+	// "MAP.PMTILES" name the same file.
+	srcInfo, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	inPlace := outputPath == "" || outputPath == inputPath
+	if !inPlace {
+		if ofi, err := os.Stat(outputPath); err == nil && os.SameFile(ofi, srcInfo) {
+			inPlace = true
+		}
+	}
+
 	srcMetaBytes, err := readSection(f, int64(srcHdr.MetadataOffset), srcHdr.MetadataLength)
 	if err != nil {
 		return fmt.Errorf("reading metadata section: %w", err)
 	}
 	dstMetaBytes := srcMetaBytes
 	metaChanged := false
+	var fitted []byte // the new metadata padded to the old section's length
 	if hasMetaChanges || (opts.syncMetadata && hasHeaderChanges) || outCompression != srcHdr.InternalCompression {
 		meta, err := loadMetadata(srcMetaBytes, srcHdr.InternalCompression, opts.metadataFile)
-		if err != nil && !hasMetaChanges && outCompression == srcHdr.InternalCompression {
+		syncOnly := !hasMetaChanges && outCompression == srcHdr.InternalCompression
+		switch {
+		case errors.Is(err, errUnsupportedCompression) && syncOnly:
+			fmt.Fprintf(os.Stderr, "warning: %v; the metadata keys are left as they are\n", err)
+		case err != nil && syncOnly:
 			return fmt.Errorf("%w (--sync-metadata=false patches the header alone)", err)
-		} else if err != nil {
+		case err != nil:
 			return err
-		}
-		synced := opts.syncMetadata && syncMetadata(meta, opts, dstHdr)
-		if err := setMetadataKeys(meta, opts.setKV, opts.unsetKeys); err != nil {
-			return err
-		}
-		if hasMetaChanges || synced || outCompression != srcHdr.InternalCompression {
-			if dstMetaBytes, err = encodeMetadata(meta, outCompression); err != nil {
+		default:
+			synced := opts.syncMetadata && syncMetadata(meta, opts, dstHdr)
+			if err := setMetadataKeys(meta, opts.setKV, opts.unsetKeys); err != nil {
 				return err
 			}
-			metaChanged = true
+			if hasMetaChanges || synced || outCompression != srcHdr.InternalCompression {
+				if dstMetaBytes, err = encodeMetadata(meta, outCompression); err != nil {
+					return err
+				}
+				metaChanged = true
+				if inPlace && !opts.rebuildDirs {
+					if fitted, err = fitMetadata(meta, outCompression, len(srcMetaBytes)); err != nil {
+						return err
+					}
+				}
+			}
 		}
 	}
 	dstHdr.InternalCompression = outCompression
 
-	// Fast path: header-only in-place patch — seek to byte 0 and write 127 bytes.
-	if !metaChanged && !opts.rebuildDirs && outputPath == "" {
+	// Fast path: patch in place — the 127-byte header, and the metadata
+	// when it still fits its section.
+	if inPlace && !opts.rebuildDirs && (!metaChanged || fitted != nil) {
 		fw, err := os.OpenFile(inputPath, os.O_RDWR, 0o666)
 		if err != nil {
 			return fmt.Errorf("opening for in-place write: %w", err)
 		}
 		defer fw.Close()
+		if fitted != nil {
+			if _, err := fw.WriteAt(fitted, int64(srcHdr.MetadataOffset)); err != nil {
+				return fmt.Errorf("writing metadata: %w", err)
+			}
+		}
 		if _, err := fw.WriteAt(dstHdr.Serialize(), 0); err != nil {
 			return fmt.Errorf("writing header: %w", err)
 		}
 		if opts.verbose {
 			fmt.Printf("patched in place: %s\n", inputPath)
-			printDiff(srcHdr, dstHdr, false, 0, 0)
+			printDiff(srcHdr, dstHdr, metaChanged, len(srcMetaBytes), len(fitted))
 		}
 		return nil
 	}
@@ -362,20 +403,14 @@ func patch(inputPath, outputPath string, opts patchOptions) error {
 	dstHdr.TileDataOffset = dstHdr.LeafDirOffset + dstHdr.LeafDirLength
 	// TileDataLength and tile counts remain unchanged.
 
-	// Determine where to write.
-	// Compare file identity, not path strings: on Windows "map.pmtiles" and
-	// "MAP.PMTILES" name the same file.
-	inPlace := outputPath == "" || outputPath == inputPath
-	if !inPlace {
-		if ofi, oerr := os.Stat(outputPath); oerr == nil {
-			if ifi, ierr := f.Stat(); ierr == nil && os.SameFile(ofi, ifi) {
-				inPlace = true
-			}
-		}
-	}
-	writePath := outputPath
+	// In place, the new file is written next to the file a symlink points
+	// to and renamed over it, not over the link.
+	writePath, target := outputPath, inputPath
 	if inPlace {
-		tmp, err := os.CreateTemp(filepath.Dir(inputPath), ".pmheader-*.pmtiles")
+		if target, err = filepath.EvalSymlinks(inputPath); err != nil {
+			return err
+		}
+		tmp, err := os.CreateTemp(filepath.Dir(target), ".pmheader-*.pmtiles")
 		if err != nil {
 			return fmt.Errorf("creating temp file: %w", err)
 		}
@@ -383,7 +418,13 @@ func patch(inputPath, outputPath string, opts patchOptions) error {
 		tmp.Close()
 	}
 
-	if err := writeOutput(writePath, dstHdr, rootDirBytes, dstMetaBytes, leafDirBytes, f, srcHdr.TileDataOffset, srcHdr.TileDataLength); err != nil {
+	err = writeOutput(writePath, dstHdr, rootDirBytes, dstMetaBytes, leafDirBytes, f, srcHdr.TileDataOffset, srcHdr.TileDataLength)
+	if err == nil && inPlace {
+		// CreateTemp made it 0600; keep the archive's mode, e.g. readable
+		// by a web server.
+		err = os.Chmod(writePath, srcInfo.Mode().Perm())
+	}
+	if err != nil {
 		if inPlace {
 			os.Remove(writePath)
 		}
@@ -393,7 +434,7 @@ func patch(inputPath, outputPath string, opts patchOptions) error {
 	if inPlace {
 		// Windows refuses to replace a file that still has an open handle.
 		f.Close()
-		if err := os.Rename(writePath, inputPath); err != nil {
+		if err := os.Rename(writePath, target); err != nil {
 			os.Remove(writePath)
 			return fmt.Errorf("replacing input file: %w", err)
 		}
@@ -494,6 +535,10 @@ func readSection(f *os.File, offset int64, length uint64) ([]byte, error) {
 	return buf, nil
 }
 
+// errUnsupportedCompression marks metadata in an internal compression that
+// pmheader cannot decode (brotli, zstd).
+var errUnsupportedCompression = errors.New("not supported")
+
 // loadMetadata returns the JSON in metadataFile, or else the archive's
 // metadata section, stored with the given internal compression.
 func loadMetadata(section []byte, compression uint8, metadataFile string) (map[string]any, error) {
@@ -524,7 +569,7 @@ func loadMetadata(section []byte, compression uint8, metadataFile string) (map[s
 			return nil, fmt.Errorf("decompressing metadata: %w", err)
 		}
 	default:
-		return nil, fmt.Errorf("metadata: internal compression %s is not supported", fmtCompression(compression))
+		return nil, fmt.Errorf("metadata: internal compression %s is %w", fmtCompression(compression), errUnsupportedCompression)
 	}
 	if err := json.Unmarshal(section, &meta); err != nil {
 		return nil, fmt.Errorf("parsing metadata JSON: %w", err)
@@ -535,22 +580,76 @@ func loadMetadata(section []byte, compression uint8, metadataFile string) (map[s
 // encodeMetadata serializes meta for the metadata section, compressed with
 // the archive's internal compression (gzip or none).
 func encodeMetadata(meta map[string]any, compression uint8) ([]byte, error) {
-	var buf bytes.Buffer
-	var w io.Writer = &buf
-	var gz *gzip.Writer
-	if compression == pmtiles.CompressionGzip {
-		gz = gzip.NewWriter(&buf)
-		w = gz
+	js, err := metadataJSON(meta)
+	if err != nil || compression != pmtiles.CompressionGzip {
+		return js, err
 	}
-	enc := json.NewEncoder(w)
+	return gzipMetadata(js, "")
+}
+
+// fitMetadata encodes meta as encodeMetadata does, padded to exactly size
+// bytes so that it can overwrite the old metadata section in place, or
+// returns nil if it does not fit. Spaces before the JSON's closing brace
+// pad it, and in gzip a header comment (RFC 1952 FCOMMENT), which decoders
+// skip.
+func fitMetadata(meta map[string]any, compression uint8, size int) ([]byte, error) {
+	js, err := metadataJSON(meta)
+	if err != nil || !bytes.HasSuffix(js, []byte("}")) {
+		return nil, err
+	}
+	pad := func(n int) []byte {
+		return slices.Concat(js[:len(js)-1], bytes.Repeat([]byte(" "), n), js[len(js)-1:])
+	}
+	if compression != pmtiles.CompressionGzip {
+		if len(js) > size {
+			return nil, nil
+		}
+		return pad(size - len(js)), nil
+	}
+	// A comment adds at least 2 bytes, so a section 1 byte short is retried
+	// with spaces in the JSON, which change the compressed size.
+	for n := 0; n < 16; n++ {
+		z, err := gzipMetadata(pad(n), "")
+		if err != nil {
+			return nil, err
+		}
+		switch short := size - len(z); {
+		case short == 0:
+			return z, nil
+		case short >= 2:
+			return gzipMetadata(pad(n), strings.Repeat(" ", short-1))
+		case short < 0:
+			return nil, nil
+		}
+	}
+	return nil, nil
+}
+
+// metadataJSON encodes meta as JSON, leaving HTML characters unescaped.
+func metadataJSON(meta map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(meta); err != nil {
 		return nil, fmt.Errorf("encoding metadata JSON: %w", err)
 	}
-	if gz != nil {
-		if err := gz.Close(); err != nil {
-			return nil, fmt.Errorf("gzipping metadata: %w", err)
-		}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// gzipMetadata compresses js at the level the PMTiles writer uses, with
+// the given gzip header comment unless it is empty.
+func gzipMetadata(js []byte, comment string) ([]byte, error) {
+	var buf bytes.Buffer
+	gz, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	gz.Comment = comment
+	if _, err := gz.Write(js); err != nil {
+		return nil, fmt.Errorf("gzipping metadata: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return nil, fmt.Errorf("gzipping metadata: %w", err)
 	}
 	return buf.Bytes(), nil
 }
