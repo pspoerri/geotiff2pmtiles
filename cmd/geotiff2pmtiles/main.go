@@ -419,6 +419,9 @@ func main() {
 
 	// Compute merged bounds in WGS84.
 	mergedBounds, err := cog.MergedBoundsWGS84(sources)
+	if err == nil {
+		err = checkBoundsWGS84(mergedBounds, sources)
+	}
 	if err != nil {
 		log.Fatalf("Bounds: %v", err)
 	}
