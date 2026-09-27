@@ -63,7 +63,7 @@ func main() {
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
 	flag.StringVar(&tmpDirFlag, "tmp-dir", "", "Directory for temporary files, about 2x the output size at peak (default: the output file's directory)")
 	flag.StringVar(&nodataColor, "nodata-color", "none", "RGBA color, e.g. \"0,0,0,255\" or \"#000000ff\", that replaces transparent pixels; forces re-encoding. none = keep them")
-	flag.StringVar(&fillMissing, "fill-missing", "none", "RGBA color of the solid tiles written at tile positions inside the bounds that the source lacks; existing tiles are still copied as-is. none = leave them absent")
+	flag.StringVar(&fillMissing, "fill-missing", "none", "RGBA color of the solid tiles written at tile positions inside the bounds that the source lacks; does not force re-encoding. none = leave them absent")
 	flag.StringVar(&fillColor, "fill-color", "", "deprecated: sets both --nodata-color and --fill-missing")
 	flag.BoolVar(&rebuild, "rebuild", false, "Rebuild every level below max zoom by downsampling (needed to apply --resampling to existing levels)")
 	flag.BoolVar(&terrarium, "terrarium", false, "Treat tiles as terrarium-encoded elevations so rebuild downsamples in elevation space (auto-detected from archive metadata)")
