@@ -60,13 +60,15 @@ type sourceInfo struct {
 	maxCRSX float64
 	maxCRSY float64
 	geo     cog.GeoInfo
+	nodata  float64 // float path nodata value; NaN when unset
 }
 
 // buildSourceInfos collects per-source metadata. Every source is reprojected
 // with its own CRS, so inputs in several CRSs (e.g. Sentinel-2 tiles from
 // different UTM zones) can be mixed. Sources sharing an EPSG code share one
 // Projection, which CRSFallback needs for its datum-shift cache.
-func buildSourceInfos(sources []*cog.Reader) ([]sourceInfo, error) {
+// floatNodata, when set, replaces every source's GDAL_NODATA in the float path.
+func buildSourceInfos(sources []*cog.Reader, floatNodata *float64) ([]sourceInfo, error) {
 	projIdx := map[int]int{}
 	var projs []coord.Projection
 	infos := make([]sourceInfo, len(sources))
@@ -85,6 +87,10 @@ func buildSourceInfos(sources []*cog.Reader) ([]sourceInfo, error) {
 			projIdx[epsg] = idx
 			projs = append(projs, proj)
 		}
+		nodata := parseFloatNodata(src.NoData())
+		if floatNodata != nil {
+			nodata = float64(float32(*floatNodata)) // as stored, see parseFloatNodata
+		}
 		minX, minY, maxX, maxY := src.BoundsInCRS()
 		infos[i] = sourceInfo{
 			reader:  src,
@@ -95,6 +101,7 @@ func buildSourceInfos(sources []*cog.Reader) ([]sourceInfo, error) {
 			maxCRSX: maxX,
 			maxCRSY: maxY,
 			geo:     src.GeoInfo(),
+			nodata:  nodata,
 		}
 	}
 	return infos, nil
@@ -119,6 +126,7 @@ type tileSource struct {
 	imgH            int
 	tileW           int // source tile width (pixels per COG tile)
 	tileH           int // source tile height (pixels per COG tile)
+	nodata          float64
 }
 
 // tileInCRS is an output tile's bounding box and pixel size in one source CRS.
@@ -173,6 +181,7 @@ func prepareTileSources(srcInfos []sourceInfo, z, tx, ty, tileSize int) []tileSo
 			imgH:            src.reader.IFDHeight(level),
 			tileW:           ifd[0],
 			tileH:           ifd[1],
+			nodata:          src.nodata,
 		})
 	}
 	return result
@@ -1538,12 +1547,6 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, cache *
 	img := GetRGBA(tileSize, tileSize)
 	hasData := false
 
-	// Parse nodata values from the active sources.
-	nodataValues := make([]float64, len(tileSrcs))
-	for i := range tileSrcs {
-		nodataValues[i] = parseFloatNodata(tileSrcs[i].reader.NoData())
-	}
-
 	// Precompute lon per column and lat per row to avoid per-pixel trig.
 	// Use pooled slices to avoid per-tile allocation and zero-init cost.
 	lons, lats, llBacking := getLonLat(tileSize)
@@ -1557,7 +1560,7 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, cache *
 	for py := 0; py < tileSize; py++ {
 		lat := lats[py]
 		for px := 0; px < tileSize; px++ {
-			elevation, found := sampleFromTileSourcesFloat(tileSrcs, nodataValues, lons[px], lat, cache, mode)
+			elevation, found := sampleFromTileSourcesFloat(tileSrcs, lons[px], lat, cache, mode)
 			if found && !math.IsNaN(elevation) {
 				img.SetRGBA(px, py, encode.ElevationToTerrarium(elevation))
 				hasData = true
@@ -1590,7 +1593,7 @@ func parseFloatNodata(s string) float64 {
 // sampleFromTileSourcesFloat tries each pre-filtered tile source to sample a
 // float elevation at the given WGS84 position (projected per source CRS, as in
 // sampleFromTileSources).
-func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, lon, lat float64, cache *cog.FloatTileCache, mode Resampling) (float64, bool) {
+func sampleFromTileSourcesFloat(sources []tileSource, lon, lat float64, cache *cog.FloatTileCache, mode Resampling) (float64, bool) {
 	var proj coord.Projection // CRS of srcX/srcY
 	var srcX, srcY float64
 	for i := range sources {
@@ -1618,7 +1621,7 @@ func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, lo
 		var val float64
 		var err error
 
-		nd := nodataValues[i]
+		nd := src.nodata
 		switch mode {
 		case ResamplingNearest, ResamplingMode:
 			val, err = nearestSampleFloat(src.reader, src.level, pixX, pixY, src.imgW, src.imgH, cache)

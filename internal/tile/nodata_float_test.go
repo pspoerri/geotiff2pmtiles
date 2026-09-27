@@ -2,6 +2,7 @@ package tile
 
 import (
 	"encoding/binary"
+	"image/color"
 	"math"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
+	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
+	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
 
 // writeFloatTIFF writes a single-tile uncompressed float32 TIFF.
@@ -119,6 +122,84 @@ func TestParseFloatNodataRoundsThroughFloat32(t *testing.T) {
 	for _, s := range []string{"", "n/a"} {
 		if !math.IsNaN(parseFloatNodata(s)) {
 			t.Errorf("%q: want NaN", s)
+		}
+	}
+}
+
+type tileMap map[[3]int][]byte
+
+func (m tileMap) WriteTile(z, x, y int, data []byte) error {
+	m[[3]int{z, x, y}] = data
+	return nil
+}
+
+// Config.FloatNodata marks voids in a DEM without GDAL_NODATA (e.g. -9999):
+// they must come out transparent instead of as 10 km deep pits.
+func TestGenerateTerrariumFloatNodata(t *testing.T) {
+	const z, tx, ty, nd = 10, 536, 358, -9999
+	res := 2 * coord.OriginShift / (256 * math.Pow(2, z))
+	// A 64x64 ramp (1000 m + x) covering exactly one output tile, 4 output
+	// pixels per source pixel, with a 16x16 void in the middle.
+	path := writeTestGeoTIFF(t, testGeoTIFF{W: 64, H: 64, Scale: 4 * res,
+		TieX:    -coord.OriginShift + tx*256*res,
+		TieY:    coord.OriginShift - ty*256*res,
+		GeoKeys: []uint16{1024, 1, 3072, 3857},
+		Float: func(x, y int) float32 {
+			if x >= 24 && x < 40 && y >= 24 && y < 40 {
+				return nd
+			}
+			return 1000 + float32(x)
+		}})
+	minLon, minLat, maxLon, maxLat := coord.TileBounds(z, tx, ty)
+	const inset = 1e-7
+	for _, override := range []bool{false, true} {
+		cfg := Config{
+			Encoder:          &encode.TerrariumEncoder{},
+			MinZoom:          z,
+			MaxZoom:          z,
+			TileSize:         256,
+			Concurrency:      1,
+			Bounds:           cog.Bounds{MinLon: minLon + inset, MaxLon: maxLon - inset, MinLat: minLat + inset, MaxLat: maxLat - inset},
+			Resampling:       ResamplingBicubic,
+			MemoryLimitBytes: -1,
+			IsTerrarium:      true,
+		}
+		if override {
+			v := float64(nd)
+			cfg.FloatNodata = &v
+		}
+		tiles := tileMap{}
+		if _, err := Generate(cfg, openTestSources(t, path), tiles); err != nil {
+			t.Fatal(err)
+		}
+		data, ok := tiles[[3]int{z, tx, ty}]
+		if !ok || len(tiles) != 1 {
+			t.Fatalf("override=%v: got tiles %v, want only %d/%d/%d", override, len(tiles), z, tx, ty)
+		}
+		img, err := encode.DecodeImage(data, "terrarium")
+		if err != nil {
+			t.Fatal(err)
+		}
+		elev := func(x, y int) (float64, bool) {
+			r, g, b, a := img.At(x, y).RGBA()
+			return encode.TerrariumToElevation(color.RGBA{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8), 255}), a != 0
+		}
+		// Output pixel (20,20) is centred on source x = 20.5/4 - 0.5.
+		if e, ok := elev(20, 20); !ok || math.Abs(e-1004.625) > 0.01 {
+			t.Errorf("override=%v: pixel (20,20) = %v (opaque %v), want 1004.625", override, e, ok)
+		}
+		if !override {
+			continue // without nodata the void is (wrongly) elevation
+		}
+		if _, ok := elev(128, 128); ok {
+			t.Errorf("void centre is opaque, want transparent")
+		}
+		for y := 0; y < 256; y++ {
+			for x := 0; x < 256; x++ {
+				if e, ok := elev(x, y); ok && e < 990 {
+					t.Fatalf("pixel (%d,%d) = %v m: void smeared into valid data", x, y, e)
+				}
+			}
 		}
 	}
 }

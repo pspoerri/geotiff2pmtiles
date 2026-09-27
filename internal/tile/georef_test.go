@@ -149,7 +149,7 @@ func openTestSources(t *testing.T, paths ...string) []*cog.Reader {
 
 func mustSourceInfos(t *testing.T, srcs []*cog.Reader) []sourceInfo {
 	t.Helper()
-	infos, err := buildSourceInfos(srcs)
+	infos, err := buildSourceInfos(srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestBuildSourceInfosRejectsUnknownCRS(t *testing.T) {
 	} {
 		path := writeTestGeoTIFF(t, testGeoTIFF{W: 16, H: 16, Scale: 10, TieX: 1e6, TieY: 1e6, GeoKeys: tt.keys,
 			Float: featureFloat(0, 0, 0, 0)})
-		_, err := buildSourceInfos(openTestSources(t, path))
+		_, err := buildSourceInfos(openTestSources(t, path), nil)
 		if err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("keys %v: got error %v, want %q", tt.keys, err, tt.want)
 		}

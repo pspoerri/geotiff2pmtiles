@@ -79,7 +79,8 @@ type Config struct {
 	ResamplingGamma  float64 // power-law gamma for resampling interpolation (1.0 = disabled)
 	MemoryLimitBytes int64   // max tile store memory before disk spilling (0 = auto)
 	Verbose          bool
-	IsTerrarium      bool // true for float GeoTIFF → Terrarium encoding
+	IsTerrarium      bool     // true for float GeoTIFF → Terrarium encoding
+	FloatNodata      *float64 // terrarium: nodata value of every source, overrides GDAL_NODATA (nil = use the tag)
 }
 
 // Stats holds generation statistics.
@@ -112,7 +113,7 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 	}
 
 	// Per-source metadata and projections, shared read-only by all workers.
-	srcInfos, err := buildSourceInfos(sources)
+	srcInfos, err := buildSourceInfos(sources, cfg.FloatNodata)
 	if err != nil {
 		return Stats{}, err
 	}
