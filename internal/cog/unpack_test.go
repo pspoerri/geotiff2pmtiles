@@ -136,7 +136,8 @@ func TestDecodeRawTilePackedMatchesAligned(t *testing.T) {
 }
 
 // BenchmarkUnpackBits sizes the input like the thing that actually matters:
-// one Sentinel-2 512x512 tile of bit-packed 15-bit reflectance.
+// one Sentinel-2 512x512 tile of bit-packed 15-bit reflectance. The
+// Reference case times the bit-at-a-time unpacker it replaced.
 func BenchmarkUnpackBits(b *testing.B) {
 	const w, h, bits = 512, 512, 15
 	vals := make([]uint16, w*h)
@@ -148,10 +149,19 @@ func BenchmarkUnpackBits(b *testing.B) {
 	rowBytes := (w*bits + 7) / 8
 	dst := make([]uint16, w*h)
 
-	b.SetBytes(int64(len(data)))
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		unpackBits(dst, data, w, h, bits, rowBytes)
+	for _, bc := range []struct {
+		name   string
+		unpack func(dst []uint16, data []byte, perRow, rows, bits, rowBytes int)
+	}{
+		{"Window", unpackBits},
+		{"Reference", unpackBitsReference},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			b.SetBytes(int64(len(data)))
+			for i := 0; i < b.N; i++ {
+				bc.unpack(dst, data, w, h, bits, rowBytes)
+			}
+		})
 	}
 }
 
@@ -189,6 +199,8 @@ func unpackBitsReference(dst []uint16, data []byte, perRow, rows, bits, rowBytes
 // The windowed unpacker must produce exactly what the bit-at-a-time one did,
 // for every depth and for dimensions whose rows do not end on byte
 // boundaries. Anything else silently changes the pixels of every band tile.
+// Row padding bits and bytes past the tile are random, as a writer may leave
+// them: neither may leak into a sample.
 func TestUnpackBitsMatchesReference(t *testing.T) {
 	rng := rand.New(rand.NewSource(99))
 	for bits := 1; bits <= 16; bits++ {
@@ -200,6 +212,13 @@ func TestUnpackBitsMatchesReference(t *testing.T) {
 			}
 			data := pack(vals, perRow, rows, bits)
 			rowBytes := (perRow*bits + 7) / 8
+			pad := rowBytes*8 - perRow*bits
+			for y := 0; y < rows; y++ {
+				data[(y+1)*rowBytes-1] |= byte(rng.Intn(256)) & (1<<pad - 1)
+			}
+			for n := rng.Intn(5); n > 0; n-- {
+				data = append(data, byte(rng.Intn(256)))
+			}
 
 			got := make([]uint16, perRow*rows)
 			want := make([]uint16, perRow*rows)
@@ -207,9 +226,9 @@ func TestUnpackBitsMatchesReference(t *testing.T) {
 			unpackBitsReference(want, data, perRow, rows, bits, rowBytes)
 
 			for i := range want {
-				if got[i] != want[i] {
-					t.Fatalf("bits %d, %dx%d, sample %d: got %d, reference %d",
-						bits, perRow, rows, i, got[i], want[i])
+				if got[i] != want[i] || got[i] != vals[i] {
+					t.Fatalf("bits %d, %dx%d, sample %d: got %d, reference %d, packed %d",
+						bits, perRow, rows, i, got[i], want[i], vals[i])
 				}
 			}
 		}
