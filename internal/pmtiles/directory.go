@@ -229,29 +229,21 @@ func serializeDirectory(entries []Entry) ([]byte, error) {
 }
 
 // TileIDToZXY converts a PMTiles v3 tile ID back to z/x/y coordinates.
+// It returns z = -1 for IDs past zoom 31, the deepest zoom a 64-bit tile
+// ID can address.
 func TileIDToZXY(tileID uint64) (z, x, y int) {
-	if tileID == 0 {
-		return 0, 0, 0
-	}
-
 	// Find the zoom level: tile IDs for zoom z start at sum of 4^i for i in [0, z-1].
 	var acc uint64
-	z = 0
-	for {
-		n := uint64(1) << uint(z)
-		count := n * n // 4^z tiles at this zoom
-		if acc+count > tileID {
-			break
+	for z = 0; z < 32; z++ {
+		count := uint64(1) << uint(2*z) // 4^z tiles at this zoom
+		if tileID-acc < count {
+			// The Hilbert index within this zoom level.
+			hx, hy := hilbertToXY(tileID-acc, uint64(1)<<uint(z))
+			return z, int(hx), int(hy)
 		}
 		acc += count
-		z++
 	}
-
-	// The Hilbert index within this zoom level.
-	hilbertIdx := tileID - acc
-	n := uint64(1) << uint(z)
-	hx, hy := hilbertToXY(hilbertIdx, n)
-	return z, int(hx), int(hy)
+	return -1, 0, 0
 }
 
 // hilbertToXY converts a Hilbert curve index to (x, y) for an n x n grid.

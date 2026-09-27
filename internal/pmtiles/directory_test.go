@@ -5,7 +5,9 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"io"
+	"math"
 	"testing"
+	"time"
 )
 
 func TestZXYToTileID_Z0(t *testing.T) {
@@ -444,4 +446,43 @@ func readUvarint(t *testing.T, r io.ByteReader) uint64 {
 		t.Fatalf("ReadUvarint: %v", err)
 	}
 	return v
+}
+
+func TestTileIDToZXY(t *testing.T) {
+	const firstPastZ31 = 6148914691236517205 // (4^32 - 1) / 3
+	tests := []struct {
+		id      uint64
+		z, x, y int
+	}{
+		{0, 0, 0, 0},
+		{1, 1, 0, 0},
+		{4, 1, 1, 0},
+		{5, 2, 0, 0},
+		{20, 2, 3, 0},
+		{firstPastZ31 - 1, 31, 1<<31 - 1, 0},
+		// Past zoom 31 the 4^z tile count overflows; these used to loop forever.
+		{firstPastZ31, -1, 0, 0},
+		{1 << 63, -1, 0, 0},
+		{math.MaxUint64, -1, 0, 0},
+	}
+	for _, tt := range tests {
+		done := make(chan [3]int, 1)
+		go func() {
+			z, x, y := TileIDToZXY(tt.id)
+			done <- [3]int{z, x, y}
+		}()
+		select {
+		case got := <-done:
+			if want := [3]int{tt.z, tt.x, tt.y}; got != want {
+				t.Errorf("TileIDToZXY(%d) = %v, want %v", tt.id, got, want)
+			}
+			if tt.z >= 0 {
+				if back := ZXYToTileID(tt.z, tt.x, tt.y); back != tt.id {
+					t.Errorf("ZXYToTileID(%d, %d, %d) = %d, want %d", tt.z, tt.x, tt.y, back, tt.id)
+				}
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("TileIDToZXY(%d) did not return", tt.id)
+		}
+	}
 }
