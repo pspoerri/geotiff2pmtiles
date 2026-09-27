@@ -402,7 +402,10 @@ func main() {
 	}
 
 	// Compute merged bounds in WGS84.
-	mergedBounds := cog.MergedBoundsWGS84(sources)
+	mergedBounds, err := cog.MergedBoundsWGS84(sources)
+	if err != nil {
+		log.Fatalf("Bounds: %v", err)
+	}
 	if verbose {
 		log.Printf("Merged bounds (WGS84): lon [%.6f, %.6f], lat [%.6f, %.6f]",
 			mergedBounds.MinLon, mergedBounds.MaxLon, mergedBounds.MinLat, mergedBounds.MaxLat)
