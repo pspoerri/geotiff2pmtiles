@@ -52,7 +52,7 @@ func main() {
 	defer r.Close()
 
 	fmt.Printf("File: %s\n", path)
-	fmt.Printf("EPSG: %d\n", r.EPSG())
+	fmt.Println(epsgLine(r))
 	fmt.Printf("Full-res size: %d x %d\n", r.Width(), r.Height())
 	fmt.Printf("Pixel size (CRS units): %f\n", r.PixelSize())
 	fmt.Printf("IFD count: %d (1 full-res + %d overviews)\n", r.IFDCount(), r.NumOverviews())
@@ -113,6 +113,15 @@ func main() {
 			}
 		}
 	}
+}
+
+// epsgLine names the file's EPSG code, and says when the reader guessed it
+// from the coordinate ranges because the GeoKeys have no CRS.
+func epsgLine(r *cog.Reader) string {
+	if r.EPSGGuessed() {
+		return fmt.Sprintf("EPSG: %d (guessed from the coordinate ranges)", r.EPSG())
+	}
+	return fmt.Sprintf("EPSG: %d", r.EPSG())
 }
 
 // printRaw prints what the reader parsed from the full-resolution IFD and
