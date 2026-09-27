@@ -223,58 +223,6 @@ func tileDataToRGBA(td *TileData) *image.RGBA {
 	return td.ToRGBA()
 }
 
-// --- Serialization for disk spilling ---
-
-// tileDataType identifies the storage format for disk serialization.
-type tileDataType uint8
-
-const (
-	tileDataTypeUniform tileDataType = 0 // 4 bytes: R, G, B, A
-	tileDataTypeGray    tileDataType = 1 // tileSize*tileSize bytes
-	tileDataTypeRGBA    tileDataType = 2 // tileSize*tileSize*4 bytes
-)
-
-// SerializeAppend appends the tile's raw pixel data to buf and returns the
-// extended slice plus the type tag. The caller stores the type tag separately
-// in the index so deserialization knows the format.
-func (t *TileData) SerializeAppend(buf []byte) ([]byte, tileDataType) {
-	if t.img != nil {
-		return append(buf, t.img.Pix...), tileDataTypeRGBA
-	}
-	if t.gray != nil {
-		return append(buf, t.gray.Pix...), tileDataTypeGray
-	}
-	return append(buf, t.color.R, t.color.G, t.color.B, t.color.A), tileDataTypeUniform
-}
-
-// DeserializeTileData reconstructs a TileData from raw bytes and a type tag.
-func DeserializeTileData(data []byte, typ tileDataType, tileSize int) *TileData {
-	switch typ {
-	case tileDataTypeUniform:
-		if len(data) < 4 {
-			return nil
-		}
-		return newTileDataUniform(color.RGBA{R: data[0], G: data[1], B: data[2], A: data[3]}, tileSize)
-	case tileDataTypeGray:
-		expected := tileSize * tileSize
-		if len(data) < expected {
-			return nil
-		}
-		g := image.NewGray(image.Rect(0, 0, tileSize, tileSize))
-		copy(g.Pix, data[:expected])
-		return &TileData{gray: g, tileSize: tileSize}
-	case tileDataTypeRGBA:
-		expected := tileSize * tileSize * 4
-		if len(data) < expected {
-			return nil
-		}
-		img := GetRGBA(tileSize, tileSize)
-		copy(img.Pix, data[:expected])
-		return &TileData{img: img, tileSize: tileSize}
-	}
-	return nil
-}
-
 // Release returns the tile's internal RGBA image (if any) to the pool.
 // After Release, the TileData must not be used.
 func (t *TileData) Release() {
@@ -282,15 +230,4 @@ func (t *TileData) Release() {
 		PutRGBA(t.img)
 		t.img = nil
 	}
-}
-
-// MemoryBytes returns the estimated heap bytes used by this tile's pixel data.
-func (t *TileData) MemoryBytes() int64 {
-	if t.img != nil {
-		return int64(len(t.img.Pix))
-	}
-	if t.gray != nil {
-		return int64(len(t.gray.Pix))
-	}
-	return 4 // uniform: just the color struct
 }

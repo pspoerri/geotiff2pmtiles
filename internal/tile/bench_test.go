@@ -160,65 +160,6 @@ func BenchmarkToRGBA_FromRGBA(b *testing.B) {
 	}
 }
 
-// --- Serialization roundtrip benchmarks ---
-
-func BenchmarkSerialize_Gray(b *testing.B) {
-	img := grayCheckerImage(256, 100, 200)
-	td := newTileData(img, 256)
-	buf := make([]byte, 0, 256*256)
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		buf = buf[:0]
-		td.SerializeAppend(buf)
-	}
-}
-
-func BenchmarkSerialize_RGBA(b *testing.B) {
-	img := rgbaCheckerImage(256)
-	td := newTileData(img, 256)
-	buf := make([]byte, 0, 256*256*4)
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		buf = buf[:0]
-		td.SerializeAppend(buf)
-	}
-}
-
-func BenchmarkSerialize_Uniform(b *testing.B) {
-	td := newTileDataUniform(color.RGBA{42, 42, 42, 255}, 256)
-	buf := make([]byte, 0, 4)
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		buf = buf[:0]
-		td.SerializeAppend(buf)
-	}
-}
-
-func BenchmarkDeserialize_Gray(b *testing.B) {
-	img := grayCheckerImage(256, 100, 200)
-	td := newTileData(img, 256)
-	buf, typ := td.SerializeAppend(nil)
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		DeserializeTileData(buf, typ, 256)
-	}
-}
-
-func BenchmarkDeserialize_RGBA(b *testing.B) {
-	img := rgbaCheckerImage(256)
-	td := newTileData(img, 256)
-	buf, typ := td.SerializeAppend(nil)
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		DeserializeTileData(buf, typ, 256)
-	}
-}
-
 // --- RGBAAt benchmarks (hot in downsample) ---
 
 func BenchmarkRGBAAt_Gray(b *testing.B) {
@@ -397,17 +338,6 @@ func BenchmarkDiskTileStore_PutFlushGet(b *testing.B) {
 	}
 }
 
-// --- Memory allocation benchmarks ---
-
-func BenchmarkMemoryBytes_Gray(b *testing.B) {
-	img := grayCheckerImage(256, 100, 200)
-	td := newTileData(img, 256)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		td.MemoryBytes()
-	}
-}
-
 // --- AsImage benchmarks (hot in encode path) ---
 
 func BenchmarkAsImage_Gray(b *testing.B) {
@@ -436,37 +366,6 @@ func BenchmarkAsImage_Uniform(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		td.AsImage()
-	}
-}
-
-// --- Missing MemoryBytes variants ---
-
-func BenchmarkMemoryBytes_RGBA(b *testing.B) {
-	img := rgbaCheckerImage(256)
-	td := newTileData(img, 256)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		td.MemoryBytes()
-	}
-}
-
-func BenchmarkMemoryBytes_Uniform(b *testing.B) {
-	td := newTileDataUniform(color.RGBA{42, 42, 42, 255}, 256)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		td.MemoryBytes()
-	}
-}
-
-// --- Missing Deserialize variant ---
-
-func BenchmarkDeserialize_Uniform(b *testing.B) {
-	td := newTileDataUniform(color.RGBA{42, 42, 42, 255}, 256)
-	buf, typ := td.SerializeAppend(nil)
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		DeserializeTileData(buf, typ, 256)
 	}
 }
 
