@@ -635,8 +635,10 @@ func downsampleQuadrantTerrariumBicubic(dst *image.RGBA, src *image.RGBA, dstOff
 
 // downsampleQuadrantBilinear uses box-filter (average of 2x2 source pixels) to
 // produce each output pixel. This is equivalent to bilinear downsampling.
-// Pixels with alpha == 0 are treated as nodata and excluded from RGB averaging
-// so they don't bleed dark colors into the result.
+// Alpha is straight, so RGB is averaged weighted by alpha: nodata pixels
+// (alpha 0) drop out instead of bleeding dark colors into the result, and
+// faint pixels count only as much as they show. An output pixel whose alpha
+// rounds to 0 is left transparent black.
 //
 // Uses direct Pix slice access to avoid image.RGBAAt/SetRGBA bounds checks.
 // Clamping is omitted: for half = tileSize/2, sx+1 = 2*dx+1 ≤ tileSize-1 and
@@ -657,51 +659,28 @@ func downsampleQuadrantBilinear(dst *image.RGBA, src *image.RGBA, dstOffX, dstOf
 			off01 := srcRow1 + sx4
 			off11 := off01 + 4
 
-			a00 := srcPix[off00+3]
-			a10 := srcPix[off10+3]
-			a01 := srcPix[off01+3]
-			a11 := srcPix[off11+3]
+			a00 := uint32(srcPix[off00+3])
+			a10 := uint32(srcPix[off10+3])
+			a01 := uint32(srcPix[off01+3])
+			a11 := uint32(srcPix[off11+3])
 
-			// Alpha: straight average of all 4 (nodata contributes 0).
-			a := uint8((uint16(a00) + uint16(a10) + uint16(a01) + uint16(a11) + 2) / 4)
-
-			// RGB: average only pixels with non-zero alpha.
-			var rSum, gSum, bSum uint16
-			var count uint16
-			if a00 != 0 {
-				rSum += uint16(srcPix[off00])
-				gSum += uint16(srcPix[off00+1])
-				bSum += uint16(srcPix[off00+2])
-				count++
-			}
-			if a10 != 0 {
-				rSum += uint16(srcPix[off10])
-				gSum += uint16(srcPix[off10+1])
-				bSum += uint16(srcPix[off10+2])
-				count++
-			}
-			if a01 != 0 {
-				rSum += uint16(srcPix[off01])
-				gSum += uint16(srcPix[off01+1])
-				bSum += uint16(srcPix[off01+2])
-				count++
-			}
-			if a11 != 0 {
-				rSum += uint16(srcPix[off11])
-				gSum += uint16(srcPix[off11+1])
-				bSum += uint16(srcPix[off11+2])
-				count++
+			// Alpha: plain average of all 4 (nodata contributes 0).
+			aSum := a00 + a10 + a01 + a11
+			a := (aSum + 2) / 4
+			if a == 0 {
+				continue // (nearly) all nodata — leave transparent
 			}
 
-			if count == 0 {
-				continue // all nodata — leave transparent
-			}
-
+			// RGB: average weighted by alpha.
+			round := aSum / 2
 			dstOff := dstRowOff + (dstOffX+dx)*4
-			dstPix[dstOff] = uint8((rSum + count/2) / count)
-			dstPix[dstOff+1] = uint8((gSum + count/2) / count)
-			dstPix[dstOff+2] = uint8((bSum + count/2) / count)
-			dstPix[dstOff+3] = a
+			dstPix[dstOff] = uint8((uint32(srcPix[off00])*a00 + uint32(srcPix[off10])*a10 +
+				uint32(srcPix[off01])*a01 + uint32(srcPix[off11])*a11 + round) / aSum)
+			dstPix[dstOff+1] = uint8((uint32(srcPix[off00+1])*a00 + uint32(srcPix[off10+1])*a10 +
+				uint32(srcPix[off01+1])*a01 + uint32(srcPix[off11+1])*a11 + round) / aSum)
+			dstPix[dstOff+2] = uint8((uint32(srcPix[off00+2])*a00 + uint32(srcPix[off10+2])*a10 +
+				uint32(srcPix[off01+2])*a01 + uint32(srcPix[off11+2])*a11 + round) / aSum)
+			dstPix[dstOff+3] = uint8(a)
 		}
 	}
 }
@@ -709,7 +688,7 @@ func downsampleQuadrantBilinear(dst *image.RGBA, src *image.RGBA, dstOffX, dstOf
 // downsampleQuadrantLanczos uses a Lanczos-3 kernel to downsample a
 // tileSize × tileSize source quadrant into a half × half destination region.
 // Uses precomputed 1D weights for the fixed 2× downsample factor.
-// Pixels with alpha == 0 are excluded from RGB interpolation.
+// RGB is weighted by (straight) alpha, as in downsampleQuadrantBilinear.
 // Out-of-bounds kernel positions are treated as transparent (alpha 0) so
 // the source extent is never visually extended by edge-pixel clamping.
 func downsampleQuadrantLanczos(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
@@ -722,7 +701,7 @@ func downsampleQuadrantLanczos(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 
 	for dy := 0; dy < half; dy++ {
 		for dx := 0; dx < half; dx++ {
-			var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+			var rSum, gSum, bSum, aSum, wTotal float64
 
 			for ky := 0; ky < 6; ky++ {
 				sy := 2*dy - 2 + ky
@@ -732,41 +711,38 @@ func downsampleQuadrantLanczos(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 				for kx := 0; kx < 6; kx++ {
 					sx := 2*dx - 2 + kx
 					wt := w[kx] * wyVal
-
+					wTotal += wt
 					if outY || sx < 0 || sx > maxIdx {
-						wTotal += wt
 						continue
 					}
 
 					off := sy*srcStride + sx*4
-					a := float64(srcPix[off+3])
-					aSum += a * wt
-					wTotal += wt
-					if srcPix[off+3] > 0 {
-						rSum += float64(srcPix[off]) * wt
-						gSum += float64(srcPix[off+1]) * wt
-						bSum += float64(srcPix[off+2]) * wt
-						wRGB += wt
-					}
+					aw := float64(srcPix[off+3]) * wt
+					aSum += aw
+					rSum += float64(srcPix[off]) * aw
+					gSum += float64(srcPix[off+1]) * aw
+					bSum += float64(srcPix[off+2]) * aw
 				}
 			}
 
-			if wRGB == 0 {
+			// a ≥ 1 implies aSum > 0, so the RGB division is safe.
+			a := clampByte(aSum / wTotal)
+			if a == 0 {
 				continue
 			}
 
 			dstOff := (dstOffY+dy)*dstStride + (dstOffX+dx)*4
-			dstPix[dstOff] = clampByte(rSum / wRGB)
-			dstPix[dstOff+1] = clampByte(gSum / wRGB)
-			dstPix[dstOff+2] = clampByte(bSum / wRGB)
-			dstPix[dstOff+3] = clampByte(aSum / wTotal)
+			dstPix[dstOff] = clampByte(rSum / aSum)
+			dstPix[dstOff+1] = clampByte(gSum / aSum)
+			dstPix[dstOff+2] = clampByte(bSum / aSum)
+			dstPix[dstOff+3] = a
 		}
 	}
 }
 
 // downsampleQuadrantBicubic uses a Catmull-Rom bicubic kernel to downsample a
 // tileSize × tileSize source quadrant into a half × half destination region.
-// Pixels with alpha == 0 are excluded from RGB interpolation.
+// RGB is weighted by (straight) alpha, as in downsampleQuadrantBilinear.
 // Out-of-bounds kernel positions are treated as transparent (alpha 0) so
 // the source extent is never visually extended by edge-pixel clamping.
 func downsampleQuadrantBicubic(dst *image.RGBA, src *image.RGBA, dstOffX, dstOffY, half, tileSize int) {
@@ -779,7 +755,7 @@ func downsampleQuadrantBicubic(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 
 	for dy := 0; dy < half; dy++ {
 		for dx := 0; dx < half; dx++ {
-			var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+			var rSum, gSum, bSum, aSum, wTotal float64
 
 			for ky := 0; ky < 4; ky++ {
 				sy := 2*dy - 1 + ky
@@ -789,34 +765,31 @@ func downsampleQuadrantBicubic(dst *image.RGBA, src *image.RGBA, dstOffX, dstOff
 				for kx := 0; kx < 4; kx++ {
 					sx := 2*dx - 1 + kx
 					wt := w[kx] * wyVal
-
+					wTotal += wt
 					if outY || sx < 0 || sx > maxIdx {
-						wTotal += wt
 						continue
 					}
 
 					off := sy*srcStride + sx*4
-					a := float64(srcPix[off+3])
-					aSum += a * wt
-					wTotal += wt
-					if srcPix[off+3] > 0 {
-						rSum += float64(srcPix[off]) * wt
-						gSum += float64(srcPix[off+1]) * wt
-						bSum += float64(srcPix[off+2]) * wt
-						wRGB += wt
-					}
+					aw := float64(srcPix[off+3]) * wt
+					aSum += aw
+					rSum += float64(srcPix[off]) * aw
+					gSum += float64(srcPix[off+1]) * aw
+					bSum += float64(srcPix[off+2]) * aw
 				}
 			}
 
-			if wRGB == 0 {
+			// a ≥ 1 implies aSum > 0, so the RGB division is safe.
+			a := clampByte(aSum / wTotal)
+			if a == 0 {
 				continue
 			}
 
 			dstOff := (dstOffY+dy)*dstStride + (dstOffX+dx)*4
-			dstPix[dstOff] = clampByte(rSum / wRGB)
-			dstPix[dstOff+1] = clampByte(gSum / wRGB)
-			dstPix[dstOff+2] = clampByte(bSum / wRGB)
-			dstPix[dstOff+3] = clampByte(aSum / wTotal)
+			dstPix[dstOff] = clampByte(rSum / aSum)
+			dstPix[dstOff+1] = clampByte(gSum / aSum)
+			dstPix[dstOff+2] = clampByte(bSum / aSum)
+			dstPix[dstOff+3] = a
 		}
 	}
 }

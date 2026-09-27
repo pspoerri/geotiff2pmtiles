@@ -2,6 +2,7 @@ package tile
 
 import (
 	"bytes"
+	"image"
 	"image/color"
 	"image/png"
 	"testing"
@@ -15,6 +16,45 @@ func assertRGBANear(t *testing.T, what string, got, want color.RGBA, tol int) {
 	d := func(a, b uint8) bool { return abs(int(a)-int(b)) > tol }
 	if d(got.R, want.R) || d(got.G, want.G) || d(got.B, want.B) || d(got.A, want.A) {
 		t.Errorf("%s = %v, want %v ±%d", what, got, want, tol)
+	}
+}
+
+// TestDownsampleTile_OpaqueNextToTransparent is the edge case the alpha
+// weighting must not break: a 2×2 block of one opaque red pixel and three
+// transparent ones gives red at quarter alpha, not a dark red.
+func TestDownsampleTile_OpaqueNextToTransparent(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	img.SetRGBA(0, 0, color.RGBA{255, 0, 0, 255})
+	td := downsampleTile(fullTile(img, 8), nil, nil, nil, 8, ResamplingBilinear)
+	assertRGBANear(t, "pixel", td.RGBAAt(0, 0), color.RGBA{255, 0, 0, 64}, 0)
+}
+
+// TestDownsampleTile_AlphaWeighted checks that RGB is averaged by alpha in
+// straight-alpha space. Columns alternate opaque red and blue at alpha 1,
+// so every output pixel is half red, half near-transparent blue: it must stay
+// red at alpha ~128. Averaging RGB without alpha weights gave purple.
+func TestDownsampleTile_AlphaWeighted(t *testing.T) {
+	const size = 16
+	img := image.NewRGBA(image.Rect(0, 0, size, size))
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			if x%2 == 0 {
+				img.SetRGBA(x, y, color.RGBA{255, 0, 0, 255})
+			} else {
+				img.SetRGBA(x, y, color.RGBA{0, 0, 255, 1})
+			}
+		}
+	}
+	for _, name := range []string{"bilinear", "bicubic", "lanczos"} {
+		t.Run(name, func(t *testing.T) {
+			mode, err := ParseResampling(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			td := downsampleTile(fullTile(img, size), nil, nil, nil, size, mode)
+			// An interior pixel, clear of the tile edges.
+			assertRGBANear(t, "pixel", td.RGBAAt(4, 4), color.RGBA{254, 0, 1, 128}, 1)
+		})
 	}
 }
 
