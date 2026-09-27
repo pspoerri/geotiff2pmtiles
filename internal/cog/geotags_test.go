@@ -11,6 +11,32 @@ func geoKeyDir(pairs ...uint16) []uint16 {
 	return keys
 }
 
+// GTModelTypeGeoKey picks the CRS key; a user-defined CRS is never replaced by
+// its base geographic CRS (GDAL writes that pair for custom Albers/LCC).
+func TestParseEPSG(t *testing.T) {
+	tests := []struct {
+		name string
+		keys []uint16
+		want int
+	}{
+		{"projected with base GCS", geoKeyDir(1024, 1, 2048, 4326, 3072, 32632), 32632},
+		{"geographic", geoKeyDir(1024, 2, 2048, 4326), 4326},
+		{"projected, user-defined PCS", geoKeyDir(1024, 1, 2048, 4269, 3072, 32767), 32767},
+		{"projected, no PCS key", geoKeyDir(1024, 1, 2048, 4326), 32767},
+		{"geographic, user-defined GCS", geoKeyDir(1024, 2, 2048, 32767), 32767},
+		{"user-defined model", geoKeyDir(1024, 32767), 32767},
+		{"no model type, PCS", geoKeyDir(2048, 4326, 3072, 2056), 2056},
+		{"no model type, GCS", geoKeyDir(2048, 4326), 4326},
+		{"no keys", geoKeyDir(), 0},
+		{"no directory", nil, 0},
+	}
+	for _, tt := range tests {
+		if got := parseEPSG(tt.keys); got != tt.want {
+			t.Errorf("%s: got %d, want %d", tt.name, got, tt.want)
+		}
+	}
+}
+
 // The GeoTIFF origin is the upper-left corner. A PixelIsPoint tiepoint is the
 // centre of pixel (I,J), so GDAL places the corner half a pixel up and left.
 func TestParseGeoInfoRasterType(t *testing.T) {

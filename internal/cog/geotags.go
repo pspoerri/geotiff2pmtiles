@@ -8,13 +8,20 @@ const (
 	gkProjectedCSTypeGeoKey = 3072
 )
 
+// GTModelTypeGeoKey values; 32767 also marks a user-defined CRS code.
+const (
+	modelTypeProjected  = 1
+	modelTypeGeographic = 2
+	userDefinedGeoKey   = 32767
+)
+
 // rasterPixelIsPoint is the GTRasterTypeGeoKey value for rasters whose
 // tiepoint refers to a pixel centre (RasterPixelIsArea, 1, is the default).
 const rasterPixelIsPoint = 2
 
 // GeoInfo holds parsed GeoTIFF metadata.
 type GeoInfo struct {
-	EPSG       int     // EPSG code (e.g. 2056)
+	EPSG       int     // EPSG code (e.g. 2056); 32767 = user-defined CRS
 	OriginX    float64 // easting of upper-left corner
 	OriginY    float64 // northing of upper-left corner
 	PixelSizeX float64 // pixel width in CRS units (positive)
@@ -73,36 +80,29 @@ func geoKey(geoKeys []uint16, id uint16) int {
 	return 0
 }
 
-// parseEPSG extracts the EPSG code from GeoKey directory entries.
+// parseEPSG returns the EPSG code the GeoKeys declare, 0 when they declare
+// none, or 32767 for a user-defined CRS, which the pipeline rejects.
+// GTModelTypeGeoKey decides which key applies: a projected CRS also names its
+// base geographic CRS, and GDAL writes GeographicTypeGeoKey=<datum> next to
+// ProjectedCSTypeGeoKey=32767 for custom projections (Albers, LCC), whose
+// metres must not be read as degrees.
 func parseEPSG(geoKeys []uint16) int {
-	if len(geoKeys) < 4 {
-		return 0
-	}
-
-	// GeoKey directory header: [KeyDirectoryVersion, KeyRevision, MinorRevision, NumberOfKeys]
-	numKeys := int(geoKeys[3])
-
-	for i := 0; i < numKeys; i++ {
-		base := 4 + i*4
-		if base+3 >= len(geoKeys) {
-			break
+	pcs := geoKey(geoKeys, gkProjectedCSTypeGeoKey)
+	gcs := geoKey(geoKeys, gkGeographicTypeGeoKey)
+	switch geoKey(geoKeys, gkModelTypeGeoKey) {
+	case modelTypeProjected:
+		if pcs == 0 {
+			return userDefinedGeoKey // defined by projection parameters only
 		}
-		keyID := geoKeys[base]
-		// tiffTagLocation := geoKeys[base+1]
-		// count := geoKeys[base+2]
-		valueOffset := geoKeys[base+3]
-
-		switch keyID {
-		case gkProjectedCSTypeGeoKey:
-			if valueOffset > 0 {
-				return int(valueOffset)
-			}
-		case gkGeographicTypeGeoKey:
-			if valueOffset > 0 {
-				return int(valueOffset)
-			}
-		}
+		return pcs
+	case modelTypeGeographic:
+		return gcs
+	case userDefinedGeoKey:
+		return userDefinedGeoKey
 	}
-
-	return 0
+	// Model type absent: a projected CRS key wins over its base.
+	if pcs != 0 {
+		return pcs
+	}
+	return gcs
 }
