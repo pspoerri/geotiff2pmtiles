@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 )
 
@@ -64,6 +65,9 @@ func xyToHilbert(x, y, n uint64) uint64 {
 // buildDirectory takes a sorted list of entries and produces a serialized, gzip-compressed directory.
 // It returns the root directory, leaf directories, and the number of tile entries after run-length
 // optimization (for the header's NumTileEntries field).
+//
+// The entries are sorted and merged in place, so their contents are
+// unspecified afterwards.
 func BuildDirectory(entries []Entry) (rootDir []byte, leafDirs []byte, numOptimized int, err error) {
 	// Sort entries by tile ID.
 	sort.Slice(entries, func(i, j int) bool {
@@ -357,31 +361,29 @@ func DeserializeDirectoryCompressed(data []byte, compression uint8) ([]Entry, er
 	return entries, nil
 }
 
-// optimizeRunLengths merges consecutive tile IDs that share one data blob into a single run-length entry.
+// optimizeRunLengths merges consecutive tile IDs that share one data blob
+// into a single run-length entry. Entries may be runs already (a directory
+// read back to be rebuilt); their lengths add up. The result reuses the
+// storage of the sorted entries, which a full global z13 index would
+// otherwise need a second ~2 GB for.
 func optimizeRunLengths(entries []Entry) []Entry {
 	if len(entries) == 0 {
 		return entries
 	}
 
-	result := make([]Entry, 0, len(entries))
-	current := entries[0]
-	current.RunLength = 1
-
-	for i := 1; i < len(entries); i++ {
-		e := entries[i]
-		expectedTileID := current.TileID + uint64(current.RunLength)
-
-		if e.TileID == expectedTileID &&
+	result := entries[:1]
+	result[0].RunLength = max(result[0].RunLength, 1)
+	for _, e := range entries[1:] {
+		e.RunLength = max(e.RunLength, 1)
+		current := &result[len(result)-1]
+		if e.TileID == current.TileID+uint64(current.RunLength) &&
 			e.Offset == current.Offset &&
-			e.Length == current.Length {
-			current.RunLength++
+			e.Length == current.Length &&
+			uint64(current.RunLength)+uint64(e.RunLength) <= math.MaxUint32 {
+			current.RunLength += e.RunLength
 		} else {
-			result = append(result, current)
-			current = e
-			current.RunLength = 1
+			result = append(result, e)
 		}
 	}
-	result = append(result, current)
-
 	return result
 }
