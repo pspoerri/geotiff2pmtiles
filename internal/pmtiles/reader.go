@@ -1,8 +1,6 @@
 package pmtiles
 
 import (
-	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,39 +41,11 @@ func OpenReader(path string) (*Reader, error) {
 		return nil, err
 	}
 
-	// Read root directory.
-	rootDirData := make([]byte, header.RootDirLength)
-	if _, err := f.ReadAt(rootDirData, int64(header.RootDirOffset)); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("reading root directory: %w", err)
-	}
-
-	rootEntries, err := DeserializeDirectory(rootDirData)
+	// Resolve the root and leaf directories into a flat list of tile entries.
+	allEntries, err := readEntries(f, header, header.RootDirOffset, header.RootDirLength, map[uint64]bool{}, nil)
 	if err != nil {
 		f.Close()
-		return nil, fmt.Errorf("parsing root directory: %w", err)
-	}
-
-	// Resolve leaf directories into a flat list of tile entries.
-	var allEntries []Entry
-	for _, e := range rootEntries {
-		if e.RunLength == 0 {
-			// Leaf directory pointer: offset/length are relative to leaf dir section.
-			leafData := make([]byte, e.Length)
-			absOffset := int64(header.LeafDirOffset + e.Offset)
-			if _, err := f.ReadAt(leafData, absOffset); err != nil {
-				f.Close()
-				return nil, fmt.Errorf("reading leaf directory at offset %d: %w", absOffset, err)
-			}
-			leafEntries, err := DeserializeDirectory(leafData)
-			if err != nil {
-				f.Close()
-				return nil, fmt.Errorf("parsing leaf directory: %w", err)
-			}
-			allEntries = append(allEntries, leafEntries...)
-		} else {
-			allEntries = append(allEntries, e)
-		}
+		return nil, err
 	}
 
 	// Directories are sorted by the spec; sorting is linear on sorted input
@@ -94,6 +64,43 @@ func OpenReader(path string) (*Reader, error) {
 		entries:  allEntries,
 		numTiles: numTiles,
 	}, nil
+}
+
+// readEntries appends the tile entries of the directory at absolute file
+// offset off to entries, following leaf directory pointers (RunLength 0)
+// to any depth. seen holds the offsets of the directories read so far: a
+// corrupt archive whose leaf pointers loop back fails instead of recursing
+// forever.
+func readEntries(f *os.File, h Header, off, length uint64, seen map[uint64]bool, entries []Entry) ([]Entry, error) {
+	name := "root directory"
+	if off != h.RootDirOffset {
+		name = fmt.Sprintf("leaf directory at offset %d", off)
+	}
+	if seen[off] {
+		return nil, fmt.Errorf("%s is referenced more than once (corrupt archive)", name)
+	}
+	seen[off] = true
+
+	data := make([]byte, length)
+	if _, err := f.ReadAt(data, int64(off)); err != nil {
+		return nil, fmt.Errorf("reading %s: %w", name, err)
+	}
+	dir, err := DeserializeDirectoryCompressed(data, h.InternalCompression)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", name, err)
+	}
+	for _, e := range dir {
+		if e.RunLength > 0 {
+			entries = append(entries, e)
+			continue
+		}
+		// Leaf directory pointer: offset/length are relative to the leaf dir section.
+		entries, err = readEntries(f, h, h.LeafDirOffset+e.Offset, uint64(e.Length), seen, entries)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return entries, nil
 }
 
 // find returns the entry whose run covers tileID. Per the PMTiles v3 spec
@@ -189,15 +196,9 @@ func (r *Reader) ReadMetadata() (map[string]interface{}, error) {
 		return nil, fmt.Errorf("reading metadata: %w", err)
 	}
 
-	gz, err := gzip.NewReader(bytes.NewReader(metaRaw))
+	jsonData, err := decompress(metaRaw, r.header.InternalCompression)
 	if err != nil {
 		return nil, fmt.Errorf("decompressing metadata: %w", err)
-	}
-	defer gz.Close()
-
-	jsonData, err := io.ReadAll(gz)
-	if err != nil {
-		return nil, fmt.Errorf("reading decompressed metadata: %w", err)
 	}
 
 	var meta map[string]interface{}

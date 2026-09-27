@@ -276,15 +276,35 @@ func hilbertToXY(d, n uint64) (x, y uint64) {
 	return x, y
 }
 
+// decompress undoes the internal compression (the header's
+// InternalCompression) of a directory or the metadata. Unknown is read as
+// none, like the reference JavaScript reader does.
+func decompress(data []byte, compression uint8) ([]byte, error) {
+	switch compression {
+	case CompressionNone, CompressionUnknown:
+		return data, nil
+	case CompressionGzip:
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("gzip reader: %w", err)
+		}
+		defer gr.Close()
+		return io.ReadAll(gr)
+	default:
+		return nil, fmt.Errorf("unsupported internal compression %d (only none and gzip are supported)", compression)
+	}
+}
+
 // DeserializeDirectory decompresses and parses a gzip-compressed PMTiles v3 directory.
 func DeserializeDirectory(data []byte) ([]Entry, error) {
-	gr, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("gzip reader: %w", err)
-	}
-	defer gr.Close()
+	return DeserializeDirectoryCompressed(data, CompressionGzip)
+}
 
-	raw, err := io.ReadAll(gr)
+// DeserializeDirectoryCompressed decompresses and parses a PMTiles v3
+// directory stored with the given internal compression, which archives
+// declare in Header.InternalCompression.
+func DeserializeDirectoryCompressed(data []byte, compression uint8) ([]Entry, error) {
+	raw, err := decompress(data, compression)
 	if err != nil {
 		return nil, fmt.Errorf("decompressing directory: %w", err)
 	}

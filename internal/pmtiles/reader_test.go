@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -148,5 +149,85 @@ func TestReader_RunLookup(t *testing.T) {
 				t.Errorf("TilesAtZoom(%d)[%d] = %v, want %v (ID %d)", tc.z, i, got[i], [3]int{z, x, y}, id)
 			}
 		}
+	}
+}
+
+// The header's InternalCompression applies to directories and metadata;
+// go-pmtiles reads and writes uncompressed ones.
+func TestReader_InternalCompression(t *testing.T) {
+	for _, c := range []uint8{CompressionNone, CompressionGzip, CompressionUnknown} {
+		root := testDir(t, c, Entry{TileID: 0, Length: 4, RunLength: 1})
+		meta := []byte(`{"name":"test"}`)
+		if c == CompressionGzip {
+			var buf bytes.Buffer
+			gw := gzip.NewWriter(&buf)
+			gw.Write(meta)
+			gw.Close()
+			meta = buf.Bytes()
+		}
+		r := openTestReader(t, writeTestArchive(t, c, root, meta, nil, []byte("tile")))
+
+		if got, err := r.ReadTile(0, 0, 0); err != nil || string(got) != "tile" {
+			t.Errorf("compression %d: ReadTile = %q, %v; want \"tile\"", c, got, err)
+		}
+		m, err := r.ReadMetadata()
+		if err != nil || m["name"] != "test" {
+			t.Errorf("compression %d: ReadMetadata = %v, %v; want name=test", c, m, err)
+		}
+	}
+
+	root := testDir(t, CompressionBrotli, Entry{TileID: 0, Length: 4, RunLength: 1})
+	_, err := OpenReader(writeTestArchive(t, CompressionBrotli, root, nil, nil, []byte("tile")))
+	if err == nil || !strings.Contains(err.Error(), "unsupported internal compression 3") {
+		t.Errorf("OpenReader with brotli directories: err = %v, want unsupported internal compression", err)
+	}
+}
+
+// Leaf directories may point to further leaf directories; a reader that
+// follows only one level silently drops the deeper subtrees.
+func TestReader_NestedLeafDirectories(t *testing.T) {
+	// root -> tile 0 and leaf1; leaf1 -> tile 1 and leaf2; leaf2 -> all of z2.
+	// The leaf section is leaf2 followed by leaf1.
+	tiles := []byte("RAB")
+	leaf2 := testDir(t, CompressionGzip, Entry{TileID: 5, Offset: 2, Length: 1, RunLength: 16})
+	leaf1 := testDir(t, CompressionGzip,
+		Entry{TileID: 1, Offset: 1, Length: 1, RunLength: 1},
+		Entry{TileID: 5, Offset: 0, Length: uint32(len(leaf2))})
+	root := testDir(t, CompressionGzip,
+		Entry{TileID: 0, Offset: 0, Length: 1, RunLength: 1},
+		Entry{TileID: 1, Offset: uint64(len(leaf2)), Length: uint32(len(leaf1))})
+	leaves := append(append([]byte{}, leaf2...), leaf1...)
+	r := openTestReader(t, writeTestArchive(t, CompressionGzip, root, nil, leaves, tiles))
+
+	if got := r.NumTiles(); got != 18 {
+		t.Errorf("NumTiles = %d, want 18", got)
+	}
+	if got := len(r.TilesAtZoom(2)); got != 16 {
+		t.Errorf("TilesAtZoom(2) has %d tiles, want 16", got)
+	}
+	for _, tc := range []struct {
+		z, x, y int
+		want    string
+	}{
+		{0, 0, 0, "R"},
+		{1, 0, 0, "A"},
+		{1, 1, 0, ""},
+		{2, 0, 0, "B"},
+		{2, 3, 3, "B"},
+	} {
+		got, err := r.ReadTile(tc.z, tc.x, tc.y)
+		if err != nil || string(got) != tc.want {
+			t.Errorf("ReadTile(%d, %d, %d) = %q, %v; want %q", tc.z, tc.x, tc.y, got, err, tc.want)
+		}
+	}
+}
+
+// A leaf pointer back to an already read directory must fail, not recurse.
+func TestReader_LeafDirectoryCycle(t *testing.T) {
+	leaf := testDir(t, CompressionGzip, Entry{TileID: 1, Offset: 0, Length: 1})
+	root := testDir(t, CompressionGzip, Entry{TileID: 1, Offset: 0, Length: uint32(len(leaf))})
+	_, err := OpenReader(writeTestArchive(t, CompressionGzip, root, nil, leaf, nil))
+	if err == nil || !strings.Contains(err.Error(), "referenced more than once") {
+		t.Errorf("OpenReader = %v, want a leaf cycle error", err)
 	}
 }
