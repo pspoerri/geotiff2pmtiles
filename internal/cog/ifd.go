@@ -12,6 +12,7 @@ import (
 
 // TIFF tag IDs.
 const (
+	tagNewSubfileType     = 254
 	tagImageWidth         = 256
 	tagImageLength        = 257
 	tagBitsPerSample      = 258
@@ -79,12 +80,20 @@ type IFD struct {
 	TileWidth       uint32
 	TileHeight      uint32
 	RowsPerStrip    uint32
+	NewSubfileType  uint32 // tag 254: subfilePage, subfileMask bits
 	SamplesPerPixel uint16
 	Compression     uint16
 	Photometric     uint16
 	PlanarConfig    uint16
 	Predictor       uint16
 }
+
+// NewSubfileType bits that mark an IFD as something other than an image or
+// its reduced-resolution version.
+const (
+	subfilePage = 2 // one page of a multi-page file
+	subfileMask = 4 // a transparency mask for another image
+)
 
 // GDALMeta holds parsed GDAL_METADATA XML items from tag 42112.
 // Dataset-level items go in Items; per-band items (with sample=N) go in BandItems.
@@ -139,6 +148,39 @@ func (ifd *IFD) TilesAcross() int {
 // TilesDown returns the number of tiles in the vertical direction.
 func (ifd *IFD) TilesDown() int {
 	return int((ifd.Height + ifd.TileHeight - 1) / ifd.TileHeight)
+}
+
+// supportedCompression reports whether the tile decoders handle a TIFF
+// compression scheme: none, LZW, JPEG, Deflate (either code) or ZSTD.
+func supportedCompression(c uint16) bool {
+	switch c {
+	case 1, 5, 7, 8, 32946, 50000:
+		return true
+	}
+	return false
+}
+
+// imageIFDs keeps IFD 0 and the later IFDs that can serve as its overviews,
+// filtering ifds in place. GDAL interleaves 1-bit transparency masks with the
+// overviews, and other writers add pages, thumbnails or striped reduced
+// images; picked as a level by OverviewForZoom or ValueRange, those decode as
+// garbage or divide by zero. NewSubfileType is not required to mark an
+// overview, since some writers omit it.
+func imageIFDs(ifds []IFD) []IFD {
+	first := &ifds[0]
+	kept := ifds[:1]
+	for _, ifd := range ifds[1:] {
+		switch {
+		case ifd.NewSubfileType&(subfilePage|subfileMask) != 0, ifd.Photometric == 4: // page or mask
+		case ifd.TileWidth == 0 || ifd.TileHeight == 0: // striped: only IFD 0 is promoted to tiles
+		case ifd.Width == 0 || ifd.Height == 0 || ifd.Width > first.Width || ifd.Height > first.Height: // not a reduced image
+		case ifd.SamplesPerPixel != first.SamplesPerPixel || ifd.bitsPerSample() != first.bitsPerSample(): // thumbnail
+		case !supportedCompression(ifd.Compression):
+		default:
+			kept = append(kept, ifd)
+		}
+	}
+	return kept
 }
 
 // tiffEntry is a raw TIFF directory entry.
@@ -380,6 +422,8 @@ func buildIFD(entries []tiffEntry, bo binary.ByteOrder) IFD {
 
 	for _, e := range entries {
 		switch e.Tag {
+		case tagNewSubfileType:
+			ifd.NewSubfileType = getUint32(e, bo)
 		case tagImageWidth:
 			ifd.Width = getUint32(e, bo)
 		case tagImageLength:

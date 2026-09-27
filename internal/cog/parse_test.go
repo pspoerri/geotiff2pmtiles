@@ -131,3 +131,123 @@ func TestDataTypeSize(t *testing.T) {
 		}
 	}
 }
+
+// Only IFD 0 and its overviews are levels: GDAL's interleaved 1-bit masks,
+// pages, thumbnails and striped reduced images are dropped at open, while an
+// overview without NewSubfileType is kept.
+func TestOpenSourceKeepsOnlyOverviewIFDs(t *testing.T) {
+	const tile = 16 * 16
+	subfile := func(v uint64) tagEntry { return entry(tagNewSubfileType, dtLong, v) }
+	image := func(offs []uint64) []tagEntry {
+		return imageEntries(32, 32, 16, 16, 8, offs, []uint64{tile, tile, tile, tile})
+	}
+	overview := func(w int, offs []uint64, extra ...tagEntry) []tagEntry {
+		return imageEntries(w, w, 16, 16, 8, offs[:1], []uint64{tile}, extra...)
+	}
+	blobs := [][]byte{make([]byte, tile), make([]byte, tile), make([]byte, tile), make([]byte, tile)}
+
+	tests := []struct {
+		name   string
+		extra  func(offs []uint64) []tagEntry
+		levels int
+	}{
+		{"overview", func(offs []uint64) []tagEntry {
+			return overview(16, offs, subfile(1))
+		}, 2},
+		{"overview-without-subfile-type", func(offs []uint64) []tagEntry {
+			return overview(16, offs)
+		}, 2},
+		{"mask", func(offs []uint64) []tagEntry {
+			return withEntries(overview(32, offs, subfile(4)),
+				entry(tagBitsPerSample, dtShort, 1), entry(tagPhotometric, dtShort, 4))
+		}, 1},
+		{"page", func(offs []uint64) []tagEntry {
+			return overview(32, offs, subfile(2))
+		}, 1},
+		{"larger-than-image", func(offs []uint64) []tagEntry {
+			return overview(64, offs)
+		}, 1},
+		{"rgb-thumbnail", func(offs []uint64) []tagEntry {
+			return withEntries(overview(8, offs, subfile(1)),
+				entry(tagSamplesPerPixel, dtShort, 3), entry(tagPhotometric, dtShort, 2))
+		}, 1},
+		{"unsupported-compression", func(offs []uint64) []tagEntry {
+			return withEntries(overview(16, offs, subfile(1)), entry(tagCompression, dtShort, 6))
+		}, 1},
+		{"striped-overview", func(offs []uint64) []tagEntry {
+			return []tagEntry{
+				subfile(1),
+				entry(tagImageWidth, dtLong, 16),
+				entry(tagImageLength, dtLong, 16),
+				entry(tagBitsPerSample, dtShort, 8),
+				entry(tagCompression, dtShort, 1),
+				entry(tagRowsPerStrip, dtShort, 16),
+				entry(tagStripOffsets, dtLong, offs[0]),
+				entry(tagStripByteCounts, dtLong, tile),
+			}
+		}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := buildTIFF(false, blobs, func(offs []uint64) [][]tagEntry {
+				return [][]tagEntry{image(offs), tt.extra(offs)}
+			})
+			r, err := openCrafted(t, tt.name, data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			if got := r.IFDCount(); got != tt.levels {
+				t.Fatalf("IFDCount() = %d, want %d", got, tt.levels)
+			}
+			for level := 0; level < r.IFDCount(); level++ {
+				if _, err := r.ReadTile(level, 0, 0); err != nil {
+					t.Errorf("ReadTile(%d, 0, 0): %v", level, err)
+				}
+			}
+		})
+	}
+}
+
+// A 16-bit COG with a GDAL internal mask ends its IFD chain with the smallest
+// overview's 1-bit mask; the auto rescale scan must use the overview instead.
+func TestValueRangeSkipsMaskIFDs(t *testing.T) {
+	const tileBytes = 16 * 16 * 2
+	ov := make([]byte, tileBytes)
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			binary.LittleEndian.PutUint16(ov[(y*16+x)*2:], uint16(1000+y*8+x))
+		}
+	}
+	blobs := [][]byte{make([]byte, tileBytes), ov, make([]byte, 32)}
+	data := buildTIFF(false, blobs, func(offs []uint64) [][]tagEntry {
+		img, small, mask := offs[0], offs[1], offs[2]
+		maskIFD := func(w int, subfile uint64) []tagEntry {
+			return imageEntries(w, w, 16, 16, 1, []uint64{mask}, []uint64{32},
+				entry(tagNewSubfileType, dtLong, subfile), entry(tagPhotometric, dtShort, 4))
+		}
+		// GDAL order: image, mask, then each overview followed by its mask.
+		return [][]tagEntry{
+			imageEntries(16, 16, 16, 16, 16, []uint64{img}, []uint64{tileBytes}),
+			maskIFD(16, 4),
+			imageEntries(8, 8, 16, 16, 16, []uint64{small}, []uint64{tileBytes},
+				entry(tagNewSubfileType, dtLong, 1)),
+			maskIFD(8, 5),
+		}
+	})
+	r, err := openCrafted(t, "cog16mask.tif", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if got := r.IFDCount(); got != 2 {
+		t.Fatalf("IFDCount() = %d, want 2", got)
+	}
+	lo, hi, _, err := r.ValueRange()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lo != 1000 || hi != 1063 {
+		t.Errorf("ValueRange() = [%v, %v], want [1000, 1063]", lo, hi)
+	}
+}

@@ -168,6 +168,7 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 		return nil, fmt.Errorf("%s: no IFDs found", path)
 	}
 
+	ifds = imageIFDs(ifds)
 	first := &ifds[0]
 	if first.Width == 0 || first.Height == 0 {
 		src.Close()
@@ -185,10 +186,7 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 		}
 	}
 
-	switch first.Compression {
-	case 1, 5, 7, 8, 32946, 50000:
-		// Supported: None, LZW, JPEG, Deflate, ZSTD
-	default:
+	if !supportedCompression(first.Compression) {
 		src.Close()
 		return nil, fmt.Errorf("%s: unsupported compression type %d", path, first.Compression)
 	}
@@ -333,12 +331,14 @@ func (r *Reader) PixelSize() float64 {
 	return r.geo.PixelSizeX
 }
 
-// NumOverviews returns the number of overview levels (IFDs beyond the first).
+// NumOverviews returns the number of overview levels: the IFDs beyond the
+// first, not counting masks and other IFDs that are not overviews.
 func (r *Reader) NumOverviews() int {
 	return len(r.ifds) - 1
 }
 
-// IFDCount returns the total number of IFDs.
+// IFDCount returns the number of levels: the full-resolution IFD plus its
+// overviews.
 func (r *Reader) IFDCount() int {
 	return len(r.ifds)
 }
