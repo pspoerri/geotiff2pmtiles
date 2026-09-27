@@ -1,6 +1,7 @@
 package cog
 
 import (
+	"encoding/binary"
 	"image"
 	"image/color"
 	"testing"
@@ -91,5 +92,41 @@ func BenchmarkTileCache_PutDuplicate(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		cache.Put(1, 0, 5, 5, img)
+	}
+}
+
+// --- decodeRawTile benchmarks ---
+
+// BenchmarkDecodeRawTile times the per-pixel decode of one 512x512 source
+// tile for the common sample layouts: the 8-bit legacy path, 8-bit RGB, and
+// 16-bit and bit-packed 15-bit gray with a linear rescale.
+func BenchmarkDecodeRawTile(b *testing.B) {
+	const w, h = 512, 512
+	for _, bc := range []struct {
+		name      string
+		bits, spp int
+		cfg       BandConfig
+	}{
+		{"8Gray", 8, 1, BandConfig{}},
+		{"8RGB", 8, 3, BandConfig{}},
+		{"16Gray", 16, 1, BandConfig{Rescale: RescaleLinear, RescaleMax: 10000}},
+		{"15Packed", 15, 1, BandConfig{Rescale: RescaleLinear, RescaleMax: 10000}},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			data := make([]byte, (w*bc.spp*bc.bits+7)/8*h)
+			for i := range data {
+				data[i] = byte(i * 7)
+			}
+			ifd := IFD{TileWidth: w, TileHeight: h, SamplesPerPixel: uint16(bc.spp),
+				BitsPerSample: []uint16{uint16(bc.bits)}, SampleFormat: []uint16{1}}
+			r := &Reader{ifds: []IFD{ifd}, bo: binary.LittleEndian, bandCfg: bc.cfg}
+			b.SetBytes(int64(len(data)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := r.decodeRawTile(&r.ifds[0], data); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

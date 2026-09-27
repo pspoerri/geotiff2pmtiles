@@ -823,19 +823,28 @@ func (r *Reader) decodeRawFloat32Tile(ifd *IFD, data []byte) ([]float32, int, in
 // the equivalent escape hatch for float32 data; this is the integer one.
 //
 // Samples come back chunky, exactly as they are stored: sample s of pixel i is
-// at samples[i*spp+s]. 8-bit sources are widened rather than rejected, so a
-// caller can read 8- and 16-bit assets through one path.
+// at samples[i*spp+s]. 8-bit and bit-packed sources are widened rather than
+// rejected, so a caller can read every depth up to 16 bits through one path.
 //
 // Two things are deliberately left to the caller. Signed data (SampleFormat 2)
-// is returned as raw bits, to be reinterpreted with int16 -- unlike
-// decodeRawTile, which folds it into unsigned space via sampleBias so its
-// rescaler can order it; a raw accessor that silently shifted values by 32768
-// would be a trap. And nodata is not applied, because for reflectance the
-// sentinel has to be tested before any offset is subtracted.
+// is returned as two's complement sign-extended to 16 bits, so int16(v) is the
+// value at every depth, 8 and 15 bits included -- unlike decodeRawTile, which
+// folds it into unsigned space via sampleBias so its rescaler can order it; a
+// raw accessor that silently shifted values by 32768 would be a trap. And
+// nodata is not applied, because for reflectance the sentinel has to be
+// tested before any offset is subtracted. (The rows of a sparse strip, which
+// hold no samples at all, read as the nodata value, as GDAL reads them.)
 //
 // An empty tile returns nil samples with the dimensions still filled in, as
 // ReadFloatTile does.
 func (r *Reader) ReadUint16Tile(level, col, row int) (samples []uint16, w, h, spp int, err error) {
+	if level < 0 || level >= len(r.ifds) {
+		return nil, 0, 0, 0, fmt.Errorf("invalid IFD level %d (have %d)", level, len(r.ifds))
+	}
+	// Checked before the read, so that an empty tile cannot hide the format.
+	if err := r.checkUint16(&r.ifds[level]); err != nil {
+		return nil, 0, 0, 0, err
+	}
 	data, ifd, err := r.readTileRaw(level, col, row)
 	if err != nil {
 		return nil, 0, 0, 0, err
@@ -851,69 +860,12 @@ func (r *Reader) ReadUint16Tile(level, col, row int) (samples []uint16, w, h, sp
 		return nil, w, h, spp, nil // empty tile
 	}
 
-	if len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 3 {
-		return nil, 0, 0, 0, fmt.Errorf("tile is IEEE float; use ReadFloatTile")
-	}
-	// readTileRaw returns JPEG payloads undecoded, and interleaves
-	// planar-separate *strips* into chunky order but not planar-separate
-	// tiles. Either would be misread as chunky samples here.
-	if ifd.Compression == 7 {
-		return nil, 0, 0, 0, fmt.Errorf("JPEG-compressed tiles have no raw integer samples")
-	}
-	if ifd.PlanarConfig == 2 && r.strip == nil && spp > 1 {
-		return nil, 0, 0, 0, fmt.Errorf("planar-separate (PlanarConfiguration=2) tiles are not supported")
-	}
-
-	bits := ifd.bitsPerSample()
-	if bits < 1 || bits > 16 {
-		return nil, 0, 0, 0, fmt.Errorf("unsupported bits per sample: %d", bits)
-	}
-
-	count := w * h * spp
-	samples = make([]uint16, count)
-
-	// A depth that is not a multiple of eight may be stored either bit-packed
-	// or padded out to whole bytes, and the tag does not say which. The tile
-	// length does: Planetary Computer's Sentinel-2 L2A reflectance is
-	// BitsPerSample=15 and its 512x512 tiles are exactly 512*512*15/8 bytes,
-	// so it is genuinely packed. Rows in a packed tile start on a byte
-	// boundary, per the TIFF spec.
-	rowBytes := (w*spp*bits + 7) / 8
-	packed := rowBytes * h
-	padded := count * ((bits + 7) / 8)
-
 	// A strip TIFF's last virtual tile is legitimately short when the height
 	// is not a multiple of the tile height; the missing rows are outside the
-	// image and are never sampled.
-	if len(data) < min(packed, padded) && r.strip == nil {
-		return nil, 0, 0, 0, fmt.Errorf("tile data too short: got %d, need %d", len(data), min(packed, padded))
-	}
-
-	switch {
-	case bits%8 == 0:
-		// Whole-byte samples in the file's byte order (never a bit stream).
-		bps := bits / 8
-		n := min(count, len(data)/bps)
-		for i := 0; i < n; i++ {
-			if bps == 1 {
-				samples[i] = uint16(data[i])
-			} else {
-				samples[i] = r.bo.Uint16(data[i*2 : i*2+2])
-			}
-		}
-	case bits > 8 && len(data) >= padded && padded > packed:
-		// 9-15 bits, but long enough to be padded to 16 rather than packed.
-		// A tie (narrow rows) goes to packed, as the spec requires; sub-byte
-		// depths are always packed.
-		for i := 0; i < count; i++ {
-			samples[i] = r.bo.Uint16(data[i*2 : i*2+2])
-		}
-	case len(data) >= packed:
-		unpackBits(samples, data, w*spp, h, bits, rowBytes)
-	default:
-		// Short last strip tile, packed.
-		rows := len(data) / rowBytes
-		unpackBits(samples, data, w*spp, rows, bits, rowBytes)
+	// image and are never sampled. A tile is never short.
+	samples, rows := r.samples16(ifd, data, w, h, spp)
+	if rows < h && r.strip == nil {
+		return nil, 0, 0, 0, fmt.Errorf("tile data too short: %d bytes hold %d of %d rows", len(data), rows, h)
 	}
 	if r.strip != nil && level == 0 {
 		// Sparse strips read as the file's nodata value, as GDAL reads them.
@@ -926,6 +878,70 @@ func (r *Reader) ReadUint16Tile(level, col, row int) (samples []uint16, w, h, sp
 		}
 	}
 	return samples, w, h, spp, nil
+}
+
+// checkUint16 reports why ReadUint16Tile cannot read the samples of ifd, if
+// it cannot. readTileRaw returns JPEG payloads undecoded, and interleaves
+// planar-separate *strips* into chunky order but not planar-separate tiles;
+// either would be misread as chunky samples.
+func (r *Reader) checkUint16(ifd *IFD) error {
+	switch bits := ifd.bitsPerSample(); {
+	case len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 3:
+		return fmt.Errorf("tile is IEEE float; use ReadFloatTile")
+	case ifd.Compression == 7:
+		return fmt.Errorf("JPEG-compressed tiles have no raw integer samples")
+	case ifd.PlanarConfig == 2 && r.strip == nil && ifd.SamplesPerPixel > 1:
+		return fmt.Errorf("planar-separate (PlanarConfiguration=2) tiles are not supported")
+	case bits < 1 || bits > 16:
+		return fmt.Errorf("unsupported bits per sample: %d", bits)
+	}
+	return nil
+}
+
+// samples16 decodes the w×h×spp samples of a tile 1..16 bits deep to one
+// uint16 each. It is the layout decision ReadUint16Tile and decodeRawTile
+// share, so that the two read every file alike.
+//
+// Whole-byte depths are read in the file's byte order. Other depths are
+// bit-packed with each row starting on a byte boundary, as the TIFF spec says
+// and libtiff and GDAL write them: Planetary Computer's Sentinel-2 L2A
+// reflectance is BitsPerSample=15 and its 512x512 tiles are exactly
+// 512*512*15/8 bytes. Some writers pad 9..15-bit samples to 16-bit words
+// instead; the tag does not say which, but the tile length does. A tie (rows
+// too narrow for the two lengths to differ) goes to packed, as the spec
+// requires, and sub-byte depths are always packed.
+//
+// Signed samples narrower than 16 bits are sign-extended, so int16(v) is the
+// value at every depth. A short buffer (the last virtual tile of a strip
+// TIFF) decodes the whole rows present; rows says how many.
+func (r *Reader) samples16(ifd *IFD, data []byte, w, h, spp int) (samples []uint16, rows int) {
+	bits := ifd.bitsPerSample()
+	perRow := w * spp
+	packedRow := (perRow*bits + 7) / 8
+	samples = make([]uint16, perRow*h)
+	switch {
+	case bits == 8:
+		rows = min(h, len(data)/max(1, perRow))
+		for i := range samples[:rows*perRow] {
+			samples[i] = uint16(data[i])
+		}
+	case bits == 16 || bits > 8 && len(data) >= 2*perRow*h && 2*perRow > packedRow:
+		// Whole 16-bit words: 16-bit samples, or 9..15 bits padded to 16.
+		rows = min(h, len(data)/max(1, 2*perRow))
+		for i := range samples[:rows*perRow] {
+			samples[i] = r.bo.Uint16(data[2*i:])
+		}
+	default:
+		rows = min(h, len(data)/max(1, packedRow))
+		unpackBits(samples, data, perRow, rows, bits, packedRow)
+	}
+	if bits < 16 && len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 2 {
+		shift := 16 - bits
+		for i, v := range samples[:rows*perRow] {
+			samples[i] = uint16(int16(v<<shift) >> shift)
+		}
+	}
+	return samples, rows
 }
 
 // nodata16 returns the GDAL nodata value as ReadUint16Tile returns samples
@@ -946,8 +962,8 @@ func (r *Reader) nodata16(ifd *IFD) (uint16, bool) {
 //
 // TIFF packs samples most-significant bit first and restarts each row on a
 // byte boundary, independent of the file's byte order -- that governs whole
-// words, not the bit stream. FillOrder 2 (LSB first) is vanishingly rare and
-// is not handled.
+// words, not the bit stream. FillOrder 2 (LSB first) is vanishingly rare; the
+// tag is not read, so such a file would decode wrong.
 //
 // A sample of at most 16 bits starting at most 7 bits into a byte spans at
 // most 23 bits, so it always lies inside a 32-bit window read from the byte
@@ -988,10 +1004,9 @@ func unpackBits(dst []uint16, data []byte, perRow, rows, bits, rowBytes int) {
 			off += bits
 		}
 
-		// Tail, where a 32-bit read would run past the buffer: assemble the
-		// window byte by byte, treating anything past the end as zero. The
-		// callers size rows so this only arises on a truncated final strip,
-		// whose samples lie outside the image and are never read.
+		// Tail: the last few samples of the last row (or of a truncated
+		// strip), where a 32-bit read would run past the buffer. Assemble the
+		// window byte by byte, treating bytes past the end as zero.
 		for i := safe; i < perRow; i++ {
 			bo := base + off>>3
 			var w uint32
@@ -1423,41 +1438,24 @@ func grayBytes(img image.Image, tw, th int) []uint8 {
 }
 
 // decodeRawTile decodes an uncompressed tile.
-// Supports 8-bit and 16-bit samples, band reordering, alpha band selection, and rescaling
-// via the reader's BandConfig. For single-band data, pixels matching the GDAL nodata value
+// Supports 1..16-bit samples (bit-packed below 8 bits and at 9..15, see samples16), band
+// reordering, alpha band selection, and rescaling via the reader's BandConfig. For single-band data, pixels matching the GDAL nodata value
 // are set to alpha=0 (transparent) so downstream code treats them as empty.
 // Zero-value BandConfig produces identical behavior to the legacy code path.
 func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	w := int(ifd.TileWidth)
 	h := int(ifd.TileHeight)
 	spp := int(ifd.SamplesPerPixel)
-	bps := ifd.bytesPerSample() // 1 for 8-bit, 2 for 16-bit
 	bits := ifd.bitsPerSample()
-	// A depth that is not a multiple of eight is bit-packed, so no whole
-	// number of bytes addresses a sample and bytesPerSample is meaningless
-	// (15 truncates to 1, 4 to 0). Unpack the tile once and index samples
-	// directly; everything below then works in sample indices rather than
-	// byte offsets, which is the same arithmetic in the byte-aligned case.
-	packed := bits%8 != 0
 	// Only 9..16 bits are read as wide samples. Deeper aligned types (24, 32)
 	// keep their previous single-byte behaviour rather than being silently
 	// reinterpreted here.
 	is16 := bits > 8 && bits <= 16
-
-	var unpacked []uint16
-	var availPixels int
-	if packed {
-		rowBytes := (w*spp*bits + 7) / 8
-		rows := h
-		if avail := len(data) / rowBytes; avail < rows {
-			rows = avail
-		}
-		unpacked = make([]uint16, w*h*spp)
-		unpackBits(unpacked, data, w*spp, rows, bits, rowBytes)
-		availPixels = rows * w
-	} else if pixelBytes := spp * bps; pixelBytes > 0 {
-		availPixels = len(data) / pixelBytes
+	buf, s16, bps, avail, err := r.pixelSamples(ifd, data, w, h, spp)
+	if err != nil {
+		return nil, err
 	}
+	pixelBytes := spp * bps
 
 	// Signed 16-bit: samples, nodata and the rescale range all move into the
 	// biased unsigned space (see signBias16).
@@ -1551,26 +1549,27 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 		rescaleMin = 0
 		rescaleMax = 65535
 	}
-	rescale := buildRescaler(rescaleMode, rescaleMin+fbias, rescaleMax+fbias)
-
-	// readSample reads one sample, given the index of the pixel's first
-	// sample and a 0-indexed band.
-	readSample := func(base, band int) uint16 {
-		i := base + band
-		if packed {
-			if i >= len(unpacked) {
-				return 0
-			}
-			return unpacked[i] ^ uint16(bias)
+	rescaler := buildRescaler(rescaleMode, rescaleMin+fbias, rescaleMax+fbias)
+	// The identity (8-bit, no rescale: the CLI's RGB path) is inlined rather
+	// than called: every call spills the loop's live registers.
+	identity := rescaleMode == RescaleNone
+	rescale := func(v uint16) uint8 {
+		if identity {
+			return uint8(v)
 		}
-		off := i * bps
-		if off+bps > len(data) {
+		return rescaler(v)
+	}
+
+	// readSample reads one sample from the pixel data at the given 0-indexed band.
+	readSample := func(pixelOff, band int) uint16 {
+		off := pixelOff + band*bps
+		if off+bps > avail {
 			return 0
 		}
 		if is16 {
-			return r.bo.Uint16(data[off:off+2]) ^ uint16(bias)
+			return s16[off] ^ uint16(bias)
 		}
-		return uint16(data[off])
+		return uint16(buf[off])
 	}
 
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
@@ -1578,18 +1577,17 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
-			idx := y*w + x
-			if idx >= availPixels {
+			pixelOff := (y*w + x) * pixelBytes
+			if pixelOff+pixelBytes > avail {
 				break
 			}
-			base := idx * spp
-			pixIdx := idx * 4
+			pixIdx := (y*w + x) * 4
 
 			if useLegacyNodata {
 				// Legacy path for 8-bit spp≤2 with default config.
 				switch spp {
 				case 1:
-					v := uint8(readSample(base, 0))
+					v := buf[pixelOff]
 					pix[pixIdx+0] = v
 					pix[pixIdx+1] = v
 					pix[pixIdx+2] = v
@@ -1599,11 +1597,11 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 						pix[pixIdx+3] = 255
 					}
 				case 2:
-					v := uint8(readSample(base, 0))
+					v := buf[pixelOff]
 					pix[pixIdx+0] = v
 					pix[pixIdx+1] = v
 					pix[pixIdx+2] = v
-					a := uint8(readSample(base, 1))
+					a := buf[pixelOff+1]
 					if hasNodata && v == nodataVal {
 						a = 0
 					}
@@ -1615,13 +1613,13 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			// General path: band reordering + rescaling.
 			var rV, gV, bV uint16
 			if bandR < spp {
-				rV = readSample(base, bandR)
+				rV = readSample(pixelOff, bandR)
 			}
 			if bandG < spp {
-				gV = readSample(base, bandG)
+				gV = readSample(pixelOff, bandG)
 			}
 			if bandB < spp {
-				bV = readSample(base, bandB)
+				bV = readSample(pixelOff, bandB)
 			}
 
 			// Nodata check: if all file bands equal the nodata value, emit transparent.
@@ -1630,7 +1628,7 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			if genHasNodata && effectiveAlpha < 0 {
 				isNodata := true
 				for b := 0; b < spp; b++ {
-					s := readSample(base, b)
+					s := readSample(pixelOff, b)
 					var diff uint16
 					if s >= genNodataU16 {
 						diff = s - genNodataU16
@@ -1654,7 +1652,7 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			// Alpha.
 			var a uint8 = 255
 			if effectiveAlpha >= 0 && effectiveAlpha < spp {
-				rawAlpha := readSample(base, effectiveAlpha)
+				rawAlpha := readSample(pixelOff, effectiveAlpha)
 				if rawAlpha == 0 {
 					// Transparent source pixel: leave as alpha=0.
 					pix[pixIdx+0] = 0
@@ -1676,6 +1674,33 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 		}
 	}
 	return img, nil
+}
+
+// pixelSamples lays a tile out for decodeRawTile's per-pixel loop, which
+// indexes whole samples at offsets of bps units, avail of them readable:
+// bytes of buf, or for 9..16-bit depths words of s16.
+//
+// Whole-byte depths are used as they are. 9..16-bit samples are decoded once
+// by samples16, the layout ReadUint16Tile reads (bit-packed or padded,
+// sign-extended), and sub-byte samples the same way, narrowed to a byte each
+// for the 8-bit path. The loop thus stays the byte-aligned one, with no
+// per-sample layout branch.
+func (r *Reader) pixelSamples(ifd *IFD, data []byte, w, h, spp int) (buf []byte, s16 []uint16, bps, avail int, err error) {
+	switch bits := ifd.bitsPerSample(); {
+	case bits < 1 || bits > 16 && bits%8 != 0:
+		return nil, nil, 0, 0, fmt.Errorf("unsupported bits per sample: %d", bits)
+	case bits > 8 && bits <= 16:
+		s16, rows := r.samples16(ifd, data, w, h, spp)
+		return nil, s16, 1, rows * w * spp, nil
+	case bits < 8:
+		s, rows := r.samples16(ifd, data, w, h, spp)
+		buf = make([]byte, rows*w*spp)
+		for i := range buf {
+			buf[i] = byte(s[i])
+		}
+		return buf, nil, 1, len(buf), nil
+	}
+	return data, nil, ifd.bytesPerSample(), len(data), nil
 }
 
 // ReadPixelRGBA reads a single pixel at the given coordinates from level 0.
