@@ -743,7 +743,7 @@ return an explicit "not supported" error rather than silently decoding wrong dat
 (the previous behaviour silently returned plane 0 as R=G=B). Planar-separate *strips*
 are the opposite case — see Strip-to-tile promotion.
 
-**Output-format auto-switch**: when `--nodata` is active, JPEG output cannot carry
+**Output-format auto-switch**: when nodata or a GDAL internal mask is active, JPEG output cannot carry
 alpha, so transparent pixels would be baked back to black in the encoded tile. If
 the user did not explicitly set `--format`, the CLI switches the default `jpeg` →
 `webp`. If the user explicitly chose `--format=jpeg`, it warns and proceeds.

@@ -83,7 +83,7 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--source-epsg` | `0` (from the files) | EPSG code of the input CRS for every input file, e.g. `32632`, `25832` or `21781`. Overrides the GeoTIFF keys and the guess made for world-file inputs |
 | `--bands`       | `auto`        | 1-indexed band numbers for R,G,B, e.g. `4,1,2` for NIR-R-G false color. Auto: `1,2,3`, or gray from band 1 for 1-2 band input. Bands beyond a file's band count are an error |
 | `--alpha-band`  | `auto`        | Alpha band: `auto` (band 4 of 8-bit input with 4+ bands), `none`, or a 1-indexed band number |
-| `--rescale`     | `auto`        | Rescale mode: `auto`, `linear`, `log`, `none`. Auto: a GDAL band-description preset if present, else linear over `--rescale-range` for 9-16 bit input, none for 8-bit. `none` maps the full range of the sample type (0..65535, or -32768..32767 for Int16) to 0..255. Ignored for `terrarium` |
+| `--rescale`     | `auto`        | Rescale mode: `auto`, `linear`, `log`, `none`. Auto: a GDAL band-description preset if present, else linear over `--rescale-range` for 9-16 bit input, none for 8-bit. `none` maps the full range of the sample type (0..2^bits-1, e.g. 0..65535, or 0..32767 for 15-bit; -32768..32767 for Int16) to 0..255. Ignored for `terrarium` |
 | `--rescale-range` | auto        | Input value range `min,max` (min < max). Auto: the min/max over all files of the bands selected by `--bands` (never the alpha band), from GDAL `STATISTICS_*` metadata when every selected band has them, else from up to 64 tiles of the coarsest overview. Files without usable values (e.g. all-nodata ocean tiles) are skipped. The selected range is logged |
 | `--nodata`      | from file     | Pixels whose bands all equal this value are transparent. Image output: an integer in [-32768, 65535]; default: the first file's GDAL_NODATA tag. `terrarium`: any float, overriding every file's GDAL_NODATA tag (default: each file's own tag) |
 | `--nodata-tolerance` | `0`      | Per-band tolerance for `--nodata` matching. Use 4–8 for borders that come from lossy JPEG sources, where the strict nodata value is smeared by compression. Image output only |
@@ -185,7 +185,7 @@ Historic JPEG-compressed scan with a black border (output auto-switches to WebP 
 ```bash
 ./geotiff2pmtiles --nodata 0 --nodata-tolerance 8 \
   scan.tif output.pmtiles
-# Nodata is active; using webp so transparency is preserved (override with --format=jpeg).
+# Nodata or an internal mask is active; using webp so transparency is preserved (override with --format=jpeg).
 ```
 
 Same source but the boundary still shows JPEG-smear speckles — flood-fill from the image edge with a wide tolerance removes the fringe while preserving interior dark detail:
@@ -352,7 +352,7 @@ Keep only z10-z14 (tiles are copied, not re-encoded):
 | `coginfo [-raw] <file.tif>` | COG metadata: EPSG, size, bounds, levels, GDAL metadata; test-reads a tile of every level |
 | `pmheader --show <file.pmtiles>` | Show the header and metadata |
 | `pmheader [flags] <in.pmtiles> [out.pmtiles]` | Patch header fields and metadata without touching tile data (uncompressed or gzip-compressed directories, leaves at any depth); `--rebuild-dirs` fixes an oversized root directory. **Without an output path the input is edited in place** |
-| `checkpmtiles <file-or-URL>` | Validate a PMTiles v3 archive: header, every directory, zoom range and tile count (exit code 1 on error) |
+| `checkpmtiles <file-or-URL>` | Validate a PMTiles v3 archive: header, every directory, zoom range (min ≤ max, every tile inside it) and tile count (exit code 1 on error) |
 
 `make build-all` builds geotiff2pmtiles, pmtransform, checkpmtiles and pmheader into
 `dist/`; `coginfo` runs with `go run ./cmd/coginfo/` and is also attached to each release.
