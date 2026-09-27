@@ -467,12 +467,12 @@ func lanczosSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 		}
 
 		// Try YCbCr fast path (most common for JPEG COGs).
-		if ycbcr, ok := tile.(*image.YCbCr); ok {
+		if ycbcr, ok := tile.(*image.YCbCr); ok && fastChroma(ycbcr.SubsampleRatio) {
 			return lanczosAccumYCbCr(ycbcr, wxArr, wyArr, localX, localY, luts)
 		}
 
 		// Try NYCbCrA fast path (JPEG with alpha).
-		if nycbcra, ok := tile.(*image.NYCbCrA); ok {
+		if nycbcra, ok := tile.(*image.NYCbCrA); ok && fastChroma(nycbcra.SubsampleRatio) {
 			return lanczosAccumNYCbCrA(nycbcra, wxArr, wyArr, localX, localY, luts)
 		}
 
@@ -548,6 +548,15 @@ func lanczosSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
 	}
 	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+}
+
+// fastChroma reports whether the YCbCr/NYCbCrA fast paths, which index chroma
+// for 4:4:4, 4:2:2 and 4:2:0 only, can handle ratio. Other ratios (4:4:0,
+// 4:1:1, 4:1:0) take the generic path, which uses COffset.
+func fastChroma(ratio image.YCbCrSubsampleRatio) bool {
+	return ratio == image.YCbCrSubsampleRatio444 ||
+		ratio == image.YCbCrSubsampleRatio422 ||
+		ratio == image.YCbCrSubsampleRatio420
 }
 
 // lanczosAccumYCbCr is the hot inner loop for Lanczos-3 on YCbCr tiles.
@@ -849,10 +858,10 @@ func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 		if err != nil {
 			return 0, 0, 0, 0, err
 		}
-		if ycbcr, ok := tile.(*image.YCbCr); ok {
+		if ycbcr, ok := tile.(*image.YCbCr); ok && fastChroma(ycbcr.SubsampleRatio) {
 			return bicubicAccumYCbCr(ycbcr, wxArr, wyArr, localX, localY, luts)
 		}
-		if nycbcra, ok := tile.(*image.NYCbCrA); ok {
+		if nycbcra, ok := tile.(*image.NYCbCrA); ok && fastChroma(nycbcra.SubsampleRatio) {
 			return bicubicAccumNYCbCrA(nycbcra, wxArr, wyArr, localX, localY, luts)
 		}
 		if rgba, ok := tile.(*image.RGBA); ok {
