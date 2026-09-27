@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
@@ -146,29 +147,68 @@ func openTestSources(t *testing.T, paths ...string) []*cog.Reader {
 	return srcs
 }
 
-// terrariumElevation decodes a Terrarium pixel.
+func mustSourceInfos(t *testing.T, srcs []*cog.Reader) []sourceInfo {
+	t.Helper()
+	infos, err := buildSourceInfos(srcs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return infos
+}
+
+// redValue and terrariumElevation decode an output pixel for checkFeature.
+func redValue(img *image.RGBA, x, y int) float64 { return float64(img.Pix[img.PixOffset(x, y)]) }
+
 func terrariumElevation(img *image.RGBA, x, y int) float64 {
 	i := img.PixOffset(x, y)
 	return float64(img.Pix[i])*256 + float64(img.Pix[i+1]) + float64(img.Pix[i+2])/256 - 32768
 }
 
-// responseCentroid returns the centroid, in continuous tile pixel
-// coordinates, of value-minus-background over the pixels that hold data.
-func responseCentroid(img *image.RGBA, value func(x, y int) float64, background float64) (cx, cy float64) {
+// checkFeature checks that the centroid of value-minus-background over the
+// pixels in area that hold data lies within tol of (wantX, wantY), in
+// continuous tile pixel coordinates.
+func checkFeature(t *testing.T, name string, img *image.RGBA, area image.Rectangle,
+	value func(*image.RGBA, int, int) float64, background, wantX, wantY, tol float64) {
+	t.Helper()
+	if img == nil {
+		t.Errorf("%s: no data", name)
+		return
+	}
 	var sum, sx, sy float64
-	b := img.Bounds()
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
+	for y := area.Min.Y; y < area.Max.Y; y++ {
+		for x := area.Min.X; x < area.Max.X; x++ {
 			if img.Pix[img.PixOffset(x, y)+3] == 0 {
 				continue
 			}
-			w := value(x, y) - background
+			w := value(img, x, y) - background
 			sum += w
 			sx += w * (float64(x) + 0.5)
 			sy += w * (float64(y) + 0.5)
 		}
 	}
-	return sx / sum, sy / sum
+	if gotX, gotY := sx/sum, sy/sum; !(math.Abs(gotX-wantX) <= tol && math.Abs(gotY-wantY) <= tol) {
+		t.Errorf("%s: feature at (%.3f, %.3f), want (%.3f, %.3f)", name, gotX, gotY, wantX, wantY)
+	}
+}
+
+// featureRGB and featureFloat are sources with background bg and one pixel
+// (fi, fj) of value fg.
+func featureRGB(fi, fj int, bg, fg uint8) func(x, y int) [3]uint8 {
+	return func(x, y int) [3]uint8 {
+		if x == fi && y == fj {
+			return [3]uint8{fg, fg, fg}
+		}
+		return [3]uint8{bg, bg, bg}
+	}
+}
+
+func featureFloat(fi, fj int, bg, fg float32) func(x, y int) float32 {
+	return func(x, y int) float32 {
+		if x == fi && y == fj {
+			return fg
+		}
+		return bg
+	}
 }
 
 var allResamplings = []struct {
@@ -207,48 +247,92 @@ func TestFeatureLandsAtGDALPosition(t *testing.T) {
 		{"area", 1, 0.5},
 		{"point", 2, 0},
 	} {
-		keys := []uint16{1024, 1, 1025, rasterType.value, 3072, 3857}
-		rgbPath := writeTestGeoTIFF(t, testGeoTIFF{W: 32, H: 32, TieX: tieX, TieY: tieY, Scale: scale, GeoKeys: keys,
-			RGB: func(x, y int) [3]uint8 {
-				if x == fi && y == fj {
-					return [3]uint8{fg, fg, fg}
-				}
-				return [3]uint8{bg, bg, bg}
-			}})
-		floatPath := writeTestGeoTIFF(t, testGeoTIFF{W: 32, H: 32, TieX: tieX, TieY: tieY, Scale: scale, GeoKeys: keys,
-			Float: func(x, y int) float32 {
-				if x == fi && y == fj {
-					return fg
-				}
-				return bg
-			}})
+		g := testGeoTIFF{W: 32, H: 32, TieX: tieX, TieY: tieY, Scale: scale,
+			GeoKeys: []uint16{1024, 1, 1025, rasterType.value, 3072, 3857}}
+		g.RGB = featureRGB(fi, fj, bg, fg)
+		rgbPath := writeTestGeoTIFF(t, g)
+		g.RGB, g.Float = nil, featureFloat(fi, fj, bg, fg)
+		floatPath := writeTestGeoTIFF(t, g)
 		srcs := openTestSources(t, rgbPath, floatPath)
-		rgbInfos := buildSourceInfos(srcs[:1])
-		floatInfos := buildSourceInfos(srcs[1:])
+		rgbInfos := mustSourceInfos(t, srcs[:1])
+		floatInfos := mustSourceInfos(t, srcs[1:])
 
 		lon, lat := merc.ToWGS84(tieX+(fi+rasterType.off)*scale, tieY-(fj+rasterType.off)*scale)
 		for _, z := range []int{z0, z0 + 1} {
 			tx, ty := coord.LonLatToTile(lon, lat, z)
 			wantX, wantY := coord.TilePixelCoords(lon, lat, z, tx, ty, 256)
 			for _, rs := range allResamplings {
-				img := renderTile(z, tx, ty, 256, rgbInfos, merc, cog.NewTileCache(16), rs.mode, nil)
-				if img == nil {
-					t.Fatalf("%s z%d %s rgb: no data", rasterType.name, z, rs.name)
-				}
-				gotX, gotY := responseCentroid(img, func(x, y int) float64 { return float64(img.Pix[img.PixOffset(x, y)]) }, bg)
-				if math.Abs(gotX-wantX) > 0.05 || math.Abs(gotY-wantY) > 0.05 {
-					t.Errorf("%s z%d %s rgb: feature at (%.3f, %.3f), want (%.3f, %.3f)", rasterType.name, z, rs.name, gotX, gotY, wantX, wantY)
-				}
-
-				img = renderTileTerrarium(z, tx, ty, 256, floatInfos, merc, cog.NewFloatTileCache(16), rs.mode)
-				if img == nil {
-					t.Fatalf("%s z%d %s float: no data", rasterType.name, z, rs.name)
-				}
-				gotX, gotY = responseCentroid(img, func(x, y int) float64 { return terrariumElevation(img, x, y) }, bg)
-				if math.Abs(gotX-wantX) > 0.05 || math.Abs(gotY-wantY) > 0.05 {
-					t.Errorf("%s z%d %s float: feature at (%.3f, %.3f), want (%.3f, %.3f)", rasterType.name, z, rs.name, gotX, gotY, wantX, wantY)
-				}
+				name := fmt.Sprintf("%s z%d %s", rasterType.name, z, rs.name)
+				whole := image.Rect(0, 0, 256, 256)
+				img := renderTile(z, tx, ty, 256, rgbInfos, cog.NewTileCache(16), rs.mode, nil)
+				checkFeature(t, name+" rgb", img, whole, redValue, bg, wantX, wantY, 0.05)
+				img = renderTileTerrarium(z, tx, ty, 256, floatInfos, cog.NewFloatTileCache(16), rs.mode)
+				checkFeature(t, name+" float", img, whole, terrariumElevation, bg, wantX, wantY, 0.05)
 			}
+		}
+	}
+}
+
+// Inputs in different CRSs, here UTM zones 32 and 33 either side of 12°E like
+// neighbouring Sentinel-2 tiles, are each reprojected with their own CRS.
+func TestMixedCRSSourcesLandInPlace(t *testing.T) {
+	const (
+		z      = 14
+		bg, fg = 40, 200
+	)
+	tx, ty := coord.LonLatToTile(12.008, 47, z)
+	minLon, minLat, maxLon, maxLat := coord.TileBounds(z, tx, ty)
+	lat := (minLat + maxLat) / 2
+	scale := 4 * coord.ResolutionAtLat(lat, z, 256) // ~4 output pixels per source pixel
+	features := []struct {
+		epsg int
+		lon  float64
+	}{
+		{32632, minLon + (maxLon-minLon)/4},
+		{32633, minLon + (maxLon-minLon)*3/4},
+	}
+
+	var rgbPaths, floatPaths []string
+	for _, f := range features {
+		// Centre of pixel (16,16) on the feature.
+		x, y := coord.ForEPSG(f.epsg).FromWGS84(f.lon, lat)
+		g := testGeoTIFF{W: 32, H: 32, TieX: x - 16.5*scale, TieY: y + 16.5*scale, Scale: scale,
+			GeoKeys: []uint16{1024, 1, 3072, uint16(f.epsg)}}
+		g.RGB = featureRGB(16, 16, bg, fg)
+		rgbPaths = append(rgbPaths, writeTestGeoTIFF(t, g))
+		g.RGB, g.Float = nil, featureFloat(16, 16, bg, fg)
+		floatPaths = append(floatPaths, writeTestGeoTIFF(t, g))
+	}
+	srcs := openTestSources(t, append(rgbPaths, floatPaths...)...)
+	rgbInfos := mustSourceInfos(t, srcs[:2])
+	floatInfos := mustSourceInfos(t, srcs[2:])
+
+	for _, rs := range allResamplings {
+		rgb := renderTile(z, tx, ty, 256, rgbInfos, cog.NewTileCache(16), rs.mode, nil)
+		dem := renderTileTerrarium(z, tx, ty, 256, floatInfos, cog.NewFloatTileCache(16), rs.mode)
+		for _, f := range features {
+			wantX, wantY := coord.TilePixelCoords(f.lon, lat, z, tx, ty, 256)
+			area := image.Rect(int(wantX)-16, int(wantY)-16, int(wantX)+16, int(wantY)+16)
+			name := fmt.Sprintf("EPSG:%d %s", f.epsg, rs.name)
+			checkFeature(t, name+" rgb", rgb, area, redValue, bg, wantX, wantY, 0.1)
+			checkFeature(t, name+" float", dem, area, terrariumElevation, bg, wantX, wantY, 0.1)
+		}
+	}
+}
+
+func TestBuildSourceInfosRejectsUnknownCRS(t *testing.T) {
+	for _, tt := range []struct {
+		keys []uint16
+		want string
+	}{
+		{[]uint16{1024, 1, 2048, 4326, 3072, 32767}, "user-defined CRS"},
+		{[]uint16{1024, 1, 3072, 1}, "unsupported EPSG code: 1"},
+	} {
+		path := writeTestGeoTIFF(t, testGeoTIFF{W: 16, H: 16, Scale: 10, TieX: 1e6, TieY: 1e6, GeoKeys: tt.keys,
+			Float: featureFloat(0, 0, 0, 0)})
+		_, err := buildSourceInfos(openTestSources(t, path))
+		if err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("keys %v: got error %v, want %q", tt.keys, err, tt.want)
 		}
 	}
 }

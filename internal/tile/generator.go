@@ -111,11 +111,10 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		return Stats{}, fmt.Errorf("no source files")
 	}
 
-	// Determine the projection from the first source.
-	epsg := sources[0].EPSG()
-	proj := coord.ForEPSG(epsg)
-	if proj == nil {
-		return Stats{}, fmt.Errorf("unsupported EPSG code: %d", epsg)
+	// Per-source metadata and projections, shared read-only by all workers.
+	srcInfos, err := buildSourceInfos(sources)
+	if err != nil {
+		return Stats{}, err
 	}
 
 	// Create shared COG tile caches for the max-zoom rendering pass.
@@ -254,12 +253,6 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 			go func() {
 				defer wg.Done()
 
-				// Build source info once per worker (read-only after init).
-				var srcInfos []sourceInfo
-				if isMaxZoom {
-					srcInfos = buildSourceInfos(sources)
-				}
-
 				for batch := range batchCh {
 					for _, t := range batch {
 						z, x, y := t[0], t[1], t[2]
@@ -268,9 +261,9 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 						if isMaxZoom {
 							var img *image.RGBA
 							if cfg.IsTerrarium {
-								img = renderTileTerrarium(z, x, y, cfg.TileSize, srcInfos, proj, floatCache, cfg.Resampling)
+								img = renderTileTerrarium(z, x, y, cfg.TileSize, srcInfos, floatCache, cfg.Resampling)
 							} else {
-								img = renderTile(z, x, y, cfg.TileSize, srcInfos, proj, cogCache, cfg.Resampling, resamplingLUTs)
+								img = renderTile(z, x, y, cfg.TileSize, srcInfos, cogCache, cfg.Resampling, resamplingLUTs)
 							}
 							if img != nil {
 								if cfg.FillColor != nil {

@@ -1,6 +1,7 @@
 package tile
 
 import (
+	"fmt"
 	"image"
 	"log"
 	"math"
@@ -52,6 +53,8 @@ func putLonLat(backing []float64) {
 // sourceInfo caches per-source metadata used during rendering and prefetching.
 type sourceInfo struct {
 	reader  *cog.Reader
+	proj    coord.Projection // the source's own CRS
+	projIdx int              // index of proj among the distinct projections
 	minCRSX float64
 	minCRSY float64
 	maxCRSX float64
@@ -59,12 +62,34 @@ type sourceInfo struct {
 	geo     cog.GeoInfo
 }
 
-func buildSourceInfos(sources []*cog.Reader) []sourceInfo {
+// buildSourceInfos collects per-source metadata. Every source is reprojected
+// with its own CRS, so inputs in several CRSs (e.g. Sentinel-2 tiles from
+// different UTM zones) can be mixed. Sources sharing an EPSG code share one
+// Projection, which CRSFallback needs for its datum-shift cache.
+func buildSourceInfos(sources []*cog.Reader) ([]sourceInfo, error) {
+	projIdx := map[int]int{}
+	var projs []coord.Projection
 	infos := make([]sourceInfo, len(sources))
 	for i, src := range sources {
+		epsg := src.EPSG()
+		idx, ok := projIdx[epsg]
+		if !ok {
+			proj := coord.ForEPSG(epsg)
+			if proj == nil {
+				if epsg == 32767 { // GeoTIFF "user-defined"
+					return nil, fmt.Errorf("%s: user-defined CRS is not supported; reproject to an EPSG CRS first (e.g. gdalwarp -t_srs EPSG:4326)", src.Path())
+				}
+				return nil, fmt.Errorf("%s: unsupported EPSG code: %d", src.Path(), epsg)
+			}
+			idx = len(projs)
+			projIdx[epsg] = idx
+			projs = append(projs, proj)
+		}
 		minX, minY, maxX, maxY := src.BoundsInCRS()
 		infos[i] = sourceInfo{
 			reader:  src,
+			proj:    projs[idx],
+			projIdx: idx,
 			minCRSX: minX,
 			minCRSY: minY,
 			maxCRSX: maxX,
@@ -72,7 +97,7 @@ func buildSourceInfos(sources []*cog.Reader) []sourceInfo {
 			geo:     src.GeoInfo(),
 		}
 	}
-	return infos
+	return infos, nil
 }
 
 // tileSource is a sourceInfo augmented with per-tile pre-computed data.
@@ -81,6 +106,7 @@ func buildSourceInfos(sources []*cog.Reader) []sourceInfo {
 // of per pixel eliminates millions of redundant OverviewForZoom iterations.
 type tileSource struct {
 	reader          *cog.Reader
+	proj            coord.Projection
 	geo             cog.GeoInfo
 	minCRSX         float64
 	minCRSY         float64
@@ -95,23 +121,46 @@ type tileSource struct {
 	tileH           int // source tile height (pixels per COG tile)
 }
 
+// tileInCRS is an output tile's bounding box and pixel size in one source CRS.
+type tileInCRS struct {
+	ok                     bool
+	minX, minY, maxX, maxY float64
+	res                    float64
+}
+
 // prepareTileSources filters the full source list to only those overlapping
-// the output tile's CRS bounding box, and pre-computes the overview level
-// and pixel dimensions for each. The returned slice is typically much smaller
-// than the full source list, dramatically reducing per-pixel iteration.
-func prepareTileSources(srcInfos []sourceInfo, outputResCRS float64, tileMinCRSX, tileMinCRSY, tileMaxCRSX, tileMaxCRSY float64) []tileSource {
+// output tile z/tx/ty, and pre-computes the overview level and pixel
+// dimensions for each. The tile's bounding box and pixel size are computed in
+// each source's own CRS, once per distinct projection. The returned slice is
+// typically much smaller than the full source list, dramatically reducing
+// per-pixel iteration.
+func prepareTileSources(srcInfos []sourceInfo, z, tx, ty, tileSize int) []tileSource {
+	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
+	outputResMeters := coord.ResolutionAtLat(midLat, z, tileSize)
+
+	var tiles []tileInCRS // indexed by projIdx, filled on first use
 	var result []tileSource
 	for i := range srcInfos {
 		src := &srcInfos[i]
+		for len(tiles) <= src.projIdx {
+			tiles = append(tiles, tileInCRS{})
+		}
+		t := &tiles[src.projIdx]
+		if !t.ok {
+			t.minX, t.minY, t.maxX, t.maxY = tileCRSBounds(z, tx, ty, src.proj)
+			t.res = coord.MetersToPixelSizeCRS(outputResMeters, src.proj.EPSG(), midLat)
+			t.ok = true
+		}
 		// Skip sources that don't overlap the output tile.
-		if tileMaxCRSX < src.minCRSX || tileMinCRSX > src.maxCRSX ||
-			tileMaxCRSY < src.minCRSY || tileMinCRSY > src.maxCRSY {
+		if t.maxX < src.minCRSX || t.minX > src.maxCRSX ||
+			t.maxY < src.minCRSY || t.minY > src.maxCRSY {
 			continue
 		}
-		level := src.reader.OverviewForZoom(outputResCRS)
+		level := src.reader.OverviewForZoom(t.res)
 		ifd := src.reader.IFDTileSize(level)
 		result = append(result, tileSource{
 			reader:          src.reader,
+			proj:            src.proj,
 			geo:             src.geo,
 			minCRSX:         src.minCRSX,
 			minCRSY:         src.minCRSY,
@@ -151,18 +200,12 @@ func tileCRSBounds(z, tx, ty int, proj coord.Projection) (minX, minY, maxX, maxY
 // and latitude per row. In web Mercator tiles, longitude is perfectly linear
 // with pixel X and latitude depends only on pixel Y, so we reduce trig calls
 // from O(tileSize²) to O(tileSize).
-func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.TileCache, mode Resampling, luts *gammaLUTs) *image.RGBA {
+func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, cache *cog.TileCache, mode Resampling, luts *gammaLUTs) *image.RGBA {
 	// Per-pixel lookups go through a goroutine-local view to stay off the shard locks.
 	cache = cache.Local()
 
-	// Pre-compute the output pixel size in CRS units for selecting the best overview level.
-	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
-	outputResMeters := coord.ResolutionAtLat(midLat, z, tileSize)
-	outputResCRS := coord.MetersToPixelSizeCRS(outputResMeters, proj.EPSG(), midLat)
-
 	// Pre-filter sources to only those overlapping this tile.
-	tileMinX, tileMinY, tileMaxX, tileMaxY := tileCRSBounds(z, tx, ty, proj)
-	tileSrcs := prepareTileSources(srcInfos, outputResCRS, tileMinX, tileMinY, tileMaxX, tileMaxY)
+	tileSrcs := prepareTileSources(srcInfos, z, tx, ty, tileSize)
 	if len(tileSrcs) == 0 {
 		return nil
 	}
@@ -189,10 +232,7 @@ func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Proje
 		rowOff := py * stride
 
 		for px := 0; px < tileSize; px++ {
-			// Convert precomputed WGS84 to source CRS.
-			srcX, srcY := proj.FromWGS84(lons[px], lat)
-
-			r, g, b, a, found := sampleFromTileSources(tileSrcs, srcX, srcY, cache, mode, luts)
+			r, g, b, a, found := sampleFromTileSources(tileSrcs, lons[px], lat, cache, mode, luts)
 			if found {
 				off := rowOff + px*4
 				img.Pix[off+0] = r
@@ -215,11 +255,19 @@ func renderTile(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Proje
 }
 
 // sampleFromTileSources tries each pre-filtered tile source to sample a pixel
-// at the given CRS coordinates. Uses pre-computed overview levels and dimensions
-// to avoid redundant per-pixel computation.
-func sampleFromTileSources(sources []tileSource, srcX, srcY float64, cache *cog.TileCache, mode Resampling, luts *gammaLUTs) (r, g, b, a uint8, found bool) {
+// at the given WGS84 position. Uses pre-computed overview levels and dimensions
+// to avoid redundant per-pixel computation. The position is projected into a
+// source's CRS only when it differs from the previous source's, so inputs in
+// one CRS cost a single projection per pixel.
+func sampleFromTileSources(sources []tileSource, lon, lat float64, cache *cog.TileCache, mode Resampling, luts *gammaLUTs) (r, g, b, a uint8, found bool) {
+	var proj coord.Projection // CRS of srcX/srcY
+	var srcX, srcY float64
 	for i := range sources {
 		src := &sources[i]
+		if src.proj != proj {
+			proj = src.proj
+			srcX, srcY = proj.FromWGS84(lon, lat)
+		}
 
 		// Check if point is within this source's bounds.
 		if srcX < src.minCRSX || srcX > src.maxCRSX || srcY < src.minCRSY || srcY > src.maxCRSY {
@@ -1477,17 +1525,12 @@ func (g *gammaLUTs) encode(v float64) uint8 {
 
 // renderTileTerrarium renders a single web map tile from float GeoTIFF data,
 // converting elevation values to Terrarium RGB encoding.
-func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj coord.Projection, cache *cog.FloatTileCache, mode Resampling) *image.RGBA {
+func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, cache *cog.FloatTileCache, mode Resampling) *image.RGBA {
 	// Per-pixel lookups go through a goroutine-local view to stay off the shard locks.
 	cache = cache.Local()
 
-	_, midLat, _, _ := coord.TileBounds(z, tx, ty)
-	outputResMeters := coord.ResolutionAtLat(midLat, z, tileSize)
-	outputResCRS := coord.MetersToPixelSizeCRS(outputResMeters, proj.EPSG(), midLat)
-
 	// Pre-filter sources and pre-compute overview levels for this tile.
-	tileMinX, tileMinY, tileMaxX, tileMaxY := tileCRSBounds(z, tx, ty, proj)
-	tileSrcs := prepareTileSources(srcInfos, outputResCRS, tileMinX, tileMinY, tileMaxX, tileMaxY)
+	tileSrcs := prepareTileSources(srcInfos, z, tx, ty, tileSize)
 	if len(tileSrcs) == 0 {
 		return nil
 	}
@@ -1514,8 +1557,7 @@ func renderTileTerrarium(z, tx, ty, tileSize int, srcInfos []sourceInfo, proj co
 	for py := 0; py < tileSize; py++ {
 		lat := lats[py]
 		for px := 0; px < tileSize; px++ {
-			srcX, srcY := proj.FromWGS84(lons[px], lat)
-			elevation, found := sampleFromTileSourcesFloat(tileSrcs, nodataValues, srcX, srcY, cache, mode)
+			elevation, found := sampleFromTileSourcesFloat(tileSrcs, nodataValues, lons[px], lat, cache, mode)
 			if found && !math.IsNaN(elevation) {
 				img.SetRGBA(px, py, encode.ElevationToTerrarium(elevation))
 				hasData = true
@@ -1546,10 +1588,17 @@ func parseFloatNodata(s string) float64 {
 }
 
 // sampleFromTileSourcesFloat tries each pre-filtered tile source to sample a
-// float elevation at the given CRS coordinates.
-func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, srcX, srcY float64, cache *cog.FloatTileCache, mode Resampling) (float64, bool) {
+// float elevation at the given WGS84 position (projected per source CRS, as in
+// sampleFromTileSources).
+func sampleFromTileSourcesFloat(sources []tileSource, nodataValues []float64, lon, lat float64, cache *cog.FloatTileCache, mode Resampling) (float64, bool) {
+	var proj coord.Projection // CRS of srcX/srcY
+	var srcX, srcY float64
 	for i := range sources {
 		src := &sources[i]
+		if src.proj != proj {
+			proj = src.proj
+			srcX, srcY = proj.FromWGS84(lon, lat)
+		}
 
 		if srcX < src.minCRSX || srcX > src.maxCRSX || srcY < src.minCRSY || srcY > src.maxCRSY {
 			continue
