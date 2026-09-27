@@ -58,6 +58,50 @@ func TestWGS84Identity(t *testing.T) {
 	}
 }
 
+func TestWGS84Identity_Lon360(t *testing.T) {
+	w := &WGS84Identity{Lon360: true}
+	for _, tt := range []struct{ lon, want float64 }{
+		{-170, 190},
+		{-0.5, 359.5},
+		{0, 0},
+		{120, 120},
+		{180, 180},
+	} {
+		if got, _ := w.FromWGS84(tt.lon, 10); got != tt.want {
+			t.Errorf("FromWGS84(%v) = %v, want %v", tt.lon, got, tt.want)
+		}
+	}
+}
+
+func TestWrapLonRange(t *testing.T) {
+	tests := []struct {
+		name             string
+		minLon, maxLon   float64
+		wantMin, wantMax float64
+	}{
+		{"inside", 5, 10, 5, 10},
+		{"world", -180, 180, -180, 180},
+		{"0..360 grid", 0, 360, -180, 180},
+		{"wider than the world", -180.5, 180.5, -180, 180},
+		{"rounding noise at -180", -180.0000000001, 170, -180, 170},
+		{"rounding noise at 180", 170, 180.0000000001, 170, 180},
+		{"UTM 60 across 180", 176.5, 182.1, 176.5, 182.1},
+		{"UTM 1 across 180", -182.1, -176.5, 177.9, 183.5},
+		{"Pacific grid", 100, 260, 100, 260},
+		{"east of 180", 190, 200, -170, -160},
+		{"west of -180", -200, -190, 160, 170},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotMin, gotMax := WrapLonRange(tt.minLon, tt.maxLon)
+			if math.Abs(gotMin-tt.wantMin) > 1e-9 || math.Abs(gotMax-tt.wantMax) > 1e-9 {
+				t.Errorf("WrapLonRange(%v, %v) = (%v, %v), want (%v, %v)",
+					tt.minLon, tt.maxLon, gotMin, gotMax, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
 // TestProjectionRoundTrip verifies that ToWGS84(FromWGS84(lon, lat)) ≈ (lon, lat) for all projections.
 func TestProjectionRoundTrip(t *testing.T) {
 	// Points inside Switzerland (valid for LV95) and also valid for other projections.

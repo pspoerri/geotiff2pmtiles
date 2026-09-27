@@ -180,6 +180,9 @@ func MinZoomForSingleTile(minLon, minLat, maxLon, maxLat float64) int {
 	if maxLat-minLat > edge {
 		minLat += edge
 	}
+	if maxLon > 180 {
+		return 0 // crosses the antimeridian, a tile edge at every zoom above 0
+	}
 	for z := 1; z <= 28; z++ {
 		minTX, minTY := LonLatToTile(minLon, maxLat, z)
 		maxTX, maxTY := LonLatToTile(maxLon, minLat, z)
@@ -191,14 +194,20 @@ func MinZoomForSingleTile(minLon, minLat, maxLon, maxLat float64) int {
 }
 
 // TilesInBounds returns all tile coordinates at the given zoom level that intersect the given WGS84 bounds.
+// A maxLon above 180 continues past the antimeridian from column 0 (see WrapLonRange).
 func TilesInBounds(zoom int, minLon, minLat, maxLon, maxLat float64) [][3]int {
 	minTX, minTY := LonLatToTile(minLon, maxLat, zoom) // note: maxLat -> minTY
 	maxTX, maxTY := LonLatToTile(maxLon, minLat, zoom)
+	n := 1 << zoom
+	if maxLon > 180 {
+		maxTX, _ = LonLatToTile(maxLon-360, minLat, zoom)
+		maxTX = min(maxTX+n, minTX+n-1) // at most once round
+	}
 
 	var tiles [][3]int
 	for ty := minTY; ty <= maxTY; ty++ {
 		for tx := minTX; tx <= maxTX; tx++ {
-			tiles = append(tiles, [3]int{zoom, tx, ty})
+			tiles = append(tiles, [3]int{zoom, tx % n, ty})
 		}
 	}
 	return tiles

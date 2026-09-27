@@ -2,6 +2,7 @@ package coord
 
 import (
 	"math"
+	"slices"
 	"testing"
 )
 
@@ -238,6 +239,38 @@ func TestTilesInBounds(t *testing.T) {
 		if y < 355 || y > 360 {
 			t.Errorf("tile y=%d outside expected range for Zurich", y)
 		}
+	}
+}
+
+// TestTilesInBounds_Antimeridian checks that bounds with maxLon > 180
+// continue from column 0 instead of stopping at the last column.
+func TestTilesInBounds_Antimeridian(t *testing.T) {
+	tests := []struct {
+		name           string
+		zoom           int
+		minLon, maxLon float64
+		wantX          []int
+	}{
+		{"UTM 60 at z1", 1, 176, 182, []int{1, 0}},
+		{"Pacific grid at z2", 2, 100, 260, []int{3, 0}},
+		{"almost a full turn", 2, -179, 180.5, []int{0, 1, 2, 3}},
+		{"not crossing", 2, 100, 180, []int{3}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotX []int
+			for _, tile := range TilesInBounds(tt.zoom, tt.minLon, -10, tt.maxLon, -5) {
+				gotX = append(gotX, tile[1])
+			}
+			if !slices.Equal(gotX, tt.wantX) {
+				t.Errorf("TilesInBounds(%d, lon %v..%v) columns = %v, want %v", tt.zoom, tt.minLon, tt.maxLon, gotX, tt.wantX)
+			}
+		})
+	}
+
+	// The antimeridian is a tile edge at every zoom above 0.
+	if got := MinZoomForSingleTile(176, -40, 182, -35); got != 0 {
+		t.Errorf("MinZoomForSingleTile across the antimeridian = %d, want 0", got)
 	}
 }
 

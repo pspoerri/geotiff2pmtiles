@@ -1954,14 +1954,17 @@ func CheckCoverageGaps(sources []*Reader) []CoverageGap {
 // Sources with an unknown projection are assumed to already be in WGS84.
 // Corners the projection cannot transform are skipped; it panics if no
 // corner of any source transforms, since every bound would be garbage.
+// MaxLon exceeds 180 when the sources cross the antimeridian (see
+// coord.WrapLonRange).
 func MergedBoundsWGS84(sources []*Reader) Bounds {
 	if len(sources) == 0 {
 		return Bounds{}
 	}
 
+	// Projected longitudes may lie outside ±180 (UTM zone 60, 0..360 grids).
 	merged := Bounds{
-		MinLon: 180,
-		MaxLon: -180,
+		MinLon: math.Inf(1),
+		MaxLon: math.Inf(-1),
 		MinLat: 90,
 		MaxLat: -90,
 	}
@@ -2015,6 +2018,7 @@ func MergedBoundsWGS84(sources []*Reader) Bounds {
 	if finite == 0 {
 		panic(fmt.Sprintf("cog: no corner of %d source(s) in EPSG:%d transforms to WGS84", len(sources), sources[0].EPSG()))
 	}
+	merged.MinLon, merged.MaxLon = coord.WrapLonRange(merged.MinLon, merged.MaxLon)
 
 	return merged
 }

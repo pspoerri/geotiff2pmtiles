@@ -1,10 +1,16 @@
 package coord
 
-import "github.com/wroge/crs"
+import (
+	"math"
+
+	"github.com/wroge/crs"
+)
 
 // Projection defines the interface for converting between a source CRS and WGS84.
 type Projection interface {
 	// ToWGS84 converts source CRS coordinates to WGS84 longitude/latitude (degrees).
+	// The longitude is continuous across the source and may lie outside
+	// [-180, 180], e.g. 182 east of the antimeridian in UTM zone 60.
 	ToWGS84(x, y float64) (lon, lat float64)
 
 	// FromWGS84 converts WGS84 longitude/latitude (degrees) to source CRS coordinates.
@@ -62,8 +68,36 @@ func unitSize(epsg int) (size float64, geographic bool) {
 }
 
 // WGS84Identity is a no-op projection for data already in EPSG:4326.
-type WGS84Identity struct{}
+type WGS84Identity struct {
+	// Lon360 is for grids whose longitudes run 0..360: FromWGS84 then
+	// returns longitudes west of Greenwich as lon+360, inside the grid.
+	Lon360 bool
+}
 
-func (w *WGS84Identity) ToWGS84(x, y float64) (lon, lat float64)   { return x, y }
-func (w *WGS84Identity) FromWGS84(lon, lat float64) (x, y float64) { return lon, lat }
-func (w *WGS84Identity) EPSG() int                                 { return 4326 }
+func (w *WGS84Identity) ToWGS84(x, y float64) (lon, lat float64) { return x, y }
+func (w *WGS84Identity) EPSG() int                               { return 4326 }
+
+func (w *WGS84Identity) FromWGS84(lon, lat float64) (x, y float64) {
+	if w.Lon360 && lon < 0 {
+		lon += 360
+	}
+	return lon, lat
+}
+
+// WrapLonRange shifts the longitude range [minLon, maxLon] by whole turns
+// so that minLon lies in [-180, 180). maxLon then exceeds 180 if the range
+// crosses the antimeridian, as for a UTM zone 60 raster or a 100..260 grid;
+// a range of a full turn or more becomes [-180, 180]. Overshoots below
+// 1e-6° (~0.1 m) are rounding noise, as in -180.0000000001.
+func WrapLonRange(minLon, maxLon float64) (float64, float64) {
+	const eps = 1e-6
+	if maxLon-minLon >= 360-eps {
+		return -180, 180
+	}
+	turns := math.Floor((minLon + 180 + eps) / 360)
+	minLon, maxLon = max(minLon-360*turns, -180), maxLon-360*turns
+	if maxLon < 180+eps {
+		maxLon = min(maxLon, 180)
+	}
+	return minLon, maxLon
+}
