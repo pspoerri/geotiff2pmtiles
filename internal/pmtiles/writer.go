@@ -1,6 +1,7 @@
 package pmtiles
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
@@ -32,7 +33,6 @@ type Writer struct {
 	dedupMax   int                   // largest tile considered for dedup
 	cmpBuf     []byte                // scratch for comparing dedup candidates
 	outputPath string
-	tmpDir     string // directory for temp files
 	entries    []Entry
 	opts       WriterOptions
 	header     Header
@@ -74,7 +74,6 @@ func NewWriter(outputPath string, opts WriterOptions) (*Writer, error) {
 		opts:       opts,
 		header:     NewHeader(opts),
 		tmpFile:    tmpFile,
-		tmpDir:     tmpDir,
 		entries:    make([]Entry, 0, 65536),
 		dedup:      make(map[uint64]dedupEntry),
 		dedupMax:   tileSize * tileSize / 16,
@@ -169,6 +168,11 @@ func (w *Writer) tmpHolds(offset uint64, data []byte) (bool, error) {
 }
 
 // Finalize builds the directory, metadata, and writes the final PMTiles file.
+//
+// The archive is written to outputPath+".partial" and renamed over outputPath
+// only once it is complete and synced, so a failed Finalize never leaves a
+// truncated archive behind or destroys an existing one. The temp tile file
+// is removed whether or not Finalize succeeds.
 func (w *Writer) Finalize() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -177,18 +181,20 @@ func (w *Writer) Finalize() error {
 		return fmt.Errorf("already finalized")
 	}
 	w.finalized = true
+	defer w.removeTmp()
+
+	// The dedup map is not needed any more; free it before clustering.
+	w.dedup = nil
 
 	// Sort entries by tile ID for the directory.
 	sort.Slice(w.entries, func(i, j int) bool {
 		return w.entries[i].TileID < w.entries[j].TileID
 	})
 
-	// Rewrite tile data in tile-ID order so the archive is properly clustered.
+	// Lay tile data out in tile-ID order so the archive is properly clustered.
 	// This ensures tile data on disk follows the same Hilbert order as the directory,
 	// which enables readers to optimize range requests.
-	if err := w.clusterTileData(); err != nil {
-		return fmt.Errorf("clustering tile data: %w", err)
-	}
+	src, tileDataLength := w.clusterOffsets()
 
 	// Build the directory.
 	rootDir, leafDirs, numTileEntries, err := BuildDirectory(w.entries)
@@ -224,131 +230,148 @@ func (w *Writer) Finalize() error {
 	w.header.LeafDirOffset = leafDirOffset
 	w.header.LeafDirLength = leafDirLength
 	w.header.TileDataOffset = tileDataOffset
-	w.header.TileDataLength = w.tmpOffset
+	w.header.TileDataLength = tileDataLength
 	w.header.NumAddressedTiles = uint64(len(w.entries))
 	w.header.NumTileEntries = uint64(numTileEntries)
-	w.header.NumTileContents = uint64(len(w.entries) - int(w.dedupHits))
+	w.header.NumTileContents = uint64(len(src))
 
-	// Write the final file.
-	outFile, err := os.Create(w.outputPath)
+	return w.writeArchive(rootDir, metadataBytes, leafDirs, src)
+}
+
+// clusterOffsets assigns each entry the offset its data will have in the
+// archive, so that tile data follows the sorted entries (Hilbert tile-ID
+// order) and the archive is "clustered" per the PMTiles v3 spec. Entries that
+// share data (deduplicated tiles) keep sharing one new offset.
+//
+// It returns the temp file offset of every unique tile in archive order,
+// and the total length of the tile data.
+func (w *Writer) clusterOffsets() (src []uint64, length uint64) {
+	// Only tiles small enough to be deduplicated can share an offset, so
+	// only those need to be remembered.
+	seen := make(map[uint64]uint64) // old offset → new offset
+	src = make([]uint64, 0, len(w.entries)-int(w.dedupHits))
+	for i := range w.entries {
+		e := &w.entries[i]
+		if int(e.Length) <= w.dedupMax {
+			if off, ok := seen[e.Offset]; ok {
+				e.Offset = off
+				continue
+			}
+			seen[e.Offset] = length
+		}
+		src = append(src, e.Offset)
+		e.Offset = length
+		length += uint64(e.Length)
+	}
+	return src, length
+}
+
+// writeArchive writes the header, directories, metadata and tile data to
+// outputPath+".partial", then renames it over outputPath. On any error the
+// partial file is removed and an existing archive stays untouched.
+//
+// The partial file lives next to the output rather than in the temp
+// directory, which may be on another file system, where a rename fails.
+func (w *Writer) writeArchive(rootDir, metadata, leafDirs []byte, src []uint64) (err error) {
+	partial := w.outputPath + ".partial"
+	f, err := os.OpenFile(partial, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
 		return fmt.Errorf("creating output file: %w", err)
 	}
-	defer outFile.Close()
+	defer func() {
+		if err != nil {
+			f.Close()
+			os.Remove(partial)
+		}
+	}()
+
+	out := bufio.NewWriterSize(f, 1<<20)
 
 	// Write header.
-	if _, err := outFile.Write(w.header.Serialize()); err != nil {
+	if _, err := out.Write(w.header.Serialize()); err != nil {
 		return fmt.Errorf("writing header: %w", err)
 	}
 
 	// Write root directory.
-	if _, err := outFile.Write(rootDir); err != nil {
+	if _, err := out.Write(rootDir); err != nil {
 		return fmt.Errorf("writing root directory: %w", err)
 	}
 
 	// Write metadata.
-	if _, err := outFile.Write(metadataBytes); err != nil {
+	if _, err := out.Write(metadata); err != nil {
 		return fmt.Errorf("writing metadata: %w", err)
 	}
 
 	// Write leaf directories.
-	if len(leafDirs) > 0 {
-		if _, err := outFile.Write(leafDirs); err != nil {
-			return fmt.Errorf("writing leaf directories: %w", err)
-		}
+	if _, err := out.Write(leafDirs); err != nil {
+		return fmt.Errorf("writing leaf directories: %w", err)
 	}
 
-	// Copy tile data from temp file (now in clustered order).
-	if _, err := w.tmpFile.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("seeking temp file: %w", err)
+	// Copy tile data from the temp file straight into the archive, in
+	// clustered order.
+	if err := w.copyTileData(out, src); err != nil {
+		return err
 	}
 
-	if _, err := io.Copy(outFile, w.tmpFile); err != nil {
-		return fmt.Errorf("copying tile data: %w", err)
+	if err := out.Flush(); err != nil {
+		return fmt.Errorf("writing tile data: %w", err)
 	}
-
-	// Cleanup temp file.
-	tmpPath := w.tmpFile.Name()
-	w.tmpFile.Close()
-	os.Remove(tmpPath)
-
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("syncing output file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing output file: %w", err)
+	}
+	if err := os.Rename(partial, w.outputPath); err != nil {
+		return fmt.Errorf("renaming output file: %w", err)
+	}
 	return nil
 }
 
-// clusterTileData rewrites the temp file so tile data is in the same order
-// as the sorted entries (Hilbert tile-ID order). This makes the archive
-// "clustered" per the PMTiles v3 spec, enabling read-time optimizations.
-//
-// Deduplicated tiles (multiple entries sharing the same offset) are written
-// once and all entries are remapped to the new shared offset.
-func (w *Writer) clusterTileData() error {
-	// Create a new temp file for the reordered data.
-	newTmp, err := os.CreateTemp(w.tmpDir, "pmtiles-clustered-*.tmp")
-	if err != nil {
-		return fmt.Errorf("creating clustered temp file: %w", err)
-	}
-
-	buf := make([]byte, 256*1024) // 256 KiB read buffer
-	var newOffset uint64
-
-	// Track remapped offsets so deduplicated tiles (which share the same
-	// old offset) are written only once and all entries point to the same
-	// new offset.
-	type remap struct {
-		newOffset uint64
-		length    uint32
-	}
-	seen := make(map[uint64]remap) // old offset → new location
-
-	for i := range w.entries {
-		e := &w.entries[i]
-
-		// If we already wrote data from this old offset, reuse it.
-		if m, ok := seen[e.Offset]; ok && m.length == e.Length {
-			e.Offset = m.newOffset
+// copyTileData streams each unique tile from the temp file into out, in the
+// order clusterOffsets gave them. An entry holds the first copy of its data
+// exactly when its new offset is the current write position; entries that
+// share data point back to an earlier offset and are skipped.
+func (w *Writer) copyTileData(out io.Writer, src []uint64) error {
+	buf := make([]byte, 256*1024)
+	var pos uint64
+	for _, e := range w.entries {
+		if e.Offset != pos {
 			continue
 		}
-
-		tileLen := int64(e.Length)
-
-		// Read tile data from old position.
-		if tileLen > int64(len(buf)) {
+		tileLen := int(e.Length)
+		if tileLen > len(buf) {
 			buf = make([]byte, tileLen)
 		}
-		if _, err := w.tmpFile.ReadAt(buf[:tileLen], int64(e.Offset)); err != nil {
-			return fmt.Errorf("reading tile at offset %d: %w", e.Offset, err)
+		oldOffset := src[0]
+		src = src[1:]
+		if _, err := w.tmpFile.ReadAt(buf[:tileLen], int64(oldOffset)); err != nil {
+			return fmt.Errorf("reading tile at offset %d: %w", oldOffset, err)
 		}
-
-		// Write to new position.
-		if _, err := newTmp.Write(buf[:tileLen]); err != nil {
-			return fmt.Errorf("writing tile at new offset %d: %w", newOffset, err)
+		if _, err := out.Write(buf[:tileLen]); err != nil {
+			return fmt.Errorf("writing tile data: %w", err)
 		}
-
-		// Record the remapping and update the entry.
-		oldOffset := e.Offset
-		e.Offset = newOffset
-		seen[oldOffset] = remap{newOffset: newOffset, length: e.Length}
-		newOffset += uint64(tileLen)
+		pos += uint64(tileLen)
 	}
-
-	// Replace old temp file with the new clustered one.
-	oldPath := w.tmpFile.Name()
-	w.tmpFile.Close()
-	os.Remove(oldPath)
-
-	w.tmpFile = newTmp
-	w.tmpOffset = newOffset
-
 	return nil
+}
+
+// removeTmp closes and deletes the temp tile file. Safe to call repeatedly.
+func (w *Writer) removeTmp() {
+	if w.tmpFile == nil {
+		return
+	}
+	tmpPath := w.tmpFile.Name()
+	w.tmpFile.Close()
+	os.Remove(tmpPath)
+	w.tmpFile = nil
 }
 
 // Abort cleans up resources without writing the output file.
 func (w *Writer) Abort() {
-	if w.tmpFile != nil {
-		tmpPath := w.tmpFile.Name()
-		w.tmpFile.Close()
-		os.Remove(tmpPath)
-	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.removeTmp()
 }
 
 // buildMetadata creates the JSON metadata for the PMTiles archive.
