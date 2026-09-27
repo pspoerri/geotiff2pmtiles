@@ -114,9 +114,9 @@ func testEncoder(t *testing.T) encode.Encoder {
 
 // --- Transform rebuild fill tests ---
 
-// TestTransformRebuild_FillColor_Sparse verifies that sparse source data
-// combined with fill-color produces tiles at all positions within bounds.
-func TestTransformRebuild_FillColor_Sparse(t *testing.T) {
+// TestTransformRebuild_FillMissing_Sparse verifies that sparse source data
+// combined with FillMissing produces tiles at all positions within bounds.
+func TestTransformRebuild_FillMissing_Sparse(t *testing.T) {
 	tileSize := 8
 	green := color.RGBA{0, 200, 0, 255}
 	fill := color.RGBA{255, 0, 0, 255}
@@ -142,7 +142,7 @@ func TestTransformRebuild_FillColor_Sparse(t *testing.T) {
 		SourceFormat: "png",
 		Resampling:   ResamplingBilinear,
 		Mode:         TransformRebuild,
-		FillColor:    &fill,
+		FillMissing:  &fill,
 		Bounds:       bounds,
 	}
 
@@ -169,9 +169,9 @@ func TestTransformRebuild_FillColor_Sparse(t *testing.T) {
 	}
 }
 
-// TestTransformRebuild_FillColor_FillTilesIdentical verifies that all fill
+// TestTransformRebuild_FillMissing_FillTilesIdentical verifies that all fill
 // tiles at the same zoom level contain identical pre-encoded bytes.
-func TestTransformRebuild_FillColor_FillTilesIdentical(t *testing.T) {
+func TestTransformRebuild_FillMissing_FillTilesIdentical(t *testing.T) {
 	tileSize := 8
 	green := color.RGBA{0, 200, 0, 255}
 	fill := color.RGBA{128, 128, 128, 255}
@@ -197,7 +197,7 @@ func TestTransformRebuild_FillColor_FillTilesIdentical(t *testing.T) {
 		SourceFormat: "png",
 		Resampling:   ResamplingBilinear,
 		Mode:         TransformRebuild,
-		FillColor:    &fill,
+		FillMissing:  &fill,
 		Bounds:       bounds,
 	}
 
@@ -231,10 +231,10 @@ func TestTransformRebuild_FillColor_FillTilesIdentical(t *testing.T) {
 	}
 }
 
-// TestTransformRebuild_FillColor_RealPositionPropagation verifies that real
+// TestTransformRebuild_FillMissing_RealPositionPropagation verifies that real
 // positions propagate correctly to parent zoom levels: only parents with at
 // least one real child go through the downsample pipeline.
-func TestTransformRebuild_FillColor_RealPositionPropagation(t *testing.T) {
+func TestTransformRebuild_FillMissing_RealPositionPropagation(t *testing.T) {
 	tileSize := 8
 	green := color.RGBA{0, 200, 0, 255}
 	fill := color.RGBA{255, 0, 0, 255}
@@ -260,7 +260,7 @@ func TestTransformRebuild_FillColor_RealPositionPropagation(t *testing.T) {
 		SourceFormat: "png",
 		Resampling:   ResamplingNearest,
 		Mode:         TransformRebuild,
-		FillColor:    &fill,
+		FillMissing:  &fill,
 		Bounds:       bounds,
 	}
 
@@ -287,9 +287,9 @@ func TestTransformRebuild_FillColor_RealPositionPropagation(t *testing.T) {
 	}
 }
 
-// TestTransformRebuild_FillColor_Dense verifies that when all positions have
+// TestTransformRebuild_FillMissing_Dense verifies that when all positions have
 // source data, no fill tiles are written.
-func TestTransformRebuild_FillColor_Dense(t *testing.T) {
+func TestTransformRebuild_FillMissing_Dense(t *testing.T) {
 	tileSize := 8
 	fill := color.RGBA{255, 0, 0, 255}
 	bounds := testBounds()
@@ -323,7 +323,7 @@ func TestTransformRebuild_FillColor_Dense(t *testing.T) {
 		SourceFormat: "png",
 		Resampling:   ResamplingBilinear,
 		Mode:         TransformRebuild,
-		FillColor:    &fill,
+		FillMissing:  &fill,
 		Bounds:       bounds,
 	}
 
@@ -380,7 +380,7 @@ func TestTransformRebuild_NoFill(t *testing.T) {
 		SourceFormat: "png",
 		Resampling:   ResamplingBilinear,
 		Mode:         TransformRebuild,
-		FillColor:    nil, // no fill
+		FillMissing:  nil, // no fill
 		Bounds:       bounds,
 	}
 
@@ -436,9 +436,9 @@ func TestTransformRebuild_NoFill_VisitsParentsOnly(t *testing.T) {
 	}
 }
 
-// TestTransformRebuild_FillColor_StatsConsistency verifies that Stats counters
+// TestTransformRebuild_FillMissing_StatsConsistency verifies that Stats counters
 // are consistent: fill tiles are counted as uniform.
-func TestTransformRebuild_FillColor_StatsConsistency(t *testing.T) {
+func TestTransformRebuild_FillMissing_StatsConsistency(t *testing.T) {
 	tileSize := 8
 	green := color.RGBA{0, 200, 0, 255}
 	fill := color.RGBA{255, 0, 0, 255}
@@ -463,7 +463,7 @@ func TestTransformRebuild_FillColor_StatsConsistency(t *testing.T) {
 		SourceFormat: "png",
 		Resampling:   ResamplingNearest,
 		Mode:         TransformRebuild,
-		FillColor:    &fill,
+		FillMissing:  &fill,
 		Bounds:       bounds,
 	}
 
@@ -491,10 +491,9 @@ func TestTransformRebuild_FillColor_StatsConsistency(t *testing.T) {
 	}
 }
 
-// TestTransformReencode_FillColor_ReplacesTransparentPixels verifies that
-// re-encode mode substitutes the fill color for transparent pixels, not only
-// for missing tiles.
-func TestTransformReencode_FillColor_ReplacesTransparentPixels(t *testing.T) {
+// TestTransformReencode_NodataColor_ReplacesTransparentPixels verifies that
+// re-encode mode substitutes NodataColor for transparent pixels.
+func TestTransformReencode_NodataColor_ReplacesTransparentPixels(t *testing.T) {
 	tileSize := 8
 	fill := color.RGBA{255, 0, 0, 255}
 	bounds := testBounds()
@@ -509,7 +508,7 @@ func TestTransformReencode_FillColor_ReplacesTransparentPixels(t *testing.T) {
 	cfg := TransformConfig{
 		MinZoom: 2, MaxZoom: 2, TileSize: tileSize, Concurrency: 1,
 		Encoder: testEncoder(t), SourceFormat: "png",
-		Mode: TransformReencode, FillColor: &fill, Bounds: bounds,
+		Mode: TransformReencode, NodataColor: &fill, Bounds: bounds,
 	}
 	if _, err := Transform(cfg, reader, writer); err != nil {
 		t.Fatalf("Transform: %v", err)

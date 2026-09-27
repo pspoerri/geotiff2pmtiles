@@ -40,6 +40,8 @@ func main() {
 		resampling  string
 		memLimitMB  int
 		noSpill     bool
+		nodataColor string
+		fillMissing string
 		fillColor   string
 		rebuild     bool
 		terrarium   bool
@@ -61,7 +63,9 @@ func main() {
 	flag.IntVar(&memLimitMB, "mem-limit", 0, "MB of encoded tiles allowed to queue for the spill file before workers pause during a rebuild (0 = auto: 90% of RAM minus 2 GB; spilling is off if that is under 512 MB)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
 	flag.StringVar(&tmpDirFlag, "tmp-dir", "", "Directory for temporary files, about 2x the output size at peak (default: the output file's directory)")
-	flag.StringVar(&fillColor, "fill-color", "", "RGBA color, e.g. \"0,0,0,255\" or \"#000000ff\": replaces transparent pixels and fills missing tile positions within bounds; forces re-encoding (default: none, tiles are copied as-is)")
+	flag.StringVar(&nodataColor, "nodata-color", "none", "RGBA color, e.g. \"0,0,0,255\" or \"#000000ff\", that replaces transparent pixels; forces re-encoding. none = keep them")
+	flag.StringVar(&fillMissing, "fill-missing", "none", "RGBA color of the solid tiles written at tile positions inside the bounds that the source lacks; existing tiles are still copied as-is. none = leave them absent")
+	flag.StringVar(&fillColor, "fill-color", "", "deprecated: sets both --nodata-color and --fill-missing")
 	flag.BoolVar(&rebuild, "rebuild", false, "Rebuild every level below max zoom by downsampling (needed to apply --resampling to existing levels)")
 	flag.BoolVar(&terrarium, "terrarium", false, "Treat tiles as terrarium-encoded elevations so rebuild downsamples in elevation space (auto-detected from archive metadata)")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (default: keep source)")
@@ -208,14 +212,9 @@ func main() {
 		log.Fatalf("Resampling: %v", err)
 	}
 
-	// Parse fill color.
-	var fc *color.RGBA
-	if fillColor != "" {
-		c, err := cli.ParseColor(fillColor)
-		if err != nil {
-			log.Fatalf("Fill color: %v", err)
-		}
-		fc = &c
+	nodataFill, missingFill, err := cli.FillColors(flag.CommandLine, nodataColor, fillMissing, fillColor)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	// Determine transform mode. Levels below the source's min zoom are added by
@@ -230,21 +229,34 @@ func main() {
 		mode = tile.TransformRebuild
 	} else if formatChanged {
 		mode = tile.TransformReencode
-	} else if fc != nil {
-		// Fill-only: use re-encode mode since we need the encoder.
+	} else if nodataFill != nil {
+		// Recolouring transparent pixels needs the tiles decoded.
 		mode = tile.TransformReencode
 	}
 
-	// Resolve the tile encoder — only re-encode and rebuild need one, so a
-	// passthrough of e.g. a WebP archive still works in a build without CGo.
+	// Resolve the tile encoder — only re-encode, rebuild and fill tiles need
+	// one, so a passthrough of e.g. a WebP archive still works in a build
+	// without CGo.
 	var enc encode.Encoder
 	tileFormat := srcHeader.TileType
-	if mode != tile.TransformPassthrough || extendDown {
+	if mode != tile.TransformPassthrough || extendDown || missingFill != nil {
 		enc, err = encode.NewEncoder(format, quality)
 		if err != nil {
 			log.Fatalf("Encoder: %v", err)
 		}
+	}
+	if mode != tile.TransformPassthrough || extendDown {
 		tileFormat = enc.PMTileType()
+	}
+	if format == "jpeg" {
+		for _, f := range []struct {
+			name string
+			c    *color.RGBA
+		}{{"--nodata-color", nodataFill}, {"--fill-missing", missingFill}} {
+			if f.c != nil && f.c.A < 255 {
+				log.Printf("WARNING: %s alpha %d cannot be stored in jpeg; those areas will be black", f.name, f.c.A)
+			}
+		}
 	}
 
 	if cli.IsFlagSet(flag.CommandLine, "resampling") && mode != tile.TransformRebuild && !extendDown {
@@ -293,8 +305,11 @@ func main() {
 		fmt.Printf("  %-14s terrarium (elevation-space downsampling)\n", "Encoding:")
 	}
 	fmt.Printf("  %-14s %d\n", "Concurrency:", concurrency)
-	if fc != nil {
-		fmt.Printf("  %-14s rgba(%d,%d,%d,%d)\n", "Fill color:", fc.R, fc.G, fc.B, fc.A)
+	if nodataFill != nil {
+		fmt.Printf("  %-14s %s\n", "Nodata color:", cli.FormatColor(nodataFill))
+	}
+	if missingFill != nil {
+		fmt.Printf("  %-14s %s\n", "Fill missing:", cli.FormatColor(missingFill))
 	}
 	if noSpill {
 		fmt.Printf("  %-14s disabled (all in memory)\n", "Disk spill:")
@@ -323,7 +338,8 @@ func main() {
 		SourceFormat:     srcFormat,
 		Resampling:       resamplingMode,
 		Mode:             mode,
-		FillColor:        fc,
+		NodataColor:      nodataFill,
+		FillMissing:      missingFill,
 		Bounds:           bounds,
 		MemoryLimitBytes: memoryLimitBytes,
 		OutputDir:        tmpDir,
@@ -332,7 +348,7 @@ func main() {
 
 	// Build description with processing steps prepended to source description.
 	description := buildTransformDescription(srcDescription, srcHeader, mode, extendDown, srcFormat, format, quality,
-		tileSize, minZoom, maxZoom, resampling, fc)
+		tileSize, minZoom, maxZoom, resampling, nodataFill, missingFill)
 
 	// Create PMTiles writer.
 	encoding := ""
@@ -427,7 +443,7 @@ func discoverSourceTileSize(reader *pmtiles.Reader, format string) int {
 
 func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 	mode tile.TransformMode, extendDown bool, srcFormat, targetFormat string, quality int,
-	tileSize, minZoom, maxZoom int, resampling string, fc *color.RGBA) string {
+	tileSize, minZoom, maxZoom int, resampling string, nodataFill, missingFill *color.RGBA) string {
 
 	var b strings.Builder
 
@@ -468,8 +484,11 @@ func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 		b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
 	}
 
-	if fc != nil {
-		b.WriteString(fmt.Sprintf("  Fill color: rgba(%d,%d,%d,%d)\n", fc.R, fc.G, fc.B, fc.A))
+	if nodataFill != nil {
+		b.WriteString(fmt.Sprintf("  Nodata color: %s\n", cli.FormatColor(nodataFill)))
+	}
+	if missingFill != nil {
+		b.WriteString(fmt.Sprintf("  Fill missing: %s\n", cli.FormatColor(missingFill)))
 	}
 
 	if srcDescription != "" {

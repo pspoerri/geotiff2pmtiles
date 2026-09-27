@@ -48,6 +48,51 @@ func TestParseOptionalColor(t *testing.T) {
 	}
 }
 
+func TestFillColors(t *testing.T) {
+	red := &color.RGBA{255, 0, 0, 255}
+	clear := &color.RGBA{}
+	tests := []struct {
+		name                string
+		args                []string
+		wantNodata, wantMis *color.RGBA
+		wantErr             bool
+	}{
+		{"defaults", nil, nil, clear, false},
+		{"nodata only", []string{"--nodata-color", "255,0,0,255"}, red, clear, false},
+		{"fill-missing off", []string{"--fill-missing", "none"}, nil, nil, false},
+		{"fill-missing empty", []string{"--fill-missing", ""}, nil, nil, false},
+		{"both", []string{"--nodata-color", "#ff0000", "--fill-missing", "#ff0000"}, red, red, false},
+		{"alias sets both", []string{"--fill-color", "255,0,0,255"}, red, red, false},
+		{"alias empty turns both off", []string{"--fill-color", ""}, nil, nil, false},
+		{"alias with nodata-color", []string{"--fill-color", "0,0,0,0", "--nodata-color", "255,0,0,255"}, nil, nil, true},
+		{"alias with fill-missing", []string{"--fill-missing", "none", "--fill-color", "0,0,0,0"}, nil, nil, true},
+		{"bad nodata", []string{"--nodata-color", "red"}, nil, nil, true},
+		{"bad fill-missing", []string{"--fill-missing", "1,2,3"}, nil, nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("t", flag.ContinueOnError)
+			nodata := fs.String("nodata-color", "none", "")
+			missing := fs.String("fill-missing", "0,0,0,0", "")
+			fill := fs.String("fill-color", "", "")
+			if err := fs.Parse(tt.args); err != nil {
+				t.Fatal(err)
+			}
+			gotNodata, gotMissing, err := FillColors(fs, *nodata, *missing, *fill)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if FormatColor(gotNodata) != FormatColor(tt.wantNodata) || FormatColor(gotMissing) != FormatColor(tt.wantMis) {
+				t.Errorf("got nodata %s, fill-missing %s; want %s, %s",
+					FormatColor(gotNodata), FormatColor(gotMissing), FormatColor(tt.wantNodata), FormatColor(tt.wantMis))
+			}
+		})
+	}
+}
+
 func TestHumanSize(t *testing.T) {
 	for in, want := range map[int64]string{
 		0:           "0 B",

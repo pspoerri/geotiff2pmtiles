@@ -331,7 +331,9 @@ type pipelineConfig struct {
 	MaxZoom     int
 	TileSize    int
 	Resampling  string
-	FillColor   *color.RGBA
+	NodataColor *color.RGBA // --nodata-color
+	FillMissing *color.RGBA // --fill-missing
+	FillColor   *color.RGBA // sets both, like the deprecated --fill-color
 	BandCfg     cog.BandConfig
 	MemLimitMB  int
 	Concurrency int
@@ -406,6 +408,11 @@ func runPipeline(t *testing.T, cfg pipelineConfig) string {
 		memoryLimitBytes = int64(cfg.MemLimitMB) * 1024 * 1024
 	}
 
+	nodataColor, fillMissing := cfg.NodataColor, cfg.FillMissing
+	if cfg.FillColor != nil {
+		nodataColor, fillMissing = cfg.FillColor, cfg.FillColor
+	}
+
 	outputDir := filepath.Dir(outputPath)
 	genCfg := tile.Config{
 		MinZoom:          minZoom,
@@ -416,7 +423,8 @@ func runPipeline(t *testing.T, cfg pipelineConfig) string {
 		Bounds:           mergedBounds,
 		Resampling:       resamplingMode,
 		IsTerrarium:      cfg.Format == "terrarium",
-		FillColor:        cfg.FillColor,
+		NodataColor:      nodataColor,
+		FillMissing:      fillMissing,
 		MemoryLimitBytes: memoryLimitBytes,
 		OutputDir:        outputDir,
 	}
@@ -463,7 +471,9 @@ type transformConfig struct {
 	Resampling  string
 	Rebuild     bool
 	Concurrency int
-	FillColor   *color.RGBA
+	NodataColor *color.RGBA // --nodata-color
+	FillMissing *color.RGBA // --fill-missing
+	FillColor   *color.RGBA // sets both, like the deprecated --fill-color
 }
 
 // runTransform executes the PMTiles transform pipeline and returns the output path.
@@ -529,6 +539,11 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 		t.Fatalf("ParseResampling: %v", err)
 	}
 
+	nodataColor, fillMissing := cfg.NodataColor, cfg.FillMissing
+	if cfg.FillColor != nil {
+		nodataColor, fillMissing = cfg.FillColor, cfg.FillColor
+	}
+
 	// Determine mode.
 	formatChanged := format != srcFormat
 	zoomChanged := minZoom < int(srcHeader.MinZoom)
@@ -537,7 +552,7 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 		mode = tile.TransformRebuild
 	} else if formatChanged {
 		mode = tile.TransformReencode
-	} else if cfg.FillColor != nil {
+	} else if nodataColor != nil {
 		mode = tile.TransformReencode
 	}
 
@@ -553,7 +568,8 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 		SourceFormat: srcFormat,
 		Resampling:   resamplingMode,
 		Mode:         mode,
-		FillColor:    cfg.FillColor,
+		NodataColor:  nodataColor,
+		FillMissing:  fillMissing,
 		Bounds:       bounds,
 		OutputDir:    outputDir,
 		IsTerrarium:  terrarium,
