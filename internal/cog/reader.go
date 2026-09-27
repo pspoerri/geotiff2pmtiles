@@ -97,7 +97,7 @@ type Reader struct {
 	floodMask *bitmap
 
 	path       string
-	data       []byte // memory-mapped file contents
+	src        ByteSource // the file's bytes: memory-mapped by Open, anything by OpenSource
 	ifds       []IFD
 	geo        GeoInfo
 	bandCfg    BandConfig // band selection and rescaling config (set via SetBandConfig)
@@ -145,14 +145,26 @@ func Open(path string) (*Reader, error) {
 		return nil, fmt.Errorf("mmap %s: %w", path, err)
 	}
 
-	ifds, bo, err := parseTIFF(bytes.NewReader(data))
+	return OpenSource(path, mmapSource(data))
+}
+
+// OpenSource opens a COG/GeoTIFF over an arbitrary ByteSource.
+//
+// Open is this with the file memory-mapped; any other source -- HTTP range
+// requests against object storage, say -- goes through the same parser.
+// `name` is used for error messages and TFW sidecar lookup; for a remote
+// source the sidecar probe simply finds nothing.
+func OpenSource(name string, src ByteSource) (*Reader, error) {
+	path := name
+
+	ifds, bo, err := parseTIFF(&sourceReadSeeker{src: src})
 	if err != nil {
-		munmapFile(data)
+		src.Close()
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
 
 	if len(ifds) == 0 {
-		munmapFile(data)
+		src.Close()
 		return nil, fmt.Errorf("%s: no IFDs found", path)
 	}
 
@@ -164,7 +176,7 @@ func Open(path string) (*Reader, error) {
 		if len(first.StripOffsets) > 0 {
 			sl = promoteStripsToTiles(first)
 		} else {
-			munmapFile(data)
+			src.Close()
 			return nil, fmt.Errorf("%s: no tile or strip layout found", path)
 		}
 	}
@@ -173,7 +185,7 @@ func Open(path string) (*Reader, error) {
 	case 1, 5, 7, 8, 32946, 50000:
 		// Supported: None, LZW, JPEG, Deflate, ZSTD
 	default:
-		munmapFile(data)
+		src.Close()
 		return nil, fmt.Errorf("%s: unsupported compression type %d", path, first.Compression)
 	}
 
@@ -184,7 +196,7 @@ func Open(path string) (*Reader, error) {
 		if tfwPath := findTFW(path); tfwPath != "" {
 			tfw, err := parseTFW(tfwPath)
 			if err != nil {
-				munmapFile(data)
+				src.Close()
 				return nil, err
 			}
 			geo = tfw.toGeoInfo()
@@ -197,7 +209,7 @@ func Open(path string) (*Reader, error) {
 	}
 
 	return &Reader{
-		data:  data,
+		src:   src,
 		bo:    bo,
 		ifds:  ifds,
 		geo:   geo,
@@ -273,9 +285,9 @@ func promoteStripsToTiles(ifd *IFD) *stripLayout {
 
 // Close unmaps the memory-mapped file.
 func (r *Reader) Close() error {
-	if r.data != nil {
-		err := munmapFile(r.data)
-		r.data = nil
+	if r.src != nil {
+		err := r.src.Close()
+		r.src = nil
 		return err
 	}
 	return nil
@@ -370,11 +382,14 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 	}
 
 	end := offset + size
-	if end > uint64(len(r.data)) {
-		return nil, nil, fmt.Errorf("tile data [%d:%d] exceeds file size %d", offset, end, len(r.data))
+	if end > uint64(r.src.Size()) {
+		return nil, nil, fmt.Errorf("tile data [%d:%d] exceeds file size %d", offset, end, r.src.Size())
 	}
 
-	data := r.data[offset:end]
+	data, err := r.src.Slice(offset, end)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	var decompressed []byte
 	switch ifd.Compression {
@@ -484,7 +499,7 @@ func (r *Reader) readStripsRaw(ifd *IFD, start, end int) ([]byte, error) {
 	for s := start; s < end && s < len(sl.byteCounts); s++ {
 		total += sl.byteCounts[s]
 	}
-	if total > uint64(len(r.data)) {
+	if total > uint64(r.src.Size()) {
 		total = 0 // corrupt byte counts; the per-strip bounds check below reports it
 	}
 	combined := make([]byte, 0, total)
@@ -499,11 +514,14 @@ func (r *Reader) readStripsRaw(ifd *IFD, start, end int) ([]byte, error) {
 			continue
 		}
 		end := offset + size
-		if end > uint64(len(r.data)) {
-			return nil, fmt.Errorf("strip %d data [%d:%d] exceeds file size %d", s, offset, end, len(r.data))
+		if end > uint64(r.src.Size()) {
+			return nil, fmt.Errorf("strip %d data [%d:%d] exceeds file size %d", s, offset, end, r.src.Size())
 		}
 
-		chunk := r.data[offset:end]
+		chunk, err := r.src.Slice(offset, end)
+		if err != nil {
+			return nil, err
+		}
 
 		switch ifd.Compression {
 		case 1: // No compression
@@ -936,11 +954,14 @@ func (r *Reader) readTileDecoded(level, col, row int) (image.Image, error) {
 	}
 
 	end := offset + size
-	if end > uint64(len(r.data)) {
-		return nil, fmt.Errorf("tile data [%d:%d] exceeds file size %d", offset, end, len(r.data))
+	if end > uint64(r.src.Size()) {
+		return nil, fmt.Errorf("tile data [%d:%d] exceeds file size %d", offset, end, r.src.Size())
 	}
 
-	data := r.data[offset:end]
+	data, err := r.src.Slice(offset, end)
+	if err != nil {
+		return nil, err
+	}
 
 	switch ifd.Compression {
 	case 7: // JPEG
@@ -1149,10 +1170,14 @@ func (r *Reader) decodePlanarSeparateJPEG(ifd *IFD, col, row, tilesAcross, tiles
 			continue
 		}
 		end := offset + size
-		if end > uint64(len(r.data)) {
-			return nil, fmt.Errorf("planar separate: tile [%d:%d] exceeds file size %d", offset, end, len(r.data))
+		if end > uint64(r.src.Size()) {
+			return nil, fmt.Errorf("planar separate: tile [%d:%d] exceeds file size %d", offset, end, r.src.Size())
 		}
-		img, err := decodeJPEGBytes(ifd, r.data[offset:end])
+		raw, err := r.src.Slice(offset, end)
+		if err != nil {
+			return nil, err
+		}
+		img, err := decodeJPEGBytes(ifd, raw)
 		if err != nil {
 			return nil, fmt.Errorf("planar separate plane %d: %w", p, err)
 		}
@@ -1723,11 +1748,13 @@ func (r *Reader) DebugIFD(level int) IFD {
 // RawBytes returns n bytes from the memory-mapped data starting at offset.
 func (r *Reader) RawBytes(offset uint64, n int) []byte {
 	end := offset + uint64(n)
-	if end > uint64(len(r.data)) {
-		end = uint64(len(r.data))
+	if end > uint64(r.src.Size()) {
+		end = uint64(r.src.Size())
 	}
 	result := make([]byte, end-offset)
-	copy(result, r.data[offset:end])
+	if b, err := r.src.Slice(offset, end); err == nil {
+		copy(result, b)
+	}
 	return result
 }
 
