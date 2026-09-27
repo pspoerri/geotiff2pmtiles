@@ -30,11 +30,12 @@ const (
 
 // TransformConfig holds configuration for the PMTiles transform pipeline.
 type TransformConfig struct {
-	// Encoder encodes re-encoded and rebuilt tiles, and the fill tiles of
-	// FillMissing; passthrough without FillMissing needs none.
+	// Encoder encodes re-encoded, rebuilt and added tiles, and the fill
+	// tiles of FillMissing; a passthrough that adds neither needs none.
 	Encoder encode.Encoder
 	// NodataColor, when set, replaces transparent pixels of the decoded
-	// tiles. Passthrough copies tiles without decoding and ignores it.
+	// tiles. Passthrough copies the source's levels without decoding and
+	// ignores it there; levels it adds below the source apply it.
 	NodataColor *color.RGBA
 	// FillMissing, when set, is the colour of solid tiles written at the
 	// positions inside Bounds that the source archive does not have. It
@@ -102,6 +103,9 @@ func Transform(cfg TransformConfig, reader PMTilesReader, writer TileWriter) (St
 	srcMinZoom := int(reader.Header().MinZoom)
 	if cfg.Mode == TransformRebuild || cfg.MinZoom >= srcMinZoom {
 		return transformLevels(cfg, reader, writer)
+	}
+	if cfg.Encoder == nil {
+		return Stats{}, fmt.Errorf("adding zoom levels %d-%d below the source's needs an encoder", cfg.MinZoom, srcMinZoom-1)
 	}
 
 	mainCfg := cfg

@@ -38,7 +38,7 @@ jobs:
         run: go vet ./...
 
       - name: Unit tests
-        run: go test -race -count=1 ./internal/...
+        run: go test -race -count=1 ./internal/... ./cmd/...
 
       - name: Integration tests (synthetic)
         run: go test -race -count=1 -timeout 120s -v ./integration/
@@ -93,7 +93,7 @@ jobs:
 
       # No -race: mingw does not ship the race runtime. The Linux job covers it.
       - name: Unit tests
-        run: go test -count=1 ./internal/...
+        run: go test -count=1 ./internal/... ./cmd/...
 
       - name: Integration tests (synthetic)
         run: go test -count=1 -timeout 300s -v ./integration/
