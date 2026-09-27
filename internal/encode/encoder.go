@@ -54,3 +54,7 @@ func Formats() string {
 	}
 	return "jpeg, png, webp (lossless only), terrarium"
 }
+
+// WebPLossy reports whether this build encodes lossy WebP (and so honours
+// --quality for WebP).
+const WebPLossy = webpCGOAvailable

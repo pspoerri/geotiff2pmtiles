@@ -217,6 +217,9 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 					}
 
 					rgba := imageToRGBA(img)
+					if cfg.FillColor != nil {
+						applyFillColorTransform(rgba, *cfg.FillColor)
+					}
 					td := newTileData(rgba, cfg.TileSize)
 					if td.IsUniform() {
 						uniformCount.Add(1)

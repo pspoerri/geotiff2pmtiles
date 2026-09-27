@@ -9,6 +9,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
@@ -58,32 +60,34 @@ func main() {
 		nodataTolStr    string
 		nodataFlood     bool
 		resamplingGamma float64
+		tmpDirFlag      string
 	)
 
-	flag.StringVar(&format, "format", "jpeg", "Tile encoding: jpeg, png, webp, terrarium (auto-selected for float/signed-int elevation data)")
-	flag.IntVar(&quality, "quality", 85, "JPEG/WebP quality 1-100")
-	flag.IntVar(&minZoom, "min-zoom", -1, "Minimum zoom level (default: auto)")
-	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (default: auto from resolution)")
-	flag.IntVar(&tileSize, "tile-size", 256, "Output tile size in pixels")
-	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers")
+	flag.StringVar(&format, "format", "auto", "Tile encoding: auto, jpeg, png, webp, terrarium (auto: terrarium for float/signed-int elevation data, webp when nodata is active, else jpeg)")
+	flag.IntVar(&quality, "quality", 85, "JPEG/WebP quality 1-100 (ignored for png/terrarium; WebP is lossless-only in builds without libwebp)")
+	flag.IntVar(&minZoom, "min-zoom", -1, "Minimum zoom level; -1 = auto: the highest zoom at which the whole extent fits in one tile")
+	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (0-30); -1 = auto from the source resolution")
+	flag.IntVar(&tileSize, "tile-size", 256, "Output tile size in pixels: a power of two from 64 to 4096")
+	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers (>= 1)")
 	flag.StringVar(&resampling, "resampling", "bicubic", "Interpolation method: lanczos, bicubic, bilinear, nearest, mode")
-	flag.Float64Var(&resamplingGamma, "resampling-gamma", 1.0, "Gamma correction for resampling output encoding (1.0 = disabled, typical 1.5-2.2 for dB-space to RGB)")
+	flag.Float64Var(&resamplingGamma, "resampling-gamma", 1.0, "Brighten interpolated output: out = 255*(v/255)^(1/gamma); 1.0 = off, must be > 0, typical 1.5-2.2 for dB-scaled SAR. Ignored for nearest/mode and terrarium")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "Write CPU profile to file")
 	flag.StringVar(&memProfile, "memprofile", "", "Write memory profile to file")
-	flag.IntVar(&memLimitMB, "mem-limit", 0, "Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM)")
+	flag.IntVar(&memLimitMB, "mem-limit", 0, "MB of encoded tiles allowed to queue for the spill file before workers pause (0 = auto: 90% of RAM minus 2 GB; spilling is off if that is under 512 MB)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
-	flag.StringVar(&fillColor, "fill-color", "0,0,0,0", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\" (default: transparent)")
+	flag.StringVar(&tmpDirFlag, "tmp-dir", "", "Directory for temporary files, about 2x the output size at peak (default: the output file's directory)")
+	flag.StringVar(&fillColor, "fill-color", "0,0,0,0", "RGBA color, e.g. \"0,0,0,255\" or \"#000000ff\": replaces transparent/nodata pixels and fills tile positions without data inside the bounds; \"\" = leave missing tiles absent. Not applied to jpeg output unless set explicitly")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (stored in metadata)")
 	flag.StringVar(&layerType, "type", "baselayer", "Layer type: baselayer, overlay")
-	flag.StringVar(&bandsStr, "bands", "1,2,3", "1-indexed band numbers for R,G,B output (e.g. \"4,1,2\" for NIR-R-G)")
-	flag.StringVar(&alphaBandStr, "alpha-band", "auto", "1-indexed band for alpha (0=auto: band 4 for 8-bit spp>=4; -1=force no alpha)")
-	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, log, linear, none (auto: linear for 16-bit, none otherwise)")
-	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range for rescaling: min,max (default: auto-detected from GDAL statistics, else sampled pixels; the selected range is logged)")
-	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer are transparent; may be negative for signed data (auto-detected from GeoTIFF if not set)")
+	flag.StringVar(&bandsStr, "bands", "auto", "1-indexed band numbers for R,G,B, e.g. \"4,1,2\" for NIR-R-G (auto: 1,2,3; gray from band 1 for 1-2 band input)")
+	flag.StringVar(&alphaBandStr, "alpha-band", "auto", "Alpha band: auto (band 4 of 8-bit input with 4+ bands), none, or a 1-indexed band number")
+	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, linear, log, none (auto: GDAL band-description preset if present, else linear over --rescale-range for 16-bit input, none for 8-bit; ignored for terrarium)")
+	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range min,max for rescaling, min < max (default: from GDAL statistics, else sampled pixels, over all bands; the selected range is logged)")
+	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer in [-32768, 65535] are transparent (default: from the GDAL_NODATA tag). Ignored for terrarium, which uses the tag only")
 	flag.StringVar(&nodataTolStr, "nodata-tolerance", "", "Per-band tolerance applied to --nodata matching (default 0 = exact match). Useful for lossy-JPEG borders where strict 0 is smeared to 1..5; try 4–8.")
-	flag.BoolVar(&nodataFlood, "nodata-flood", false, "Source-level flood-fill from the COG outer edges through near-nodata pixels. Only edge-reachable pixels are made transparent; interior dark pixels (text, shadows, canopy) stay opaque. Requires --nodata; pair with a widened --nodata-tolerance (e.g. 40) for scanned/JPEG sources. Costs ~W*H/8 bytes of RAM per source.")
+	flag.BoolVar(&nodataFlood, "nodata-flood", false, "Source-level flood-fill from the COG outer edges through near-nodata pixels. Only edge-reachable pixels are made transparent; interior dark pixels (text, shadows, canopy) stay opaque. Requires --nodata; pair with a widened --nodata-tolerance (e.g. 40) for scanned/JPEG sources. Costs ~W*H/8 bytes of RAM per source. Not for terrarium output.")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>\n\n")
@@ -148,16 +152,38 @@ func main() {
 		log.Fatal("Output file must have .pmtiles extension")
 	}
 
-	// Resolve tile encoder.
-	enc, err := encode.NewEncoder(format, quality)
-	if err != nil {
-		log.Fatalf("Encoder: %v", err)
+	format = strings.ToLower(format)
+	if format == "jpg" {
+		format = "jpeg"
+	}
+	switch format {
+	case "auto", "jpeg", "png", "webp", "terrarium":
+	default:
+		log.Fatalf("--format must be auto, jpeg, png, webp or terrarium, got %q", format)
+	}
+	if quality < 1 || quality > 100 {
+		log.Fatalf("--quality must be 1-100, got %d", quality)
+	}
+	if tileSize < 64 || tileSize > 4096 || tileSize&(tileSize-1) != 0 {
+		log.Fatalf("--tile-size must be a power of two from 64 to 4096, got %d", tileSize)
+	}
+	if concurrency < 1 {
+		log.Fatalf("--concurrency must be >= 1, got %d", concurrency)
+	}
+	if maxZoom > 30 {
+		log.Fatalf("--max-zoom must be <= 30, got %d", maxZoom)
+	}
+	if resamplingGamma <= 0 {
+		log.Fatalf("--resampling-gamma must be > 0, got %g", resamplingGamma)
 	}
 
 	// Resolve resampling method.
 	resamplingMode, err := tile.ParseResampling(resampling)
 	if err != nil {
 		log.Fatalf("Resampling: %v", err)
+	}
+	if resamplingGamma != 1.0 && (resamplingMode == tile.ResamplingNearest || resamplingMode == tile.ResamplingMode) {
+		log.Printf("WARNING: --resampling-gamma has no effect with --resampling %s", resampling)
 	}
 
 	// Parse fill color.
@@ -198,6 +224,14 @@ func main() {
 		log.Printf("Opened %d COG(s) in %v", len(sources), time.Since(start).Round(time.Millisecond))
 	}
 
+	// All sources are projected with the first file's CRS.
+	for _, src := range sources {
+		if src.EPSG() != sources[0].EPSG() {
+			log.Fatalf("%s is in EPSG:%d but %s is in EPSG:%d; all inputs must share one CRS, reproject them first (e.g. gdalwarp -t_srs EPSG:4326)",
+				src.Path(), src.EPSG(), sources[0].Path(), sources[0].EPSG())
+		}
+	}
+
 	// Check for geographic holes in coverage.
 	gaps := cog.CheckCoverageGaps(sources)
 	if len(gaps) > 0 {
@@ -212,19 +246,30 @@ func main() {
 	// Apply format override (e.g. terrarium for float data) before band config
 	// parsing so that the format is settled before we proceed.
 	if preset, ok := sources[0].DetectPreset(); ok {
-		if preset.Format != "" && format == "jpeg" {
+		if preset.Format != "" && format == "auto" {
 			format = preset.Format
 			log.Printf("Auto-detected: %s (format: %s)", preset.Name, format)
-			enc, err = encode.NewEncoder(format, quality)
-			if err != nil {
-				log.Fatalf("Encoder: %v", err)
-			}
 		}
 	}
 
 	// Validate terrarium requires float or signed-integer input.
 	if format == "terrarium" && !sources[0].IsFloat() {
 		log.Fatal("Terrarium format requires float or signed-integer GeoTIFF input (elevation data)")
+	}
+	for _, src := range sources {
+		// The image path reads unsigned or signed 16-bit integers; float and
+		// other signed samples would be decoded from their low byte into noise.
+		if format != "terrarium" && src.IsFloat() && (src.IsIEEEFloat() || src.BitsPerSample() != 16) {
+			log.Fatalf("--format %s cannot render %s (%s); use --format terrarium",
+				format, src.Path(), src.FormatDescription())
+		}
+	}
+	if format == "terrarium" && (nodataStr != "" || nodataTolStr != "" || nodataFlood) {
+		log.Printf("WARNING: --nodata, --nodata-tolerance and --nodata-flood are ignored for terrarium output; only the GDAL_NODATA tag is used")
+		nodataStr, nodataTolStr, nodataFlood = "", "", false
+	}
+	if format == "terrarium" && resamplingGamma != 1.0 {
+		log.Printf("WARNING: --resampling-gamma has no effect for terrarium output")
 	}
 
 	// Parse band config. Terrarium reads elevation directly, so rescaling
@@ -271,16 +316,29 @@ func main() {
 	// If nodata is active but the output format can't carry transparency,
 	// switch to WebP automatically (when the user didn't pick --format),
 	// or warn if they explicitly chose jpeg.
-	if bandCfg.HasNodata && format == "jpeg" {
-		if isFlagSet("format") {
-			log.Printf("WARNING: --nodata is set but --format=jpeg cannot carry transparency; nodata pixels will be encoded as black. Use --format=webp or --format=png for true transparency.")
-		} else {
-			log.Printf("Nodata is active; switching output format jpeg → webp so transparency is preserved (override with --format=jpeg).")
+	if format == "auto" {
+		format = "jpeg"
+		if bandCfg.HasNodata {
 			format = "webp"
-			enc, err = encode.NewEncoder(format, quality)
-			if err != nil {
-				log.Fatalf("Encoder: %v", err)
+			log.Printf("Nodata is active; using webp so transparency is preserved (override with --format=jpeg).")
+			if !encode.WebPLossy {
+				log.Printf("WARNING: this build has no lossy WebP encoder (built without libwebp); tiles will be lossless WebP, which is much larger for imagery. Use a libwebp build or --format png.")
 			}
+		}
+	} else if bandCfg.HasNodata && format == "jpeg" {
+		log.Printf("WARNING: --nodata is set but --format=jpeg cannot carry transparency; nodata pixels will be encoded as black. Use --format=webp or --format=png for true transparency.")
+	}
+	enc, err := encode.NewEncoder(format, quality)
+	if err != nil {
+		log.Fatalf("Encoder: %v", err)
+	}
+	// JPEG cannot store transparency: the transparent default fill would
+	// turn every tile position without data into a black tile.
+	if format == "jpeg" && fc != nil && fc.A < 255 {
+		if isFlagSet("fill-color") {
+			log.Printf("WARNING: --fill-color alpha %d cannot be stored in jpeg; filled areas will be black", fc.A)
+		} else {
+			fc = nil
 		}
 	}
 
@@ -367,6 +425,9 @@ func main() {
 			minZoom = maxZoom
 		}
 	}
+	if minZoom > maxZoom {
+		log.Fatalf("invalid zoom range %d-%d: --min-zoom must be <= --max-zoom (auto max zoom is %d)", minZoom, maxZoom, autoMax)
+	}
 	if verbose {
 		log.Printf("Zoom range: %d - %d (auto-detected max: %d)", minZoom, maxZoom, autoMax)
 	}
@@ -382,8 +443,10 @@ func main() {
 
 	// Print settings summary.
 	fmt.Printf("geotiff2pmtiles %s (commit %s, built %s)\n", version, commit, buildDate)
-	switch format {
-	case "jpeg", "webp":
+	switch {
+	case format == "webp" && !encode.WebPLossy:
+		fmt.Printf("  %-14s webp (lossless; --quality ignored in this build)\n", "Format:")
+	case format == "jpeg" || format == "webp":
 		fmt.Printf("  %-14s %s (quality: %d)\n", "Format:", format, quality)
 	default:
 		fmt.Printf("  %-14s %s\n", "Format:", format)
@@ -426,8 +489,10 @@ func main() {
 	fmt.Printf("  %-14s %d file(s)\n", "Input:", len(tiffFiles))
 	fmt.Printf("  %-14s %s\n", "Output:", outputPath)
 
+	tmpDir, cleanup := makeTmpDir(tmpDirFlag, outputPath)
+	defer cleanup()
+
 	// Build tile generation config.
-	outputDir := filepath.Dir(outputPath)
 	cfg := tile.Config{
 		MinZoom:          minZoom,
 		MaxZoom:          maxZoom,
@@ -441,7 +506,7 @@ func main() {
 		IsTerrarium:      format == "terrarium",
 		FillColor:        fc,
 		MemoryLimitBytes: memoryLimitBytes,
-		OutputDir:        outputDir,
+		OutputDir:        tmpDir,
 	}
 
 	// Build description for PMTiles metadata.
@@ -458,13 +523,14 @@ func main() {
 		Bounds:      mergedBounds,
 		TileFormat:  enc.PMTileType(),
 		TileSize:    tileSize,
-		TempDir:     outputDir,
+		TempDir:     tmpDir,
 		Description: description,
 		Attribution: attribution,
 		Type:        layerType,
 		Encoding:    encoding,
 	})
 	if err != nil {
+		cleanup()
 		log.Fatalf("Creating PMTiles writer: %v", err)
 	}
 
@@ -473,6 +539,7 @@ func main() {
 	stats, err := tile.Generate(cfg, sources, writer)
 	if err != nil {
 		writer.Abort()
+		cleanup()
 		log.Fatalf("Tile generation: %v", err)
 	}
 
@@ -484,6 +551,7 @@ func main() {
 
 	// Finalize PMTiles file.
 	if err := writer.Finalize(); err != nil {
+		cleanup()
 		log.Fatalf("Finalizing PMTiles: %v", err)
 	}
 
@@ -690,40 +758,66 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, so
 	firstSrc := sources[0]
 	var cfg cog.BandConfig
 
-	// Parse --bands.
-	parts := strings.Split(bandsStr, ",")
-	if len(parts) != 3 {
-		return cfg, fmt.Errorf("--bands must be 3 comma-separated band numbers (e.g. \"1,2,3\"), got %q", bandsStr)
-	}
-	for i, p := range parts {
-		v, err := strconv.Atoi(strings.TrimSpace(p))
-		if err != nil || v < 1 {
-			return cfg, fmt.Errorf("invalid band number %q (must be >= 1)", p)
+	// Parse --bands. 1-band input is always rendered gray by the reader.
+	if bandsStr == "auto" {
+		cfg.Bands = [3]int{1, 2, 3}
+		if firstSrc.SamplesPerPixel() == 2 {
+			cfg.Bands = [3]int{1, 1, 1}
 		}
-		cfg.Bands[i] = v
+	} else {
+		parts := strings.Split(bandsStr, ",")
+		if len(parts) != 3 {
+			return cfg, fmt.Errorf("--bands must be \"auto\" or 3 comma-separated band numbers (e.g. \"1,2,3\"), got %q", bandsStr)
+		}
+		for i, p := range parts {
+			v, err := strconv.Atoi(strings.TrimSpace(p))
+			if err != nil || v < 1 {
+				return cfg, fmt.Errorf("invalid band number %q (must be >= 1)", p)
+			}
+			cfg.Bands[i] = v
+		}
 	}
 
 	// Parse --alpha-band.
 	switch alphaBandStr {
 	case "auto":
 		cfg.AlphaBand = 0
+	case "none":
+		cfg.AlphaBand = -1
 	default:
 		v, err := strconv.Atoi(strings.TrimSpace(alphaBandStr))
-		if err != nil {
-			return cfg, fmt.Errorf("--alpha-band must be \"auto\" or an integer, got %q", alphaBandStr)
+		if err != nil || v < -1 {
+			return cfg, fmt.Errorf("--alpha-band must be auto, none or a band number, got %q", alphaBandStr)
 		}
 		cfg.AlphaBand = v
 	}
 
+	for _, src := range sources {
+		spp := src.SamplesPerPixel()
+		if spp == 1 {
+			continue
+		}
+		for _, b := range append(cfg.Bands[:], cfg.AlphaBand) {
+			if b > spp {
+				return cfg, fmt.Errorf("band %d does not exist: %s has %d band(s); set --bands/--alpha-band", b, src.Path(), spp)
+			}
+		}
+	}
+
 	// Parse --rescale and --rescale-range.
-	is16 := firstSrc.BitsPerSample() == 16
-	bandsExplicit := bandsStr != "1,2,3"
+	// 9-16 bit samples (incl. bit-packed depths such as Sentinel-2's 15-bit
+	// L2A) are widened to 16 bits by the reader and need rescaling to 8-bit.
+	bits := firstSrc.BitsPerSample()
+	is16 := bits > 8 && bits <= 16
 	switch rescaleStr {
 	case "auto":
 		if is16 {
 			if rescaleRange == "" {
 				// Try auto-detection from GDAL metadata before erroring.
-				if preset, ok := firstSrc.DetectPreset(); ok && !bandsExplicit && preset.Format == "" {
+				if preset, ok := firstSrc.DetectPreset(); ok && bandsStr == "auto" && preset.Format == "" {
+					if isFlagSet("alpha-band") {
+						preset.BandCfg.AlphaBand = cfg.AlphaBand
+					}
 					log.Printf("Auto-detected: %s (%s)", preset.Name, preset.BandCfg)
 					return preset.BandCfg, nil
 				}
@@ -803,6 +897,9 @@ func parseRange(s string) (float64, float64, error) {
 	if err != nil {
 		return 0, 0, fmt.Errorf("invalid max value %q: %w", parts[1], err)
 	}
+	if minV >= maxV {
+		return 0, 0, fmt.Errorf("min (%g) must be less than max (%g)", minV, maxV)
+	}
 	return minV, maxV, nil
 }
 
@@ -822,4 +919,29 @@ func humanSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+// makeTmpDir creates a per-run directory for temporary tile and spill files
+// under dir (default: the output file's directory) and returns a cleanup that
+// removes it. The cleanup also runs on SIGINT/SIGTERM, so an interrupted run
+// does not leave gigabytes of *.tmp files behind. log.Fatal skips defers, so
+// fatal paths after this point must call cleanup themselves.
+func makeTmpDir(dir, outputPath string) (string, func()) {
+	if dir == "" {
+		dir = filepath.Dir(outputPath)
+	}
+	tmp, err := os.MkdirTemp(dir, ".geotiff2pmtiles-tmp-*")
+	if err != nil {
+		log.Fatalf("Creating temp directory: %v", err)
+	}
+	cleanup := func() { os.RemoveAll(tmp) }
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		cleanup()
+		log.Printf("Interrupted; removed temp directory %s", tmp)
+		os.Exit(130)
+	}()
+	return tmp, cleanup
 }

@@ -4,11 +4,16 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
 )
 
 func main() {
+	if len(os.Args) != 2 || strings.HasPrefix(os.Args[1], "-") {
+		fmt.Fprintf(os.Stderr, "Usage: debug <file.tif>\n")
+		os.Exit(2)
+	}
 	path := os.Args[1]
 	r, err := cog.Open(path)
 	if err != nil {

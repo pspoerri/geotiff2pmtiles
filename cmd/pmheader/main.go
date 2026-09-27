@@ -214,6 +214,15 @@ func patch(inputPath, outputPath string, opts patchOptions) error {
 		return fmt.Errorf("no changes specified; use --show to inspect the file")
 	}
 
+	for _, z := range []struct {
+		name string
+		o    optInt
+	}{{"min-zoom", opts.minZoom}, {"max-zoom", opts.maxZoom}, {"center-zoom", opts.centerZoom}} {
+		if z.o.set && (z.o.val < 0 || z.o.val > 30) {
+			return fmt.Errorf("--%s must be 0-30, got %d", z.name, z.o.val)
+		}
+	}
+
 	// Build patched header.
 	dstHdr := srcHdr
 	if opts.minZoom.set {
@@ -224,6 +233,9 @@ func patch(inputPath, outputPath string, opts patchOptions) error {
 	}
 	if opts.centerZoom.set {
 		dstHdr.CenterZoom = uint8(opts.centerZoom.val)
+	}
+	if dstHdr.MinZoom > dstHdr.MaxZoom {
+		return fmt.Errorf("min zoom %d is greater than max zoom %d", dstHdr.MinZoom, dstHdr.MaxZoom)
 	}
 	if opts.minLon.set {
 		dstHdr.MinLon = opts.minLon.val
