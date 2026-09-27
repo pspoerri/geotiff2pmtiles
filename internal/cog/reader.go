@@ -8,6 +8,7 @@ import (
 	"github.com/klauspost/compress/zlib"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/jpeg"
 	"io"
 	"log"
@@ -1051,6 +1052,9 @@ func (r *Reader) readTileDecoded(level, col, row int) (image.Image, error) {
 
 	// Strip-based: compose virtual tile from individual strips.
 	if r.strip != nil && level == 0 {
+		if ifd.Compression == 7 {
+			return r.decodeJPEGStripTile(ifd, row)
+		}
 		data, _, err := r.readStripTileRaw(ifd, row)
 		if err != nil {
 			return nil, err
@@ -1196,6 +1200,46 @@ func (r *Reader) decodeJPEGTile(ifd *IFD, data []byte) (image.Image, error) {
 	rgba := toRGBA(img)
 	applyNodataMaskRGBA(rgba, uint8(cfg.Nodata), uint8(cfg.NodataTolerance))
 	return rgba, nil
+}
+
+// decodeJPEGStripTile decodes virtual tile tileRow of a JPEG strip TIFF.
+// Every strip is a JPEG stream of its own (abbreviated when JPEGTables is
+// set), so the strips are decoded one by one and stacked rather than
+// concatenated. Sparse strips stay transparent, rows past the image too, and
+// nodata is applied as decodeJPEGTile applies it.
+func (r *Reader) decodeJPEGStripTile(ifd *IFD, tileRow int) (image.Image, error) {
+	sl := r.strip
+	if sl.planes > 1 {
+		return nil, fmt.Errorf("planar-separate (PlanarConfiguration=2) strip TIFFs with JPEG compression are not supported")
+	}
+	w := int(ifd.TileWidth)
+	out := image.NewRGBA(image.Rect(0, 0, w, int(ifd.TileHeight)))
+	start := tileRow * sl.stripsPerTile
+	for s := start; s < min(start+sl.stripsPerTile, sl.stripsPerPlane); s++ {
+		offset, size := sl.offsets[s], sl.byteCounts[s]
+		if size == 0 {
+			continue
+		}
+		if offset+size > uint64(r.src.Size()) {
+			return nil, fmt.Errorf("strip %d data [%d:%d] exceeds file size %d", s, offset, offset+size, r.src.Size())
+		}
+		data, err := r.src.Slice(offset, offset+size)
+		if err != nil {
+			return nil, err
+		}
+		img, err := decodeJPEGBytes(ifd, data)
+		if err != nil {
+			return nil, fmt.Errorf("strip %d: %w", s, err)
+		}
+		// Clipped to the strip's rows: the last one may be short.
+		y0 := (s - start) * int(sl.rowsPerStrip)
+		dst := image.Rect(0, y0, w, y0+sl.stripRows(s, ifd.Height))
+		draw.Draw(out, dst, img, img.Bounds().Min, draw.Src)
+	}
+	if cfg := r.bandCfg; cfg.HasNodata && r.floodMask == nil {
+		applyNodataMaskRGBA(out, uint8(cfg.Nodata), uint8(cfg.NodataTolerance))
+	}
+	return out, nil
 }
 
 // decodeJPEGBytes is the raw JPEG decode (with JPEGTables prepended if present).

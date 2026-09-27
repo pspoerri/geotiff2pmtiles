@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"image"
+	"image/color"
+	"image/draw"
 	"image/jpeg"
 	"testing"
 )
@@ -212,5 +214,92 @@ func TestNodataTolerance(t *testing.T) {
 	}
 	if a := rgba.Pix[rgba.PixOffset(1, 0)+3]; a != 255 {
 		t.Errorf("pixel1 alpha = %d, want 255", a)
+	}
+}
+
+// splitJPEGTables splits a full JPEG stream the way libtiff writes JPEG
+// TIFFs: the quantisation and Huffman tables go into the JPEGTables tag
+// (SOI ... EOI) and each strip keeps an abbreviated stream without them.
+func splitJPEGTables(full []byte) (tables, abbrev []byte) {
+	tables = []byte{0xFF, 0xD8}
+	abbrev = []byte{0xFF, 0xD8}
+	for i := 2; i+4 <= len(full); {
+		marker := full[i+1]
+		n := int(full[i+2])<<8 | int(full[i+3])
+		if marker == 0xDA { // SOS: the scan runs to the end of the stream
+			return append(tables, 0xFF, 0xD9), append(abbrev, full[i:]...)
+		}
+		if marker == 0xDB || marker == 0xC4 { // DQT, DHT
+			tables = append(tables, full[i:i+2+n]...)
+		} else {
+			abbrev = append(abbrev, full[i:i+2+n]...)
+		}
+		i += 2 + n
+	}
+	return nil, nil
+}
+
+// TestJPEGStrips: every strip of a JPEG strip TIFF is its own JPEG stream.
+// They must be decoded one by one and stacked (the short last strip clipped),
+// not concatenated and read as raw samples, which gave noise.
+func TestJPEGStrips(t *testing.T) {
+	const w, h, rps = 16, 13, 8 // strips of 8 and 5 rows
+	strips := []color.RGBA{{0, 0, 0, 255}, {200, 100, 50, 255}}
+	var data, tabled, tables []byte
+	var offsets, counts, tabledOffsets, tabledCounts []uint64
+	for s, c := range strips {
+		img := image.NewRGBA(image.Rect(0, 0, w, min(rps, h-s*rps)))
+		draw.Draw(img, img.Bounds(), image.NewUniform(c), image.Point{}, draw.Src)
+		var buf bytes.Buffer
+		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err != nil {
+			t.Fatal(err)
+		}
+		offsets = append(offsets, uint64(len(data)))
+		counts = append(counts, uint64(buf.Len()))
+		data = append(data, buf.Bytes()...)
+
+		var abbrev []byte
+		tables, abbrev = splitJPEGTables(buf.Bytes()) // identical for both strips
+		tabledOffsets = append(tabledOffsets, uint64(len(tabled)))
+		tabledCounts = append(tabledCounts, uint64(len(abbrev)))
+		tabled = append(tabled, abbrev...)
+	}
+	reader := func(t *testing.T, data, tables []byte, offsets, counts []uint64, cfg BandConfig) *Reader {
+		ifd := IFD{Width: w, Height: h, SamplesPerPixel: 3, BitsPerSample: []uint16{8, 8, 8},
+			Compression: 7, Photometric: 6, PlanarConfig: 1, RowsPerStrip: rps,
+			StripOffsets: offsets, StripByteCounts: counts, JPEGTables: tables}
+		sl, err := promoteStripsToTiles(&ifd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &Reader{src: mmapSource(data), bo: binary.LittleEndian, ifds: []IFD{ifd}, strip: sl, bandCfg: cfg}
+	}
+
+	plain := map[int]color.RGBA{ // row -> pixel at x=5
+		3: {0, 0, 0, 255}, 10: {200, 100, 50, 255}, 12: {200, 100, 50, 255}, 13: {}}
+	near := func(got, want uint8) bool { return absDiff(int(got), int(want)) <= 4 }
+	for _, tc := range []struct {
+		name string
+		r    *Reader
+		want map[int]color.RGBA
+	}{
+		{"plain", reader(t, data, nil, offsets, counts, BandConfig{}), plain},
+		{"JPEGTables", reader(t, tabled, tables, tabledOffsets, tabledCounts, BandConfig{}), plain},
+		{"nodata", reader(t, data, nil, offsets, counts, BandConfig{HasNodata: true, NodataTolerance: 4}),
+			map[int]color.RGBA{3: {}, 10: {200, 100, 50, 255}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := tc.r
+			img, err := r.ReadTile(0, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for y, want := range tc.want {
+				got := color.RGBAModel.Convert(img.At(5, y)).(color.RGBA)
+				if !near(got.R, want.R) || !near(got.G, want.G) || !near(got.B, want.B) || got.A != want.A {
+					t.Errorf("pixel (5,%d) = %v, want ≈%v", y, got, want)
+				}
+			}
+		})
 	}
 }
