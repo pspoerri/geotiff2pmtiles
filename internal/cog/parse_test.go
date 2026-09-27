@@ -243,7 +243,7 @@ func TestValueRangeSkipsMaskIFDs(t *testing.T) {
 	if got := r.IFDCount(); got != 2 {
 		t.Fatalf("IFDCount() = %d, want 2", got)
 	}
-	lo, hi, _, err := r.ValueRange()
+	lo, hi, _, err := r.ValueRange(BandConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -57,7 +57,7 @@ func TestSignedPackedSamples(t *testing.T) {
 		}
 	}
 
-	if lo, hi, err := r.scanRange(); err != nil || lo != -2 || hi != 1 {
+	if lo, hi, err := r.scanRange(BandConfig{}); err != nil || lo != -2 || hi != 1 {
 		t.Errorf("scanRange = [%v, %v], %v; want [-2, 1]", lo, hi, err)
 	}
 
