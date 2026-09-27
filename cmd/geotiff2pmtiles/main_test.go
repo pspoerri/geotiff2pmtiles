@@ -122,6 +122,40 @@ func TestCheckSourceCRSs(t *testing.T) {
 	}
 }
 
+// --source-epsg supplies a CRS, never a geotransform: a source without one
+// fails whatever its EPSG code, also after a valid source in the same CRS.
+func TestCheckSourceCRSsNeedsGeotransform(t *testing.T) {
+	utm := writeGeoTIFF(t, 32632, 10, 10, 500000, 5200000, 10)
+	noGeo := writeGeoTIFF(t, 32632, 10, 10, 0, 0, 0)
+	noGeo.SetEPSG(32632)
+	for _, sources := range [][]*cog.Reader{{noGeo}, {utm, noGeo}} {
+		err := checkSourceCRSs(sources)
+		if err == nil || !strings.Contains(err.Error(), "geotransform") || !strings.Contains(err.Error(), noGeo.Path()) {
+			t.Errorf("source without a geotransform: err = %v", err)
+		}
+	}
+}
+
+// A projected grid read as EPSG:4326 lies far beyond the poles; a global
+// grid registered on pixel centres reaches half a pixel past them.
+func TestCheckBoundsWGS84(t *testing.T) {
+	forced := writeGeoTIFF(t, 32632, 10, 10, 500000, 5200000, 10)
+	forced.SetEPSG(4326)
+	global := writeGeoTIFF(t, 4326, 360, 181, -180.5, 90.5, 1)
+	for _, tc := range []struct {
+		src  *cog.Reader
+		fail bool
+	}{{forced, true}, {global, false}, {writeGeoTIFF(t, 32632, 10, 10, 500000, 5200000, 10), false}} {
+		b, err := cog.MergedBoundsWGS84([]*cog.Reader{tc.src})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := checkBoundsWGS84(b, []*cog.Reader{tc.src}); (err != nil) != tc.fail {
+			t.Errorf("EPSG:%d, bounds %+v: err = %v, want failure %v", tc.src.EPSG(), b, err, tc.fail)
+		}
+	}
+}
+
 // Coverage boxes are compared only when all sources share one CRS: a degree
 // box next to a metre box is not a hole.
 func TestCoverageGapsPerCRS(t *testing.T) {
