@@ -1603,16 +1603,18 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			rescaleMin, rescaleMax = -float64(int(1)<<(bits-1)), float64(int(1)<<(bits-1)-1)
 		}
 	}
+	// Tabulated once per tile, so that the per-pixel loop makes no calls: a
+	// call per sample (up to four per pixel) spills the loop's registers, and
+	// 65536 entries cost less than the calls for a 256x256 tile.
 	rescaler := buildRescaler(rescaleMode, rescaleMin+fbias, rescaleMax+fbias)
-	// The identity (8-bit, no rescale: the CLI's RGB path) is inlined rather
-	// than called: every call spills the loop's live registers.
-	identity := rescaleMode == RescaleNone
-	rescale := func(v uint16) uint8 {
-		if identity {
-			return uint8(v)
-		}
-		return rescaler(v)
+	lut := make([]uint8, 256)
+	if is16 {
+		lut = make([]uint8, 1<<16)
 	}
+	for i := range lut {
+		lut[i] = rescaler(uint16(i))
+	}
+	rescale := func(v uint16) uint8 { return lut[v] }
 
 	// readSample reads one sample from the pixel data at the given 0-indexed band.
 	readSample := func(pixelOff, band int) uint16 {
