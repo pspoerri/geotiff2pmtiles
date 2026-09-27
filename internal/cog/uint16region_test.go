@@ -75,7 +75,7 @@ func uint16TiledReader(t *testing.T, w, h, tw, th, spp, emptyTile int) (*Reader,
 		TileOffsets:     offsets,
 		TileByteCounts:  counts,
 	}
-	return &Reader{bo: binary.LittleEndian, ifds: []IFD{ifd}, data: data}, want
+	return &Reader{bo: binary.LittleEndian, ifds: []IFD{ifd}, src: mmapSource(data)}, want
 }
 
 // ReadUint16Region must return the stored samples, unscaled, for regions that

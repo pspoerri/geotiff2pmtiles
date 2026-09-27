@@ -135,7 +135,7 @@ func TestPlanarSeparateJPEG(t *testing.T) {
 		TileOffsets:     offsets,
 		TileByteCounts:  counts,
 	}
-	r := &Reader{bo: binary.LittleEndian, ifds: []IFD{*ifd}, data: combined}
+	r := &Reader{bo: binary.LittleEndian, ifds: []IFD{*ifd}, src: mmapSource(combined)}
 
 	img, err := r.ReadTile(0, 0, 0)
 	if err != nil {
@@ -178,7 +178,7 @@ func TestPlanarSeparateRawErrors(t *testing.T) {
 		TileOffsets:     []uint64{0},
 		TileByteCounts:  []uint64{uint64(w * h)},
 	}
-	r := &Reader{bo: binary.LittleEndian, ifds: []IFD{*ifd}, data: make([]byte, w*h)}
+	r := &Reader{bo: binary.LittleEndian, ifds: []IFD{*ifd}, src: mmapSource(make([]byte, w*h))}
 
 	if _, err := r.ReadTile(0, 0, 0); err == nil {
 		t.Fatal("expected error for uncompressed planar-separate, got nil")
