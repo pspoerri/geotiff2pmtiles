@@ -1,3 +1,9 @@
+// Package pmtiles reads and writes PMTiles v3 archives. The Writer appends
+// tile data to a temp file, deduplicates small tiles, and at Finalize sorts
+// the index by tile ID, splits directories to fit the 16 KiB root budget
+// and streams the clustered tiles into <output>.partial, which is renamed
+// over the output. The Reader keeps the index as run-length entries and
+// follows leaf directories to any depth.
 package pmtiles
 
 import (

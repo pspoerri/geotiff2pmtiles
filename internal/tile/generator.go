@@ -1,3 +1,9 @@
+// Package tile builds tile pyramids. Generate renders the max zoom from
+// GeoTIFF sources, reprojecting each output pixel into each source's own
+// CRS and resampling there, then downsamples the lower zooms. Transform
+// copies, re-encodes or rebuilds an existing PMTiles archive. Levels that
+// are downsampled keep their encoded tiles in a DiskTileStore, which spills
+// them to disk; finished tiles go to a TileWriter.
 package tile
 
 import (

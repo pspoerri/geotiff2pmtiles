@@ -1,3 +1,9 @@
+// Package encode encodes tiles as JPEG, PNG, WebP or Terrarium and decodes
+// them back for pyramid building and pmtransform. Pipeline *image.RGBA
+// buffers hold straight (non-premultiplied) alpha, which the encoders keep,
+// and DecodeImage returns images with alpha as straight *image.RGBA. Lossy
+// WebP needs libwebp through cgo; builds without cgo encode lossless WebP
+// only.
 package encode
 
 import (

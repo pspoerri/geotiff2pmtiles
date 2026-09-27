@@ -1,3 +1,11 @@
+// pmtransform writes a new PMTiles archive from an existing one: it changes
+// the tile format or zoom range, recolours nodata, fills missing tiles or
+// rebuilds the lower levels. Tiles are copied byte for byte unless a flag
+// needs them decoded.
+//
+// Usage:
+//
+//	pmtransform [flags] <input.pmtiles> <output.pmtiles>
 package main
 
 import (

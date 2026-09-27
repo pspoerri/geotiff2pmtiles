@@ -1,3 +1,8 @@
+// Package coord converts coordinates between WGS84 and source CRSs: native
+// UTM, Swiss LV95, WGS84 and Web Mercator projections, and a wroge/crs
+// fallback for other EPSG codes. It also holds the Web Mercator tile math,
+// longitude wrapping at the antimeridian, CRS unit conversion and the
+// Hilbert ordering of tiles.
 package coord
 
 import (

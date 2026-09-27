@@ -16,8 +16,9 @@ const maxRangeScanTiles = 64
 // nodata (or all have one value), e.g. for a source that is all ocean.
 var ErrNoValueRange = errors.New("no usable value range found in sampled pixels")
 
-// ValueRange returns the min/max sample value of a 16-bit (signed or unsigned) raster for
-// automatic rescaling, and where it came from. Only the bands cfg renders count
+// ValueRange returns the min/max sample value of a 9..16-bit (signed or
+// unsigned, bit-packed included) raster for automatic rescaling, and where
+// it came from. Only the bands cfg renders count
 // (see renderedBands): bands left out by cfg.Bands and the alpha band would
 // otherwise stretch the range. GDAL band statistics
 // (STATISTICS_MINIMUM/MAXIMUM) are used when every rendered band has them;

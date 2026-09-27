@@ -1,3 +1,11 @@
+// geotiff2pmtiles converts GeoTIFF and Cloud Optimized GeoTIFF files to a
+// PMTiles v3 archive. Directories are scanned recursively; inputs may mix
+// CRSs. Format, bands, rescale range and zoom range are detected from the
+// input unless set by flags.
+//
+// Usage:
+//
+//	geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 package main
 
 import (
