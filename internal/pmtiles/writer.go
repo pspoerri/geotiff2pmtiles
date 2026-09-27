@@ -348,6 +348,11 @@ func (w *Writer) buildMetadata() []byte {
 		meta["encoding"] = w.opts.Encoding
 	}
 
+	// Caller-supplied keys, merged last so they win over the derived ones.
+	for k, v := range w.opts.Extra {
+		meta[k] = v
+	}
+
 	data, _ := json.Marshal(meta)
 	return data
 }
