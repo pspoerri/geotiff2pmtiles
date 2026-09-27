@@ -105,7 +105,7 @@ type Reader struct {
 	path       string
 	src        ByteSource // the file's bytes: memory-mapped by Open, anything by OpenSource, closedSource after Close
 	ifds       []IFD
-	masks      []IFD // GDAL internal mask of each level (Width 0: none); nil if the file has none
+	masks      []IFD // GDAL internal mask of each level; nil unless level 0 has one (see levelMasks)
 	geo        GeoInfo
 	bandCfg    BandConfig // band selection and rescaling config (set via SetBandConfig)
 	id         int        // unique numeric ID for fast cache keying (from nextReaderID, or SetID)
@@ -1089,7 +1089,7 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	if level < len(r.masks) && r.masks[level].Width != 0 {
+	if level < len(r.masks) {
 		if img, err = r.applyMask(img, &r.masks[level], col, row); err != nil {
 			return nil, err
 		}
