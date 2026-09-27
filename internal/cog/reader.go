@@ -210,9 +210,9 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 		src.Close()
 		return nil, fmt.Errorf("%s: unsupported compression type %d", path, first.Compression)
 	}
-	if first.tileSamples() > maxTileSamples {
+	if first.tileSamples() > maxTileSamples && (sl == nil || !sl.backed(first, src.Size())) {
 		src.Close()
-		return nil, fmt.Errorf("%s: %dx%d-pixel tiles of %d samples per pixel are too large to decode",
+		return nil, fmt.Errorf("%s: %dx%d-pixel tiles of %d samples per pixel are too large to decode; rewrite the file tiled (gdal_translate -co TILED=YES)",
 			path, first.TileWidth, first.TileHeight, first.SamplesPerPixel)
 	}
 
@@ -330,6 +330,40 @@ func promoteStripsToTiles(ifd *IFD) (*stripLayout, error) {
 	ifd.TileByteCounts = virtualByteCounts
 
 	return sl, nil
+}
+
+// backed reports whether every virtual tile of ifd, a promoted strip IFD,
+// has the data to fill its rows: its strips' bytes, capped at the file size,
+// times the most a byte can decode to. The readers size a tile's buffers
+// from the tags before decoding, so this lets a single strip of a large
+// image past maxTileSamples while garbage Width or RowsPerStrip tags still
+// fail at open.
+func (sl *stripLayout) backed(ifd *IFD, fileSize int64) bool {
+	rowBytes := float64(ifd.Width) * float64(max(int(ifd.SamplesPerPixel), 1)) * float64(ifd.bitsPerSample()) / 8
+	for i, n := range ifd.TileByteCounts {
+		rows := min(int(ifd.TileHeight), int(ifd.Height)-i*int(ifd.TileHeight))
+		if float64(rows)*rowBytes > math.Min(float64(n), float64(fileSize))*maxExpansion(ifd.Compression) {
+			return false
+		}
+	}
+	return true
+}
+
+// maxExpansion is the most bytes one byte compressed with compression can
+// decode to, rounded up: deflate tops out at 1032, a 12-bit LZW code
+// decodes to at most 4096 bytes, and a 4-byte zstd RLE block to 128 KiB.
+// JPEG, a bit or more per 8x8 block, stays below that.
+func maxExpansion(compression uint16) float64 {
+	switch compression {
+	case 1:
+		return 1
+	case 8, 32946:
+		return 1032
+	case 5:
+		return 2731
+	default:
+		return 32768
+	}
 }
 
 // Close closes the underlying ByteSource (unmapping the file for Open).
