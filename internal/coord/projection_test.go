@@ -71,6 +71,20 @@ func TestWGS84Identity_Lon360(t *testing.T) {
 			t.Errorf("FromWGS84(%v) = %v, want %v", tt.lon, got, tt.want)
 		}
 	}
+
+	// A grid starting half a 0.25° pixel west of 0 keeps that strip.
+	w = &WGS84Identity{Lon360: true, Lon360Min: -0.125}
+	for _, tt := range []struct{ lon, want float64 }{
+		{-170, 190},
+		{-0.5, 359.5},
+		{-0.125, -0.125},
+		{-0.1, -0.1},
+		{120, 120},
+	} {
+		if got, _ := w.FromWGS84(tt.lon, 10); got != tt.want {
+			t.Errorf("Lon360Min -0.125: FromWGS84(%v) = %v, want %v", tt.lon, got, tt.want)
+		}
+	}
 }
 
 func TestWrapLonRange(t *testing.T) {

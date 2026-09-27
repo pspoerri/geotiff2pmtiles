@@ -75,15 +75,19 @@ func unitSize(epsg int) (size float64, geographic bool) {
 // WGS84Identity is a no-op projection for data already in EPSG:4326.
 type WGS84Identity struct {
 	// Lon360 is for grids whose longitudes run 0..360: FromWGS84 then
-	// returns longitudes west of Greenwich as lon+360, inside the grid.
+	// returns longitudes west of Lon360Min as lon+360, inside the grid.
 	Lon360 bool
+	// Lon360Min is the grid's western edge if it lies west of Greenwich, as
+	// for a grid of pixel centres from 0 (-0.125 for 0.25° GFS or ERA5
+	// data); longitudes from there to 0 are inside the grid as they are.
+	Lon360Min float64
 }
 
 func (w *WGS84Identity) ToWGS84(x, y float64) (lon, lat float64) { return x, y }
 func (w *WGS84Identity) EPSG() int                               { return 4326 }
 
 func (w *WGS84Identity) FromWGS84(lon, lat float64) (x, y float64) {
-	if w.Lon360 && lon < 0 {
+	if w.Lon360 && lon < w.Lon360Min {
 		lon += 360
 	}
 	return lon, lat

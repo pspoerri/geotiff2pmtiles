@@ -69,14 +69,16 @@ type sourceInfo struct {
 // Projection, which CRSFallback needs for its datum-shift cache.
 // floatNodata, when set, replaces every source's GDAL_NODATA in the float path.
 //
-// An EPSG:4326 source whose longitudes run past 180 from 0 or more (a 0..360
-// grid, or a Pacific 100..260 one) gets a WGS84Identity with Lon360 set, so
-// that western longitudes are sampled at lon+360. The 1e-6° margins keep a
-// world raster ending at 180.0000001 in the usual convention.
+// An EPSG:4326 source whose longitudes run past 180 from at most a pixel
+// west of 0 (a 0..360 grid, one of pixel centres from 0, or a Pacific
+// 100..260 one) gets a WGS84Identity with Lon360 set, so that longitudes
+// west of the grid are sampled at lon+360. The 1e-6° margins keep a world
+// raster ending at 180.0000001 in the usual convention.
 func buildSourceInfos(sources []*cog.Reader, floatNodata *float64) ([]sourceInfo, error) {
 	type projKey struct {
-		epsg   int
-		lon360 bool
+		epsg      int
+		lon360    bool
+		lon360Min float64
 	}
 	projIdx := map[projKey]int{}
 	var projs []coord.Projection
@@ -84,7 +86,10 @@ func buildSourceInfos(sources []*cog.Reader, floatNodata *float64) ([]sourceInfo
 	for i, src := range sources {
 		epsg := src.EPSG()
 		minX, minY, maxX, maxY := src.BoundsInCRS()
-		key := projKey{epsg, epsg == 4326 && minX >= -1e-6 && maxX > 180+1e-6}
+		key := projKey{epsg: epsg}
+		if epsg == 4326 && minX >= -src.GeoInfo().PixelSizeX-1e-6 && maxX > 180+1e-6 {
+			key.lon360, key.lon360Min = true, min(minX, 0)
+		}
 		idx, ok := projIdx[key]
 		if !ok {
 			proj := coord.ForEPSG(epsg)
@@ -95,7 +100,7 @@ func buildSourceInfos(sources []*cog.Reader, floatNodata *float64) ([]sourceInfo
 				return nil, fmt.Errorf("%s: unsupported EPSG code: %d", src.Path(), epsg)
 			}
 			if key.lon360 {
-				proj = &coord.WGS84Identity{Lon360: true}
+				proj = &coord.WGS84Identity{Lon360: true, Lon360Min: key.lon360Min}
 			}
 			idx = len(projs)
 			projIdx[key] = idx
@@ -204,11 +209,12 @@ func prepareTileSources(srcInfos []sourceInfo, z, tx, ty, tileSize int) []tileSo
 // all four corners and taking the extremes.
 func tileCRSBounds(z, tx, ty int, proj coord.Projection) (minX, minY, maxX, maxY float64) {
 	minLon, minLat, maxLon, maxLat := coord.TileBounds(z, tx, ty)
-	if w, ok := proj.(*coord.WGS84Identity); ok && w.Lon360 && minLon < 0 {
-		// Lon360 jumps by 360 at Greenwich, which a western tile's east
-		// corners sit on (and the z0 tile spans): shift the tile whole.
-		if maxLon > 0 {
-			return 0, minLat, 360, maxLat
+	if w, ok := proj.(*coord.WGS84Identity); ok && w.Lon360 && minLon < w.Lon360Min {
+		// Lon360 jumps by 360 at Lon360Min, at or just west of Greenwich,
+		// which a western tile's east corners sit on or straddle (and the
+		// z0 tile spans): shift the tile whole.
+		if maxLon > w.Lon360Min {
+			return w.Lon360Min, minLat, w.Lon360Min + 360, maxLat
 		}
 		return minLon + 360, minLat, maxLon + 360, maxLat
 	}
