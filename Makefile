@@ -290,7 +290,7 @@ example-transform-rebuild: example-swissimage build-transform
 ## example-swissimage-profile: Run the SWISSIMAGE example, writing dist/cpu.prof and dist/mem.prof
 example-swissimage-profile: build test-integration-download
 	./$(OUTPUT) $(EXAMPLE_FLAGS) --max-zoom $(MAX_ZOOM) \
-		--cpuprofile $(BUILD_DIR)/cpu.prof --memprofile $(BUILD_DIR)/mem.prof \
+		--cpu-profile $(BUILD_DIR)/cpu.prof --mem-profile $(BUILD_DIR)/mem.prof \
 		$(SWISSIMAGE_DIR)/ $(BUILD_DIR)/example-swissimage.pmtiles
 	@echo "Profiles written to $(BUILD_DIR)/cpu.prof and $(BUILD_DIR)/mem.prof — view with: make pprof-cpu / make pprof-mem"
 

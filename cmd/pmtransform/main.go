@@ -6,16 +6,13 @@ import (
 	"image/color"
 	"log"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime"
-	"runtime/pprof"
-	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
+	"github.com/pspoerri/geotiff2pmtiles/internal/cli"
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
 	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
 	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
@@ -41,8 +38,6 @@ func main() {
 		concurrency int
 		verbose     bool
 		resampling  string
-		cpuProfile  string
-		memProfile  string
 		memLimitMB  int
 		noSpill     bool
 		fillColor   string
@@ -62,8 +57,7 @@ func main() {
 	flag.StringVar(&resampling, "resampling", "bicubic", "Downsampling method for rebuilt or added zoom levels: lanczos, bicubic, bilinear, nearest, mode")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
-	flag.StringVar(&cpuProfile, "cpuprofile", "", "Write CPU profile to file")
-	flag.StringVar(&memProfile, "memprofile", "", "Write memory profile to file")
+	profiles := cli.RegisterProfileFlags(flag.CommandLine)
 	flag.IntVar(&memLimitMB, "mem-limit", 0, "MB of encoded tiles allowed to queue for the spill file before workers pause during a rebuild (0 = auto: 90% of RAM minus 2 GB; spilling is off if that is under 512 MB)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
 	flag.StringVar(&tmpDirFlag, "tmp-dir", "", "Directory for temporary files, about 2x the output size at peak (default: the output file's directory)")
@@ -89,33 +83,15 @@ func main() {
 		os.Exit(0)
 	}
 
-	// CPU profiling.
-	if cpuProfile != "" {
-		f, err := os.Create(cpuProfile)
-		if err != nil {
-			log.Fatalf("Creating CPU profile: %v", err)
-		}
-		defer f.Close()
-		if err := pprof.StartCPUProfile(f); err != nil {
-			log.Fatalf("Starting CPU profile: %v", err)
-		}
-		defer pprof.StopCPUProfile()
+	stopProfiles, err := profiles.Start()
+	if err != nil {
+		log.Fatal(err)
 	}
-
-	// Memory profile (written at exit).
-	if memProfile != "" {
-		defer func() {
-			f, err := os.Create(memProfile)
-			if err != nil {
-				log.Fatalf("Creating memory profile: %v", err)
-			}
-			defer f.Close()
-			runtime.GC()
-			if err := pprof.WriteHeapProfile(f); err != nil {
-				log.Fatalf("Writing memory profile: %v", err)
-			}
-		}()
-	}
+	defer func() {
+		if err := stopProfiles(); err != nil {
+			log.Print(err)
+		}
+	}()
 
 	args := flag.Args()
 	if len(args) != 2 {
@@ -235,7 +211,7 @@ func main() {
 	// Parse fill color.
 	var fc *color.RGBA
 	if fillColor != "" {
-		c, err := parseColor(fillColor)
+		c, err := cli.ParseColor(fillColor)
 		if err != nil {
 			log.Fatalf("Fill color: %v", err)
 		}
@@ -271,7 +247,7 @@ func main() {
 		tileFormat = enc.PMTileType()
 	}
 
-	if isFlagSet("resampling") && mode != tile.TransformRebuild && !extendDown {
+	if cli.IsFlagSet(flag.CommandLine, "resampling") && mode != tile.TransformRebuild && !extendDown {
 		log.Printf("WARNING: --resampling only applies to rebuilt or added zoom levels; pass --rebuild to apply it to existing levels")
 	}
 
@@ -330,7 +306,10 @@ func main() {
 	fmt.Printf("  %-14s %s (%d tiles)\n", "Input:", inputPath, reader.NumTiles())
 	fmt.Printf("  %-14s %s\n", "Output:", outputPath)
 
-	tmpDir, cleanup := makeTmpDir(tmpDirFlag, outputPath)
+	tmpDir, cleanup, err := cli.MakeTmpDir(tmpDirFlag, outputPath, ".pmtransform-tmp-")
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer cleanup()
 
 	// Build config.
@@ -420,7 +399,7 @@ func main() {
 
 	elapsed := time.Since(start).Round(time.Millisecond)
 	fi, _ := os.Stat(outputPath)
-	fmt.Printf("Done: %d tiles, %s, %v → %s\n", stats.TileCount, humanSize(fi.Size()), elapsed, outputPath)
+	fmt.Printf("Done: %d tiles, %s, %v → %s\n", stats.TileCount, cli.HumanSize(fi.Size()), elapsed, outputPath)
 }
 
 // discoverSourceTileSize reads and decodes one tile to infer the source tile size.
@@ -444,59 +423,6 @@ func discoverSourceTileSize(reader *pmtiles.Reader, format string) int {
 		}
 	}
 	return 256
-}
-
-// parseColor parses an RGBA color from "R,G,B,A" or "#RRGGBBAA" format.
-func parseColor(s string) (color.RGBA, error) {
-	if strings.HasPrefix(s, "#") {
-		return parseHexColor(s)
-	}
-
-	parts := strings.Split(s, ",")
-	if len(parts) != 4 {
-		return color.RGBA{}, fmt.Errorf("expected R,G,B,A format (e.g. \"0,0,0,255\"), got %q", s)
-	}
-
-	vals := make([]uint8, 4)
-	for i, p := range parts {
-		v, err := strconv.Atoi(strings.TrimSpace(p))
-		if err != nil || v < 0 || v > 255 {
-			return color.RGBA{}, fmt.Errorf("invalid color component %q (must be 0-255)", p)
-		}
-		vals[i] = uint8(v)
-	}
-	return color.RGBA{R: vals[0], G: vals[1], B: vals[2], A: vals[3]}, nil
-}
-
-func parseHexColor(s string) (color.RGBA, error) {
-	s = strings.TrimPrefix(s, "#")
-	switch len(s) {
-	case 6:
-		s += "ff" // default alpha
-	case 8:
-		// full RRGGBBAA
-	default:
-		return color.RGBA{}, fmt.Errorf("hex color must be #RRGGBB or #RRGGBBAA, got %q", "#"+s)
-	}
-
-	r, err := strconv.ParseUint(s[0:2], 16, 8)
-	if err != nil {
-		return color.RGBA{}, fmt.Errorf("invalid hex color: %w", err)
-	}
-	g, err := strconv.ParseUint(s[2:4], 16, 8)
-	if err != nil {
-		return color.RGBA{}, fmt.Errorf("invalid hex color: %w", err)
-	}
-	b, err := strconv.ParseUint(s[4:6], 16, 8)
-	if err != nil {
-		return color.RGBA{}, fmt.Errorf("invalid hex color: %w", err)
-	}
-	a, err := strconv.ParseUint(s[6:8], 16, 8)
-	if err != nil {
-		return color.RGBA{}, fmt.Errorf("invalid hex color: %w", err)
-	}
-
-	return color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: uint8(a)}, nil
 }
 
 func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
@@ -554,24 +480,6 @@ func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 	return b.String()
 }
 
-func humanSize(bytes int64) string {
-	const (
-		KB = 1024
-		MB = KB * 1024
-		GB = MB * 1024
-	)
-	switch {
-	case bytes >= GB:
-		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(GB))
-	case bytes >= MB:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(MB))
-	case bytes >= KB:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(KB))
-	default:
-		return fmt.Sprintf("%d B", bytes)
-	}
-}
-
 // sameFile reports whether two paths name the same existing file.
 func sameFile(a, b string) bool {
 	fa, err := os.Stat(a)
@@ -598,40 +506,4 @@ func (w *zoomCap) WriteTile(z, x, y int, data []byte) error {
 		return nil
 	}
 	return w.TileWriter.WriteTile(z, x, y, data)
-}
-
-// isFlagSet reports whether a flag was explicitly passed on the command line.
-func isFlagSet(name string) bool {
-	set := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			set = true
-		}
-	})
-	return set
-}
-
-// makeTmpDir creates a per-run directory for temporary tile and spill files
-// under dir (default: the output file's directory) and returns a cleanup that
-// removes it. The cleanup also runs on SIGINT/SIGTERM, so an interrupted run
-// does not leave gigabytes of *.tmp files behind. log.Fatal skips defers, so
-// fatal paths after this point must call cleanup themselves.
-func makeTmpDir(dir, outputPath string) (string, func()) {
-	if dir == "" {
-		dir = filepath.Dir(outputPath)
-	}
-	tmp, err := os.MkdirTemp(dir, ".pmtransform-tmp-*")
-	if err != nil {
-		log.Fatalf("Creating temp directory: %v", err)
-	}
-	cleanup := func() { os.RemoveAll(tmp) }
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sig
-		cleanup()
-		log.Printf("Interrupted; removed temp directory %s", tmp)
-		os.Exit(130)
-	}()
-	return tmp, cleanup
 }
