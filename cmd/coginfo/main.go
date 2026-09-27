@@ -1,28 +1,57 @@
+// coginfo prints the georeferencing, levels and GDAL metadata of a GeoTIFF
+// or COG and test-reads a tile of every level.
+//
+// Usage:
+//
+//	coginfo [flags] <file.tif>
 package main
 
 import (
+	"flag"
 	"fmt"
 	"image"
+	"io"
+	"math"
 	"os"
-	"strings"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
 )
 
+// Set via -ldflags at build time.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
 func main() {
-	if len(os.Args) != 2 || strings.HasPrefix(os.Args[1], "-") {
-		fmt.Fprintf(os.Stderr, "Usage: coginfo <file.tif>\n")
+	raw := flag.Bool("raw", false, "Also print the raw tags of the full-resolution IFD (compression, samples, sample format, predictor, nodata), its first tile's offset, size and bytes, and the value range of the first tile of float or signed input")
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: coginfo [flags] <file.tif>\n\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Print the georeferencing, levels and GDAL metadata of a GeoTIFF/COG\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "and test-read a tile of every level.\n\nFlags:\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if *showVersion {
+		fmt.Printf("coginfo %s (commit %s, built %s)\n", version, commit, buildDate)
+		return
+	}
+	if flag.NArg() != 1 {
+		flag.Usage()
 		os.Exit(2)
 	}
+	path := flag.Arg(0)
 
-	r, err := cog.Open(os.Args[1])
+	r, err := cog.Open(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	defer r.Close()
 
-	fmt.Printf("File: %s\n", os.Args[1])
+	fmt.Printf("File: %s\n", path)
 	fmt.Printf("EPSG: %d\n", r.EPSG())
 	fmt.Printf("Full-res size: %d x %d\n", r.Width(), r.Height())
 	fmt.Printf("Pixel size (CRS units): %f\n", r.PixelSize())
@@ -59,6 +88,10 @@ func main() {
 		}
 	}
 
+	if *raw {
+		printRaw(os.Stdout, r)
+	}
+
 	// Try reading a tile at each IFD level to check compression support
 	for level := 0; level < r.IFDCount(); level++ {
 		ts := r.IFDTileSize(level)
@@ -79,6 +112,44 @@ func main() {
 				samplePixels(tile, 5)
 			}
 		}
+	}
+}
+
+// printRaw prints what the reader parsed from the full-resolution IFD and
+// the first tile as stored.
+func printRaw(w io.Writer, r *cog.Reader) {
+	info := r.DebugIFD(0)
+	fmt.Fprintf(w, "\nRaw IFD 0:\n")
+	fmt.Fprintf(w, "  Data: %s\n", r.FormatDescription())
+	fmt.Fprintf(w, "  Compression: %d, SamplesPerPixel: %d, BitsPerSample: %v, SampleFormat: %v, Predictor: %d, Photometric: %d, PlanarConfig: %d\n",
+		info.Compression, info.SamplesPerPixel, info.BitsPerSample, info.SampleFormat, info.Predictor, info.Photometric, info.PlanarConfig)
+	fmt.Fprintf(w, "  IsFloat (float or signed): %v\n", r.IsFloat())
+	fmt.Fprintf(w, "  NoData: %q\n", r.NoData())
+	fmt.Fprintf(w, "  Tiles: %d offsets, %d byte counts\n", len(info.TileOffsets), len(info.TileByteCounts))
+	if len(info.TileOffsets) > 0 && len(info.TileByteCounts) > 0 {
+		fmt.Fprintf(w, "  First tile: offset=%d, size=%d\n", info.TileOffsets[0], info.TileByteCounts[0])
+		fmt.Fprintf(w, "  First 20 bytes: % x\n", r.RawBytes(info.TileOffsets[0], 20))
+	}
+	if !r.IsFloat() {
+		return
+	}
+	data, tw, th, err := r.ReadFloatTile(0, 0, 0)
+	switch {
+	case err != nil:
+		fmt.Fprintf(w, "  Float tile (0,0): ERROR: %v\n", err)
+	case data == nil:
+		fmt.Fprintf(w, "  Float tile (0,0): empty\n")
+	default:
+		nan := 0
+		lo, hi := math.Inf(1), math.Inf(-1)
+		for _, v := range data {
+			if f := float64(v); math.IsNaN(f) {
+				nan++
+			} else {
+				lo, hi = min(lo, f), max(hi, f)
+			}
+		}
+		fmt.Fprintf(w, "  Float tile (0,0): %dx%d, NaN %d/%d, range [%.2f, %.2f]\n", tw, th, nan, len(data), lo, hi)
 	}
 }
 
