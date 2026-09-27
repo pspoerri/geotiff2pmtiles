@@ -6,15 +6,17 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
 )
 
-// writeFloatTIFF writes a 4x4 single-strip Float32 GeoTIFF in EPSG:4326
-// with GDAL_NODATA -9999 and returns the opened reader.
-func writeFloatTIFF(t *testing.T, px []float32) *cog.Reader {
+// writeFloatTIFF writes a 4x4 single-strip Float32 GeoTIFF at lon 8, lat
+// 47 with GDAL_NODATA -9999 and returns the opened reader. Its GeoKeys say
+// EPSG:4326 when geoKeys is set; without them the reader guesses the CRS.
+func writeFloatTIFF(t *testing.T, px []float32, geoKeys bool) *cog.Reader {
 	t.Helper()
 	bo := binary.LittleEndian
 	type entry struct {
@@ -50,6 +52,9 @@ func writeFloatTIFF(t *testing.T, px []float32) *cog.Reader {
 		{33922, 12, 6, 0, doubles(0, 0, 0, 8, 47, 0)},
 		{34735, 3, 12, 0, keys},
 		{42113, 2, 6, 0, []byte("-9999\x00")},
+	}
+	if !geoKeys {
+		entries = slices.DeleteFunc(entries, func(e entry) bool { return e.tag == 34735 })
 	}
 	off := uint32(8 + 2 + len(entries)*12 + 4)
 	for i := range entries {
@@ -90,7 +95,7 @@ func TestPrintRaw(t *testing.T) {
 		px[i] = float32(i) * 10
 	}
 	px[3] = float32(math.NaN())
-	r := writeFloatTIFF(t, px)
+	r := writeFloatTIFF(t, px, true)
 
 	var out bytes.Buffer
 	printRaw(&out, r)
@@ -105,5 +110,16 @@ func TestPrintRaw(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output lacks %q:\n%s", want, out.String())
 		}
+	}
+}
+
+// A CRS guessed from the coordinate ranges is marked as such.
+func TestEPSGLine(t *testing.T) {
+	px := make([]float32, 16)
+	if got, want := epsgLine(writeFloatTIFF(t, px, true)), "EPSG: 4326"; got != want {
+		t.Errorf("with GeoKeys: %q, want %q", got, want)
+	}
+	if got, want := epsgLine(writeFloatTIFF(t, px, false)), "EPSG: 4326 (guessed from the coordinate ranges)"; got != want {
+		t.Errorf("without GeoKeys: %q, want %q", got, want)
 	}
 }
