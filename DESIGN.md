@@ -171,17 +171,37 @@ and raw uint16 paths (terrarium, the auto rescale range) do not apply masks yet.
 
 `OpenSource` runs `checkLayout` on every level and wraps its error with the path, so a
 file the decoders cannot read fails at open instead of at the first read, where the error
-became read warnings and transparent tiles. Rejected: a predictor on bit-packed samples
-and planar-separate strips of bit-packed samples. No conformant writer produces either
-(libtiff refuses the predictor), and they used to hang or panic. The read-time check stays
-for Readers built without `OpenSource`.
+became read warnings and transparent tiles. Rejected:
+
+- Band-interleaved (planar-separate) tiles in any compression but JPEG, and
+  band-interleaved JPEG strips. GDAL writes both for `INTERLEAVE=BAND`, so the error
+  suggests `gdal_translate -co INTERLEAVE=PIXEL`. They used to open and fail every read,
+  which the pipeline turned into one suppressed warning, an empty archive and exit code 0.
+- A predictor on bit-packed samples, and planar-separate strips of bit-packed samples. No
+  conformant writer produces either (libtiff refuses the predictor), and they used to hang
+  or panic.
+
+The read-time check stays for Readers built without `OpenSource`.
 
 A tile may hold at most 2^28 samples (TileWidth × TileHeight × SamplesPerPixel), checked
 after strip promotion, which sets TileWidth to the image width. The decoders allocate from
 the tags before reading data, and 2^28 caps a single-band RGBA buffer at 1 GiB; garbage
-tags used to ask for terabytes. Real tiles hold 2^16..2^24 samples per band, and virtual
-strip tiles (full width × at least 256 rows) stay below the cap up to ~350,000 RGB pixels
-across. An oversized level 0 fails the open; an oversized overview is dropped.
+tags used to ask for terabytes. Real tiles hold 2^16..2^24 samples per band. An oversized
+overview is dropped; an oversized level 0 fails the open, and the error suggests
+rewriting the file tiled (`gdal_translate -co TILED=YES`). `tileSamples` saturates rather
+than wrapping: a crafted 2^31 × 2^31 × 4 strip file came to 0 samples and opened.
+
+A strip file's virtual tiles are the full width by RowsPerStrip, the whole image for a
+single strip, so the cap (1837b82) also refused a 12000×8000 RGB image in one strip, which
+had opened before. A virtual tile past the cap now opens when its strips can fill it
+(`stripLayout.backed`): each tile's rows must fit in its strips' byte counts, each capped
+at the file size, times the most one byte can decode to (1 uncompressed, 1032 deflate, 2731
+LZW, 32768 zstd, JPEG and anything else). Garbage Width or RowsPerStrip tags still fail at
+open; the file-size cap is what stops a garbage StripByteCounts from vouching for a garbage
+Width. Tradeoffs: such a strip is still decoded whole (1.2-1.6 GB peak for the 12000×8000
+image; bounded-height virtual tiles would avoid that), and sparse strips cannot vouch for
+their rows, so an all-sparse strip image past the cap, or a partly sparse uncompressed one,
+is refused although it opened before 1837b82.
 
 ### Strip-to-tile promotion
 
@@ -212,8 +232,8 @@ default when copying from a band-interleaved source) store each band's strips
 consecutively, plane-major. Virtual tiles are derived from one plane's worth of
 strips; at read time each plane's strips are decompressed (with the predictor
 undone at samplesPerPixel=1) and interleaved into chunky order so downstream
-decoding is layout-agnostic. JPEG-compressed planar strips are rejected, since
-encoded planes cannot be byte-interleaved.
+decoding is layout-agnostic. JPEG-compressed planar strips are rejected at open (see
+Checks at open), since encoded planes cannot be byte-interleaved.
 
 JPEG-compressed strips (GTiff's default for `COMPRESS=JPEG` without `TILED=YES`) used to
 be concatenated and read as raw samples, which rendered noise without an error. Each strip
@@ -532,16 +552,30 @@ fail with a message that points to `--source-epsg`.
 
 A world file supplies only the pixel grid. When a file has no CRS at all, `inferEPSG`
 still guesses from the coordinate ranges (-180..360/-90..90 → 4326, the LV95 box → 2056,
-other metric grids → 3857), but the guess is logged as a warning naming the file, and
-`Reader.SetEPSG` (CLI: `--source-epsg`) overrides it. Failing instead of guessing, and
+other metric grids → 3857). `Reader.EPSGGuessed` records the guess, and `Reader.SetEPSG`
+(CLI: `--source-epsg`) overrides it and clears the mark. geotiff2pmtiles logs one warning
+with the number of guessed files and an example, only when `--source-epsg` is not set;
+coginfo marks the code as guessed. `Open` used to log a line per file, before the CLI had
+applied `--source-epsg`, so a composite of thousands of world-file tiles printed thousands
+of lines telling the user to set a flag they had set. Failing instead of guessing, and
 reading `.prj` or `.aux.xml` sidecars, were considered and left out: both change behaviour
 for existing TFW+3857 inputs, and satellite composites rarely use world files.
 
-The CLI checks every source's CRS right after opening, before the bounds: unknown codes,
-32767, and EPSG 0 (not georeferenced; the reader guesses a CRS for every file with a pixel
-grid, so `--source-epsg` cannot help there and the message says what is missing).
-`MergedBoundsWGS84` falls back to `WGS84Identity` for an unknown projection, so without
-the early check it would produce garbage bounds and zooms before generation failed.
+The CLI checks every source right after opening, before the bounds. Each needs a
+geotransform, a positive pixel size from ModelPixelScale and ModelTiepoint or a `.tfw`,
+checked before and independently of its EPSG code, because `--source-epsg` supplies only a
+CRS. The check used to key on EPSG 0, which `--source-epsg` replaced, so a file without a
+grid passed: its pixel size of 0 drove the auto max zoom to 0, and one such file collapsed
+a whole composite to a single z0 tile with exit code 0. It also names rotated
+ModelTransformation grids, which the reader does not use. Then the CRS: unknown codes and
+32767 fail. `MergedBoundsWGS84` falls back to `WGS84Identity` for an unknown projection, so
+without the early check it would produce garbage bounds and zooms before generation failed.
+
+After the merge, latitudes beyond ±90° plus the coarsest source pixel stop the run
+(`checkBoundsWGS84`): a projected grid given `--source-epsg 4326` reached latitudes in the
+millions and wrote a garbage archive. The slack admits grids registered on pixel centres,
+which reach half a pixel past a pole. Longitudes need no check, because
+`MergedBoundsWGS84` wraps them.
 
 ### Per-source projection
 
@@ -567,10 +601,12 @@ overlapping, but every pixel is then rejected by the per-pixel bounds check (a
 performance cost only).
 
 With mixed CRSs, the CLI takes the auto max zoom from the finest source (minimum ground
-pixel size at the merged centre latitude), searches coverage holes per EPSG group
-(degree and metre boxes cannot be compared), and describes the archive with every EPSG
-code; the CRS extent and CRS-unit pixel size are given only for a single CRS, else the
-finest ground pixel size in metres.
+pixel size at the merged centre latitude) and describes the archive with every EPSG code;
+the CRS extent and CRS-unit pixel size are given only for a single CRS, else the finest
+ground pixel size in metres. It skips the coverage hole check, with a note, and the
+description has no Holes line: degree and metre boxes cannot be compared, and a hole among
+one CRS's sources may be filled by a source in another. Searching per CRS reported a gap
+among EPSG:2056 tiles that an EPSG:4326 tile filled as "Holes: 1 gap(s)".
 
 ### Pixel centres and PixelIsPoint
 
@@ -601,20 +637,31 @@ end at ±180.0000000001. `TilesInBounds` wraps columns for such bounds and
 `MinZoomForSingleTile` returns 0. Before, longitudes were never wrapped: UTM zones 60 and
 1 lost everything past 180°.
 
-`WGS84Identity.Lon360` serves 0..360 grids (and e.g. 100..260) by mapping western
-longitudes to lon+360. It is decided per source, not per run: an EPSG:4326 source with
-minX ≥ -1e-6 and maxX > 180+1e-6 gets its own projection, so a -180..180 source next to a
-0..360 one keeps its convention, and projections are keyed on (EPSG, Lon360). The margins
-keep a world raster ending at 180.0000001 in the usual convention. Lon360's jump at
-Greenwich sits exactly on tile edges (and inside the z0 tile), so a western tile's east
-corners map to 0, not 360; `tileCRSBounds` shifts western tiles whole (+360) and gives
-the z0 tile [0, 360]. Without that, a source entirely in 180..360 was skipped at max zoom
-0 and 1.
+`WGS84Identity.Lon360` serves 0..360 grids (and e.g. 100..260) by mapping longitudes west
+of the grid to lon+360. It is decided per source, not per run: an EPSG:4326 source with
+minX ≥ -(pixel size) - 1e-6 and maxX > 180+1e-6 gets its own projection, so a -180..180
+source next to a 0..360 one keeps its convention. The margins keep a world raster ending at
+180.0000001 in the usual convention.
 
-Tradeoffs: grids written as e.g. -10..350 or -190..-170 are still unsupported (that needs
-a per-source western edge). Min/max of raw longitudes cannot find the gap between sources
-given in the -180..180 convention on both sides of 180, which merge to full width: the
-tiles are correct but a whole-world band is enumerated.
+The western edge may lie up to a pixel west of 0, because a grid of pixel centres from 0
+starts half a pixel west: GRIB-derived GFS or ERA5 at 0.25° start at -0.125, as does a
+PixelIsPoint grid once its tiepoint is moved to the corner. Detection used to require
+minX ≥ -1e-6, which these grids missed, so their western hemisphere rendered empty under
+full-world bounds. `Lon360Min` = min(minX, 0) is where the wrap happens, so the strip
+between that edge and Greenwich is sampled where it is rather than past the grid's east
+end, and projections are keyed on (EPSG, Lon360, Lon360Min).
+
+Lon360's jump at `Lon360Min` sits on or just west of a tile edge (and inside the z0 tile),
+so a western tile's east corners stay near 0 instead of 360; `tileCRSBounds` shifts
+western tiles whole (+360) and gives a tile straddling `Lon360Min`, the z0 tile included,
+[Lon360Min, Lon360Min+360]. Without that, a source entirely in 180..360 was skipped at max
+zoom 0 and 1.
+
+Tradeoffs: the western edge is per source but reaches only a pixel west of 0, so grids
+written as e.g. -10..350 or -190..-170 are still unsupported. Min/max of raw longitudes
+cannot find the gap between sources given in the -180..180 convention on both sides of
+180, which merge to full width: the tiles are correct but a whole-world band is
+enumerated.
 
 The archive records crossing bounds as -180..180 (see Archive bounds).
 
@@ -738,10 +785,10 @@ per-plane JPEG tile, with offsets laid out plane-major. `ReadTile` dispatches to
 the single channel from `*image.Gray` or single-band `*image.YCbCr`) and merges into
 RGBA: plane 0→R, 1→G, 2→B, 3→A. Missing channels are duplicated from plane 0 so
 grayscale planar-separate files render correctly. Nodata is applied after the merge.
-*Tiled* planar-separate files with any other compression are rare in practice and
-return an explicit "not supported" error rather than silently decoding wrong data
-(the previous behaviour silently returned plane 0 as R=G=B). Planar-separate *strips*
-are the opposite case — see Strip-to-tile promotion.
+*Tiled* planar-separate files with any other compression fail at open (see Checks at
+open). They first decoded plane 0 as R=G=B without an error, and later failed every read,
+which left an empty archive and exit code 0. Planar-separate *strips* are the opposite
+case — see Strip-to-tile promotion.
 
 **Output-format auto-switch**: when nodata or a GDAL internal mask is active, JPEG output cannot carry
 alpha, so transparent pixels would be baked back to black in the encoded tile. If
@@ -871,7 +918,10 @@ missing" at every zoom.
 **Defaults**: `geotiff2pmtiles` fills missing tiles with transparent (`0,0,0,0`), so areas
 without data render transparent rather than as the viewer's background. JPEG cannot store
 transparency and would turn every uncovered tile position black, so the default fill is
-dropped for `jpeg` output (an explicit `--fill-missing` is kept, with a warning).
+dropped for `jpeg` output (an explicit `--fill-missing` is kept, with a warning). JPEG
+writes the straight RGB of a translucent `--fill-missing` or `--nodata-color` colour,
+opaque: 255,0,0,128 comes out red. The warnings used to say black and now print the
+`rgb()` written.
 `pmtransform` defaults to neither: a non-empty default made the passthrough mode
 unreachable, so every run re-encoded lossily.
 
@@ -1237,8 +1287,9 @@ who asked for JPEG. Now `auto` is resolved once (terrarium for elevation, webp w
 nodata, else jpeg) and any explicit value is final. The same applies to `--bands auto`,
 where the default `1,2,3` used to be invalid for 2-band input. Flag values are validated
 up front (quality, power-of-two tile size, zoom range, band numbers against each file's
-band count, float input only as terrarium, every file's CRS), so mistakes fail in
-milliseconds instead of producing an empty or noisy archive with exit code 0.
+band count, float input only as terrarium, every file's CRS and geotransform, latitudes
+within the poles), so mistakes fail in milliseconds instead of producing an empty or noisy
+archive with exit code 0.
 
 ### Progress output
 
@@ -1332,19 +1383,35 @@ amplification on a synthetic run (58 MB archive; W = archive size):
 
 ### Archive bounds
 
-Header and metadata bounds come from one function, `pmtiles.archiveBounds`, so they cannot
-drift. Data crossing the antimeridian (MaxLon > 180) is recorded as MinLon -180, MaxLon
-180, with the centre longitude `math.Remainder((min+max)/2, 360)` (176.5..182.1 gives
-179.3, 179..189 gives -176). TileJSON 3.0.0 says bounds "MUST NOT wrap around the
-ante-meridian" and the centre must lie within them; MapLibre's `validateBounds` clamps east
-to 180, and `TileBounds.contains` needs minX ≤ x < maxX, so west > east shows nothing. The
-PMTiles v3 spec only says min/max longitude. The E7 conversions clamp to ±180: 260° used to
-overflow the int32 field (platform-dependent; 2147483647 on arm64).
+Header and metadata bounds come from one function, `pmtiles.archiveBounds`, and the centre
+from `archiveCenter`, so they cannot drift. Data crossing the antimeridian (MaxLon > 180)
+is recorded as MinLon -180, MaxLon 180, with the centre longitude
+`math.Remainder((min+max)/2, 360)` (176.5..182.1 gives 179.3, 179..189 gives -176).
+TileJSON 3.0.0 says bounds "MUST NOT wrap around the ante-meridian" and the centre must
+lie within them; MapLibre's `validateBounds` clamps east to 180, and `TileBounds.contains`
+needs minX ≤ x < maxX, so west > east shows nothing. The PMTiles v3 spec only says min/max
+longitude. The E7 conversions clamp to ±180: 260° used to overflow the int32 field
+(platform-dependent; 2147483647 on arm64).
 
 `Generate` keeps the unwrapped bounds for `TilesInBounds`; only the archive records
--180..180. Consequently `pmtransform`, which reads the header, fills the whole latitude
-band with `--fill-missing` over a crossing archive; a rebuild without fill derives lower
-zooms from the parents of existing tiles and does not enumerate the band.
+-180..180. `pmtransform` reads the header, so it cannot re-derive what the header lost:
+
+- It keeps the source's centre (`Header.Center()` at full E7 precision, passed as
+  `WriterOptions.Center`, zoom clamped to the output range) instead of deriving lon 0
+  from -180..180.
+- For `--fill-missing` over full-width bounds, it takes the fill extent from the max zoom
+  columns the data occupies (`fillBounds`): the shortest run round the globe that holds
+  them all, i.e. the complement of the widest gap between them. When that run crosses the
+  antimeridian it is passed as MaxLon > 180, which `TilesInBounds` handles; otherwise the
+  full band is kept.
+
+A 2°-wide Fiji archive used to grow from 31 tiles to 1983 with `--fill-missing`, a stripe
+round the globe, and its centre moved from lon 180 to 0. Tradeoffs: a placeholder centre
+such as (0,0) in an archive from another tool is now carried through; and an archive
+without fill tiles whose data lies on both sides of the globe, with its widest empty run
+of columns away from 180°, is taken as crossing the antimeridian, so that run is not
+filled. A rebuild without fill derives lower zooms from the parents of existing tiles and
+does not enumerate the band.
 
 ### Header bounds precision
 
@@ -1374,13 +1441,13 @@ The metadata `format` names every tile type (`mvt`, `avif` and `mlt` were "unkno
 
 PMTiles archives record processing provenance in the `description` field of the metadata
 JSON. When `geotiff2pmtiles` creates an archive, the description captures both the
-processing options (format, quality, tile size, zoom, resampling, nodata color, fill)
-and source information (file count, every EPSG code, CRS extent for a single CRS, WGS84
-extent, pixel size, data format of the first file, coverage holes). When `pmtransform`
-transforms an archive, it reads the source description via `ReadMetadata()` and prepends
-the new processing steps above it. This creates a stacked provenance trail where each
-transformation layer is visible in the output metadata, enabling users to trace the full
-history of how an archive was produced.
+processing options (format, quality, tile size, zoom, resampling, nodata color, fill) and
+source information (file count, every EPSG code, CRS extent for a single CRS, WGS84
+extent, pixel size, data format of the first file, coverage holes for a single CRS). When
+`pmtransform` transforms an archive, it reads the source description via `ReadMetadata()`
+and prepends the new processing steps above it. This creates a stacked provenance trail
+where each transformation layer is visible in the output metadata, enabling users to trace
+the full history of how an archive was produced.
 
 ### Startup settings display
 
@@ -1559,9 +1626,12 @@ equals the leaf-section size; validating a big archive over HTTP then costs one 
 rather than one per leaf. The walk follows RunLength 0 entries to any depth, guards
 against loops and pointers outside the section, and parses with the header's internal
 compression. Trailing bytes are checked for none and gzip. It fails on MinZoom > MaxZoom,
-on zero addressed tiles (counted from the directories, since a header value of 0 means
-unknown in the spec), and on a nonzero header count that disagrees with them. It used to
-check only the first leaf and failed uncompressed-directory archives with a gzip error.
+on addressed tiles outside [MinZoom, MaxZoom] (from the smallest and largest tile ID;
+clients never request them), on zero addressed tiles (counted from the directories, since
+a header value of 0 means unknown in the spec), and on a nonzero header count that
+disagrees with them. It used to check only the first leaf and failed
+uncompressed-directory archives with a gzip error, and its zoom check compared only
+MinZoom with MaxZoom, so a header patched to MinZoom 7 over z6 tiles passed.
 
 ### pmheader
 
@@ -1570,9 +1640,24 @@ check only the first leaf and failed uncompressed-directory archives with a gzip
   the header would say none over gzip directories.
 - `--sync-metadata` (default on) updates only the keys the metadata already has, each in
   its JSON form: a number or array stays one, strings are written as the writer writes
-  them. It applies before `--set`/`--unset`, so explicit values win. The 127-byte in-place
-  fast path is kept whenever nothing actually changes in the metadata; a corrupt metadata
-  section fails a sync-only patch, with a hint to `--sync-metadata=false`.
+  them. It applies before `--set`/`--unset`, so explicit values win. Syncing made every
+  header edit on an archive of this tool a metadata change, and those went through the
+  full rewrite: a temp file renamed over the path, which replaced a symlink with a regular
+  file, left the archive 0600 and streamed all tile data.
+- In place, changed metadata (explicit or synced) is overwritten where it is when its new
+  encoding, padded to exactly the old length, fits: spaces before the JSON's closing brace,
+  and in gzip (at `BestCompression`, like the writer) an RFC 1952 FCOMMENT of spaces, which
+  decoders skip. A comment costs at least 2 bytes, so a section exactly 1 byte short is
+  retried with more spaces in the JSON, which change the compressed size. The header is
+  then written at 0; the sections stay contiguous, as checkpmtiles requires. Measured on
+  archives fresh from the writer, 30 of 72 header edits fit; the rest grow the gzip by 1-9
+  bytes (a changed digit breaks a repeat the description had matched). Leaving slack in the
+  writer's metadata would let more fit, but changes every archive; not done.
+- Otherwise the file is rewritten. In place, the temp file goes next to the symlink's
+  target, gets the archive's mode before the rename and replaces the target, not the link.
+- Metadata in brotli or zstd, which pmheader cannot decode, leaves a header edit to the
+  header alone, with a warning, where it used to fail; `--set` and `--unset` still fail on
+  it. Corrupt metadata fails a sync-only patch, with a hint to `--sync-metadata=false`.
 - `readAllEntries` mirrors `pmtiles.readEntries`: any depth, loop guard.
 
 ### coginfo -raw
