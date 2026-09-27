@@ -112,6 +112,10 @@ func (d *lzwDecoder) decode() ([]byte, error) {
 		code, err := d.readBits(codeWidth)
 		if err != nil {
 			if err == io.ErrUnexpectedEOF {
+				// A stream that ends without EOI is accepted, as libtiff
+				// accepts it (with a warning). Truncation shows up as short
+				// output, which the callers check against the strip or tile
+				// size.
 				return output, nil
 			}
 			return nil, err

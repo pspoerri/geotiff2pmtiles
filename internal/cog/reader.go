@@ -503,7 +503,7 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 	}
 	bps := ifd.bytesPerSample()
 	planeBufs := make([][]byte, sl.planes)
-	total := 0
+	planeLen := 0
 	for p := 0; p < sl.planes; p++ {
 		buf, err := r.readStripsRaw(ifd, p*sl.stripsPerPlane+startStrip, p*sl.stripsPerPlane+endStrip)
 		if err != nil {
@@ -518,13 +518,14 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 			undoFloatingPointPredictor(buf, int(ifd.Width), 1, bps, r.bo)
 		}
 		planeBufs[p] = buf
-		total += len(buf)
+		planeLen = max(planeLen, len(buf))
 	}
-	if total == 0 {
+	if planeLen == 0 {
 		return nil, ifd, nil
 	}
-	combined := make([]byte, total)
+	combined := make([]byte, planeLen*sl.planes)
 	for p, buf := range planeBufs {
+		// A plane whose strips are all sparse is nil and leaves its band zero.
 		for i := 0; i+bps <= len(buf); i += bps {
 			copy(combined[(i/bps*sl.planes+p)*bps:], buf[i:i+bps])
 		}
@@ -533,64 +534,111 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 }
 
 // readStripsRaw decompresses and concatenates strips [start, end).
+//
+// Every strip contributes exactly its own rows, so rows keep their position
+// in the virtual tile. A sparse strip (byte count 0, as GDAL writes with
+// SPARSE_OK) becomes zero rows -- the readers mark them nodata through
+// sparseRows -- and a strip that decodes short (corrupt LZW, say, which
+// decodes without error up to the damage) is an error rather than a shift of
+// every later strip. A range of sparse strips only returns nil, like an
+// empty tile.
 func (r *Reader) readStripsRaw(ifd *IFD, start, end int) ([]byte, error) {
 	sl := r.strip
+	rowBytes := sl.rowBytes(ifd)
 
-	// Size the buffer up front: exact for uncompressed strips, a lower bound
-	// otherwise. Growing an ~10 MB slice strip by strip (RowsPerStrip=1)
-	// copies it several times over and contends on the heap lock.
-	var total uint64
-	for s := start; s < end && s < len(sl.byteCounts); s++ {
-		total += sl.byteCounts[s]
-	}
-	if total > uint64(r.src.Size()) {
-		total = 0 // corrupt byte counts; the per-strip bounds check below reports it
+	// Size the buffer up front. Growing an ~10 MB slice strip by strip
+	// (RowsPerStrip=1) copies it several times over and contends on the
+	// heap lock.
+	total := 0
+	for s := start; s < end; s++ {
+		total += sl.stripRows(s, ifd.Height) * rowBytes
 	}
 	combined := make([]byte, 0, total)
 
+	sparse := true
 	for s := start; s < end; s++ {
 		if s >= len(sl.offsets) || s >= len(sl.byteCounts) {
 			return nil, fmt.Errorf("strip %d out of range (%d strips)", s, len(sl.offsets))
 		}
+		want := sl.stripRows(s, ifd.Height) * rowBytes
 		offset := sl.offsets[s]
 		size := sl.byteCounts[s]
 		if size == 0 {
+			combined = append(combined, make([]byte, want)...)
 			continue
 		}
+		sparse = false
 		chunk, err := r.slice("data", offset, size)
 		if err != nil {
 			return nil, fmt.Errorf("strip %d: %w", s, err)
 		}
 
+		var dec []byte
 		switch ifd.Compression {
 		case 1: // No compression
-			combined = append(combined, chunk...)
-		case 7: // JPEG
-			combined = append(combined, chunk...)
+			dec = chunk
+		case 7: // JPEG: each strip is a separate JPEG stream
+			return nil, fmt.Errorf("JPEG-compressed strips cannot be concatenated")
 		case 8, 32946: // Deflate / zlib
-			dec, err := decompressDeflate(chunk)
-			if err != nil {
+			if dec, err = decompressDeflate(chunk); err != nil {
 				return nil, fmt.Errorf("decompressing deflate strip %d: %w", s, err)
 			}
-			combined = append(combined, dec...)
 		case 5: // LZW
-			dec, err := decompressLZW(chunk)
-			if err != nil {
+			if dec, err = decompressLZW(chunk); err != nil {
 				return nil, fmt.Errorf("decompressing LZW strip %d: %w", s, err)
 			}
-			combined = append(combined, dec...)
 		case 50000: // ZSTD
-			dec, err := decompressZSTD(chunk)
-			if err != nil {
+			if dec, err = decompressZSTD(chunk); err != nil {
 				return nil, fmt.Errorf("decompressing zstd strip %d: %w", s, err)
 			}
-			combined = append(combined, dec...)
 		default:
 			return nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
 		}
+		if len(dec) < want {
+			return nil, fmt.Errorf("strip %d decodes to %d bytes, want %d", s, len(dec), want)
+		}
+		// Longer is fine: some writers pad the last strip to RowsPerStrip.
+		combined = append(combined, dec[:want]...)
 	}
 
+	if sparse {
+		return nil, nil
+	}
 	return combined, nil
+}
+
+// rowBytes returns the byte length of one strip row: one plane's samples for
+// planar-separate files, every sample otherwise; bit-packed rows start on a
+// byte boundary.
+func (sl *stripLayout) rowBytes(ifd *IFD) int {
+	spp := max(1, int(ifd.SamplesPerPixel)/sl.planes)
+	return (int(ifd.Width)*spp*ifd.bitsPerSample() + 7) / 8
+}
+
+// stripRows returns the number of image rows in strip s, counted from the
+// start of its plane: RowsPerStrip, or fewer for the last strip.
+func (sl *stripLayout) stripRows(s int, height uint32) int {
+	y := (s % sl.stripsPerPlane) * int(sl.rowsPerStrip)
+	return max(0, min(int(sl.rowsPerStrip), int(height)-y))
+}
+
+// sparseRows returns the row ranges [y0, y1) of virtual tile tileRow that lie
+// in sparse strips (byte count 0 in every plane). They hold no data, so the
+// readers report them as nodata rather than as the zeros that fill them.
+func (sl *stripLayout) sparseRows(tileRow int, height uint32) [][2]int {
+	var rows [][2]int
+	start := tileRow * sl.stripsPerTile
+	for s := start; s < min(start+sl.stripsPerTile, sl.stripsPerPlane); s++ {
+		sparse := true
+		for p := 0; p < sl.planes && sparse; p++ {
+			sparse = sl.byteCounts[p*sl.stripsPerPlane+s] == 0
+		}
+		if sparse {
+			y0 := (s - start) * int(sl.rowsPerStrip)
+			rows = append(rows, [2]int{y0, y0 + sl.stripRows(s, height)})
+		}
+	}
+	return rows
 }
 
 // applyPredictor reverses TIFF predictor encoding on decompressed data.
@@ -697,7 +745,17 @@ func (r *Reader) ReadFloatTile(level, col, row int) ([]float32, int, int, error)
 		return nil, w, h, nil // empty tile
 	}
 
-	return r.decodeRawFloat32Tile(ifd, data)
+	px, w, h, err := r.decodeRawFloat32Tile(ifd, data)
+	if err == nil && r.strip != nil && level == 0 {
+		// Sparse strips hold no data: NaN (nodata), never 0 m.
+		nan := float32(math.NaN())
+		for _, ys := range r.strip.sparseRows(row, ifd.Height) {
+			for i := ys[0] * w; i < ys[1]*w; i++ {
+				px[i] = nan
+			}
+		}
+	}
+	return px, w, h, err
 }
 
 // decodeRawFloat32Tile decodes raw bytes as float32 pixel data.
@@ -717,7 +775,8 @@ func (r *Reader) decodeRawFloat32Tile(ifd *IFD, data []byte) ([]float32, int, in
 
 	// The last virtual tile of a strip TIFF is legitimately short when the
 	// image height is not a multiple of the virtual tile height; decode the
-	// rows present and leave the rest zero (never sampled: outside the image).
+	// rows present and leave the rest NaN (outside the image). No other strip
+	// tile is short: readStripsRaw rejects a strip that decodes short.
 	decodeCount := pixelCount
 	if len(data) < expectedSize {
 		if r.strip == nil {
@@ -747,6 +806,9 @@ func (r *Reader) decodeRawFloat32Tile(ifd *IFD, data []byte) ([]float32, int, in
 		default:
 			return nil, 0, 0, fmt.Errorf("unsupported float bits per sample: %d", bps)
 		}
+	}
+	for i := decodeCount; i < pixelCount; i++ {
+		result[i] = float32(math.NaN())
 	}
 
 	return result, w, h, nil
@@ -852,7 +914,31 @@ func (r *Reader) ReadUint16Tile(level, col, row int) (samples []uint16, w, h, sp
 		rows := len(data) / rowBytes
 		unpackBits(samples, data, w*spp, rows, bits, rowBytes)
 	}
+	if r.strip != nil && level == 0 {
+		// Sparse strips read as the file's nodata value, as GDAL reads them.
+		if nd, ok := r.nodata16(ifd); ok {
+			for _, ys := range r.strip.sparseRows(row, ifd.Height) {
+				for i := ys[0] * w * spp; i < ys[1]*w*spp; i++ {
+					samples[i] = nd
+				}
+			}
+		}
+	}
 	return samples, w, h, spp, nil
+}
+
+// nodata16 returns the GDAL nodata value as ReadUint16Tile returns samples
+// (signed values as two's complement), if it is set and fits the sample type.
+func (r *Reader) nodata16(ifd *IFD) (uint16, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(r.ifds[0].NoData), 64)
+	lo, hi := 0.0, float64(math.MaxUint16)
+	if len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 2 {
+		lo, hi = math.MinInt16, math.MaxInt16
+	}
+	if err != nil || v != math.Trunc(v) || v < lo || v > hi {
+		return 0, false
+	}
+	return uint16(int32(v)), true
 }
 
 // unpackBits reads row-aligned, MSB-first packed samples of the given depth.
@@ -972,7 +1058,17 @@ func (r *Reader) readTileDecoded(level, col, row int) (image.Image, error) {
 		if data == nil {
 			return image.NewRGBA(image.Rect(0, 0, int(ifd.TileWidth), int(ifd.TileHeight))), nil
 		}
-		return r.decodeRawTile(ifd, data)
+		img, err := r.decodeRawTile(ifd, data)
+		if err != nil {
+			return nil, err
+		}
+		// Sparse strips hold no data: transparent, like an empty tile.
+		if rgba, ok := img.(*image.RGBA); ok {
+			for _, ys := range r.strip.sparseRows(row, ifd.Height) {
+				clear(rgba.Pix[ys[0]*rgba.Stride : ys[1]*rgba.Stride])
+			}
+		}
+		return img, nil
 	}
 
 	// Planar-separate layout: each band is stored in its own per-tile blob,
