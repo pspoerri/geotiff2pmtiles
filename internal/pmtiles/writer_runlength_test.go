@@ -2,6 +2,7 @@ package pmtiles
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -59,6 +60,67 @@ func TestWriter_RunLengthSpecSemantics(t *testing.T) {
 		}
 		if !bytes.Equal(got, tiles[i]) {
 			t.Errorf("tile z=1 x=%d y=%d: got first byte 0x%02x, want 0x%02x", xy[0], xy[1], got[0], tiles[i][0])
+		}
+	}
+}
+
+// Runs of one deduplicated blob (fill tiles) are merged while writing, so
+// the index does not hold 24 bytes for every tile of a large --fill-color
+// archive until Finalize. Workers write interleaved Hilbert batches, so the
+// runs only show once sorted.
+func TestWriter_CompactsRunsWhileWriting(t *testing.T) {
+	const (
+		z       = 9
+		n       = 1 << 18 // every z9 tile
+		workers = 8
+		batch   = 32
+	)
+	path := filepath.Join(t.TempDir(), "fill.pmtiles")
+	w, err := NewWriter(path, WriterOptions{MinZoom: z, MaxZoom: z, TileSize: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := ZXYToTileID(z, 0, 0) // the lowest ID of the zoom
+	fill := bytes.Repeat([]byte{0xF1}, 100)
+	tile := func(i int) []byte {
+		if i%1000 == 0 { // breaks the runs
+			return []byte(fmt.Sprintf("unique tile %d", i))
+		}
+		return fill
+	}
+	for base := 0; base < n; base += workers * batch {
+		for k := 0; k < batch; k++ {
+			for wk := 0; wk < workers; wk++ {
+				i := base + wk*batch + k
+				_, x, y := TileIDToZXY(first + uint64(i))
+				if err := w.WriteTile(z, x, y, tile(i)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if len(w.entries) > 65536 {
+		t.Errorf("%d entries held for %d tiles in %d runs; want runs merged while writing", len(w.entries), n, 2*n/1000)
+	}
+	t.Logf("%d entries held for %d tiles in %d runs", len(w.entries), n, 2*n/1000)
+	if err := w.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	h := r.Header()
+	if h.NumAddressedTiles != n || h.NumTileContents != n/1000+2 {
+		t.Errorf("addressed/contents = %d/%d, want %d/%d", h.NumAddressedTiles, h.NumTileContents, n, n/1000+2)
+	}
+	for _, i := range []int{0, 1, 999, 1000, 1001, 123456, n - 1} {
+		_, x, y := TileIDToZXY(first + uint64(i))
+		got, err := r.ReadTile(z, x, y)
+		if err != nil || !bytes.Equal(got, tile(i)) {
+			t.Errorf("tile %d = %q, %v; want %q", i, got, err, tile(i))
 		}
 	}
 }
