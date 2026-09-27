@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"image"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,7 +52,7 @@ func writeStripTIFF(t *testing.T, path string, width, height, rps int, planar bo
 	add(259, 3, 1, 1)            // Compression = None
 	add(262, 3, 1, 2)            // Photometric = RGB
 	add(277, 3, 1, spp)          // SamplesPerPixel
-	add(278, 3, 1, uint32(rps))  // RowsPerStrip
+	add(278, 4, 1, uint32(rps))  // RowsPerStrip (LONG: may be 2^32-1)
 	planarCfg := uint32(1)
 	if planar {
 		planarCfg = 2
@@ -60,8 +61,15 @@ func writeStripTIFF(t *testing.T, path string, width, height, rps int, planar bo
 
 	stripOffsets := make([]byte, 4*numStrips)
 	stripByteCounts := make([]byte, 4*numStrips)
-	addExtern(273, 4, uint32(numStrips), stripOffsets)
-	addExtern(279, 4, uint32(numStrips), stripByteCounts)
+	if numStrips == 1 {
+		// A single LONG fits in the entry itself, so the TIFF spec stores it
+		// inline; the value is patched in once the strip is laid out.
+		add(273, 4, 1, 0)
+		add(279, 4, 1, 0)
+	} else {
+		addExtern(273, 4, uint32(numStrips), stripOffsets)
+		addExtern(279, 4, uint32(numStrips), stripByteCounts)
+	}
 
 	ifdSize := 2 + len(entries)*12 + 4
 	externOffset := uint32(8 + ifdSize)
@@ -102,6 +110,14 @@ func writeStripTIFF(t *testing.T, path string, width, height, rps int, planar bo
 	for p := 0; p < planes; p++ {
 		for s := 0; s < stripsPerPlane; s++ {
 			writeStrip(p, s*rps)
+		}
+	}
+	for i := range entries {
+		if numStrips == 1 && entries[i].tag == 273 {
+			entries[i].value = bo.Uint32(stripOffsets)
+		}
+		if numStrips == 1 && entries[i].tag == 279 {
+			entries[i].value = bo.Uint32(stripByteCounts)
 		}
 	}
 
@@ -185,6 +201,10 @@ func TestStripTIFF(t *testing.T) {
 		{"chunky rps=1", false, 1},
 		{"planar rps=2", true, 2},
 		{"planar rps=1", true, 1}, // GDAL INTERLEAVE=BAND default layout
+		{"chunky single strip", false, 300},
+		{"planar single strip", true, 300},
+		// The spec's default written out explicitly: one strip, not 0 tiles.
+		{"chunky rps=2^32-1", false, math.MaxUint32},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// 300 rows > 256 so strips are grouped into multiple virtual tiles.
@@ -192,6 +212,26 @@ func TestStripTIFF(t *testing.T) {
 			path := filepath.Join(t.TempDir(), fmt.Sprintf("strip_%v_%d.tif", tc.planar, tc.rps))
 			writeStripTIFF(t, path, width, height, tc.rps, tc.planar, pixel)
 			checkAllPixels(t, path, width, height, pixel)
+		})
+	}
+}
+
+// Malformed strip layouts must fail with an error, not panic in Open.
+func TestPromoteStripsRejectsMalformed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ifd  IFD
+	}{
+		{"no StripByteCounts", IFD{Width: 4, Height: 4, SamplesPerPixel: 1, StripOffsets: []uint64{8}}},
+		{"short StripByteCounts", IFD{Width: 4, Height: 8, RowsPerStrip: 4, SamplesPerPixel: 1,
+			StripOffsets: []uint64{8, 24}, StripByteCounts: []uint64{16}}},
+		{"zero height", IFD{Width: 4, SamplesPerPixel: 1, StripOffsets: []uint64{8}, StripByteCounts: []uint64{0}}},
+		{"zero width", IFD{Height: 4, SamplesPerPixel: 1, StripOffsets: []uint64{8}, StripByteCounts: []uint64{0}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := promoteStripsToTiles(&tc.ifd); err == nil {
+				t.Error("expected an error")
+			}
 		})
 	}
 }

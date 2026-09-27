@@ -185,7 +185,10 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 	var sl *stripLayout
 	if first.TileWidth == 0 || first.TileHeight == 0 {
 		if len(first.StripOffsets) > 0 {
-			sl = promoteStripsToTiles(first)
+			if sl, err = promoteStripsToTiles(first); err != nil {
+				src.Close()
+				return nil, fmt.Errorf("%s: %w", path, err)
+			}
 		} else {
 			src.Close()
 			return nil, fmt.Errorf("%s: no tile or strip layout found", path)
@@ -241,9 +244,18 @@ var nextReaderID atomic.Int64
 // Small strips are grouped into larger virtual tiles (>= 256 rows) so that
 // resampling kernels (e.g. Lanczos 6x6) never span more than 2 tiles.
 // Returns the stripLayout needed to reconstruct virtual tiles at read time.
-func promoteStripsToTiles(ifd *IFD) *stripLayout {
+func promoteStripsToTiles(ifd *IFD) (*stripLayout, error) {
+	if ifd.Width == 0 || ifd.Height == 0 {
+		return nil, fmt.Errorf("image has zero size %dx%d", ifd.Width, ifd.Height)
+	}
+	if len(ifd.StripByteCounts) < len(ifd.StripOffsets) {
+		return nil, fmt.Errorf("StripByteCounts has %d entries, StripOffsets %d",
+			len(ifd.StripByteCounts), len(ifd.StripOffsets))
+	}
+	// 0, and anything past the height (such as the spec's default of
+	// 2^32-1 written out explicitly), means a single strip.
 	rps := ifd.RowsPerStrip
-	if rps == 0 {
+	if rps == 0 || rps > ifd.Height {
 		rps = ifd.Height
 	}
 
@@ -261,7 +273,7 @@ func promoteStripsToTiles(ifd *IFD) *stripLayout {
 	if ifd.PlanarConfig == 2 && ifd.SamplesPerPixel > 1 {
 		planes = int(ifd.SamplesPerPixel)
 	}
-	stripsPerPlane := int((ifd.Height + rps - 1) / rps)
+	stripsPerPlane := (int(ifd.Height) + int(rps) - 1) / int(rps)
 	if maxPerPlane := len(ifd.StripOffsets) / planes; stripsPerPlane > maxPerPlane {
 		stripsPerPlane = maxPerPlane // malformed file: fewer strips than rows imply
 	}
@@ -299,7 +311,7 @@ func promoteStripsToTiles(ifd *IFD) *stripLayout {
 	ifd.TileOffsets = virtualOffsets
 	ifd.TileByteCounts = virtualByteCounts
 
-	return sl
+	return sl, nil
 }
 
 // Close closes the underlying ByteSource (unmapping the file for Open).

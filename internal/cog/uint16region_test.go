@@ -170,7 +170,10 @@ func TestReadUint16TileShortLastStrip(t *testing.T) {
 	ifd := IFD{Width: w, Height: h, SamplesPerPixel: 1, BitsPerSample: []uint16{16},
 		SampleFormat: []uint16{1}, Compression: 1, PlanarConfig: 1, RowsPerStrip: 1,
 		StripOffsets: offs, StripByteCounts: counts}
-	sl := promoteStripsToTiles(&ifd)
+	sl, err := promoteStripsToTiles(&ifd)
+	if err != nil {
+		t.Fatal(err)
+	}
 	r := &Reader{src: bytesSource(buf), bo: binary.LittleEndian, ifds: []IFD{ifd}, strip: sl}
 
 	s, _, _, _, err := r.ReadUint16Tile(0, 0, 1)
