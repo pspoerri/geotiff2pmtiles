@@ -6,14 +6,18 @@ import (
 	"image/color"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
+	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
 	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 	"github.com/pspoerri/geotiff2pmtiles/internal/pmtiles"
 	"github.com/pspoerri/geotiff2pmtiles/internal/tile"
@@ -28,43 +32,43 @@ var (
 
 func main() {
 	var (
-		format          string
-		quality         int
-		minZoom         int
-		maxZoom         int
-		showVersion     bool
-		tileSize        int
-		concurrency     int
-		verbose         bool
-		resampling      string
-		cpuProfile      string
-		memProfile      string
-		memLimitMB      int
-		noSpill         bool
-		fillColor       string
-		rebuild         bool
-		terrarium       bool
-		attribution     string
-		layerType       string
-		resamplingGamma float64
+		format      string
+		quality     int
+		minZoom     int
+		maxZoom     int
+		showVersion bool
+		tileSize    int
+		concurrency int
+		verbose     bool
+		resampling  string
+		cpuProfile  string
+		memProfile  string
+		memLimitMB  int
+		noSpill     bool
+		fillColor   string
+		rebuild     bool
+		terrarium   bool
+		attribution string
+		layerType   string
+		tmpDirFlag  string
 	)
 
 	flag.StringVar(&format, "format", "", "Target tile encoding: jpeg, png, webp (default: keep source format)")
-	flag.IntVar(&quality, "quality", 85, "JPEG/WebP quality 1-100")
-	flag.IntVar(&minZoom, "min-zoom", -1, "Minimum zoom level (default: keep source)")
-	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (default: keep source)")
-	flag.IntVar(&tileSize, "tile-size", -1, "Output tile size in pixels (default: keep source)")
-	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers")
-	flag.StringVar(&resampling, "resampling", "bicubic", "Interpolation method: lanczos, bicubic, bilinear, nearest, mode")
-	flag.Float64Var(&resamplingGamma, "resampling-gamma", 1.0, "Gamma correction for resampling output encoding (1.0 = disabled, typical 1.5-2.2 for dB-space to RGB)")
+	flag.IntVar(&quality, "quality", 85, "JPEG/WebP quality 1-100 (ignored for png)")
+	flag.IntVar(&minZoom, "min-zoom", -1, "Minimum zoom level; -1 = source min zoom, extended down to the zoom where all data fits in one tile (added levels are downsampled from the source's lowest level)")
+	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level, at most the source max zoom; -1 = keep source")
+	flag.IntVar(&tileSize, "tile-size", -1, "Output tile size in pixels; must equal the source tile size (resizing is not supported); -1 = keep source")
+	flag.IntVar(&concurrency, "concurrency", runtime.NumCPU(), "Number of parallel workers (>= 1)")
+	flag.StringVar(&resampling, "resampling", "bicubic", "Downsampling method for rebuilt or added zoom levels: lanczos, bicubic, bilinear, nearest, mode")
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "Write CPU profile to file")
 	flag.StringVar(&memProfile, "memprofile", "", "Write memory profile to file")
-	flag.IntVar(&memLimitMB, "mem-limit", 0, "Tile store memory limit in MB before disk spilling (0 = auto ~90% of RAM)")
+	flag.IntVar(&memLimitMB, "mem-limit", 0, "MB of encoded tiles allowed to queue for the spill file before workers pause during a rebuild (0 = auto: 90% of RAM minus 2 GB; spilling is off if that is under 512 MB)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
-	flag.StringVar(&fillColor, "fill-color", "0,0,0,0", "Substitute transparent/nodata with RGBA (color transform); also fill missing tile positions, e.g. \"0,0,0,255\" or \"#000000ff\" (default: transparent)")
-	flag.BoolVar(&rebuild, "rebuild", false, "Force full pyramid rebuild (required for resampling changes)")
+	flag.StringVar(&tmpDirFlag, "tmp-dir", "", "Directory for temporary files, about 2x the output size at peak (default: the output file's directory)")
+	flag.StringVar(&fillColor, "fill-color", "", "RGBA color, e.g. \"0,0,0,255\" or \"#000000ff\": replaces transparent pixels and fills missing tile positions within bounds; forces re-encoding (default: none, tiles are copied as-is)")
+	flag.BoolVar(&rebuild, "rebuild", false, "Rebuild every level below max zoom by downsampling (needed to apply --resampling to existing levels)")
 	flag.BoolVar(&terrarium, "terrarium", false, "Treat tiles as terrarium-encoded elevations so rebuild downsamples in elevation space (auto-detected from archive metadata)")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (default: keep source)")
 	flag.StringVar(&layerType, "type", "", "Layer type: baselayer, overlay (default: keep source)")
@@ -121,6 +125,17 @@ func main() {
 
 	inputPath := args[0]
 	outputPath := args[1]
+
+	format = strings.ToLower(format)
+	if format == "jpg" {
+		format = "jpeg"
+	}
+	if quality < 1 || quality > 100 {
+		log.Fatalf("--quality must be 1-100, got %d", quality)
+	}
+	if concurrency < 1 {
+		log.Fatalf("--concurrency must be >= 1, got %d", concurrency)
+	}
 
 	if !strings.EqualFold(filepath.Ext(inputPath), ".pmtiles") {
 		log.Fatal("Input file must have .pmtiles extension")
@@ -188,14 +203,27 @@ func main() {
 	if format == "" {
 		format = srcFormat
 	}
-	if minZoom < 0 {
-		minZoom = int(srcHeader.MinZoom)
-	}
 	if maxZoom < 0 {
 		maxZoom = int(srcHeader.MaxZoom)
 	}
+	if minZoom < 0 {
+		// Extend the pyramid down to the zoom where all data fits in one tile
+		// (same rule as geotiff2pmtiles), never dropping source levels.
+		minZoom = min(int(srcHeader.MinZoom), coord.MinZoomForSingleTile(
+			float64(srcHeader.MinLon), float64(srcHeader.MinLat),
+			float64(srcHeader.MaxLon), float64(srcHeader.MaxLat)), maxZoom)
+	}
+	if maxZoom > int(srcHeader.MaxZoom) {
+		log.Fatalf("--max-zoom %d exceeds the source max zoom %d; pmtransform cannot add detail (let the viewer overzoom)", maxZoom, srcHeader.MaxZoom)
+	}
+	if minZoom > maxZoom {
+		log.Fatalf("invalid zoom range %d-%d: --min-zoom must be <= --max-zoom", minZoom, maxZoom)
+	}
+	srcTileSize := discoverSourceTileSize(reader, srcFormat)
 	if tileSize < 0 {
-		tileSize = discoverSourceTileSize(reader, srcFormat)
+		tileSize = srcTileSize
+	} else if tileSize != srcTileSize {
+		log.Fatalf("--tile-size %d differs from the source tile size %d; resizing tiles is not supported", tileSize, srcTileSize)
 	}
 
 	// Resolve resampling method.
@@ -214,12 +242,15 @@ func main() {
 		fc = &c
 	}
 
-	// Determine transform mode.
+	// Determine transform mode. Levels below the source's min zoom are added by
+	// a separate rebuild pass (see extendDown), so the existing levels can still
+	// be copied as-is.
 	formatChanged := format != srcFormat
-	zoomChanged := minZoom < int(srcHeader.MinZoom) // adding lower zoom levels
+	srcMinZoom := int(srcHeader.MinZoom)
+	extendDown := !rebuild && minZoom < srcMinZoom
 	mode := tile.TransformPassthrough
 
-	if rebuild || zoomChanged {
+	if rebuild {
 		mode = tile.TransformRebuild
 	} else if formatChanged {
 		mode = tile.TransformReencode
@@ -232,12 +263,16 @@ func main() {
 	// passthrough of e.g. a WebP archive still works in a build without CGo.
 	var enc encode.Encoder
 	tileFormat := srcHeader.TileType
-	if mode != tile.TransformPassthrough {
+	if mode != tile.TransformPassthrough || extendDown {
 		enc, err = encode.NewEncoder(format, quality)
 		if err != nil {
 			log.Fatalf("Encoder: %v", err)
 		}
 		tileFormat = enc.PMTileType()
+	}
+
+	if isFlagSet("resampling") && mode != tile.TransformRebuild && !extendDown {
+		log.Printf("WARNING: --resampling only applies to rebuilt or added zoom levels; pass --rebuild to apply it to existing levels")
 	}
 
 	if terrarium && (format == "jpeg" || format == "webp") {
@@ -262,6 +297,9 @@ func main() {
 	case tile.TransformRebuild:
 		modeStr = "rebuild pyramid"
 	}
+	if extendDown {
+		modeStr += fmt.Sprintf(" + add zoom %d–%d", minZoom, min(srcMinZoom-1, maxZoom))
+	}
 
 	fmt.Printf("pmtransform %s (commit %s, built %s)\n", version, commit, buildDate)
 	fmt.Printf("  %-14s %s\n", "Mode:", modeStr)
@@ -272,12 +310,8 @@ func main() {
 	fmt.Printf("  %-14s %dpx\n", "Tile size:", tileSize)
 	fmt.Printf("  %-14s %d – %d (source: %d – %d)\n", "Zoom:",
 		minZoom, maxZoom, srcHeader.MinZoom, srcHeader.MaxZoom)
-	if mode == tile.TransformRebuild {
-		if resamplingGamma != 1.0 {
-			fmt.Printf("  %-14s %s (gamma %.2g)\n", "Resampling:", resampling, resamplingGamma)
-		} else {
-			fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
-		}
+	if mode == tile.TransformRebuild || extendDown {
+		fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
 	}
 	if terrarium {
 		fmt.Printf("  %-14s terrarium (elevation-space downsampling)\n", "Encoding:")
@@ -296,8 +330,10 @@ func main() {
 	fmt.Printf("  %-14s %s (%d tiles)\n", "Input:", inputPath, reader.NumTiles())
 	fmt.Printf("  %-14s %s\n", "Output:", outputPath)
 
+	tmpDir, cleanup := makeTmpDir(tmpDirFlag, outputPath)
+	defer cleanup()
+
 	// Build config.
-	outputDir := filepath.Dir(outputPath)
 	cfg := tile.TransformConfig{
 		MinZoom:          minZoom,
 		MaxZoom:          maxZoom,
@@ -307,18 +343,17 @@ func main() {
 		Encoder:          enc,
 		SourceFormat:     srcFormat,
 		Resampling:       resamplingMode,
-		ResamplingGamma:  resamplingGamma,
 		Mode:             mode,
 		FillColor:        fc,
 		Bounds:           bounds,
 		MemoryLimitBytes: memoryLimitBytes,
-		OutputDir:        outputDir,
+		OutputDir:        tmpDir,
 		IsTerrarium:      terrarium,
 	}
 
 	// Build description with processing steps prepended to source description.
-	description := buildTransformDescription(srcDescription, srcHeader, mode, srcFormat, format, quality,
-		tileSize, minZoom, maxZoom, resampling, resamplingGamma, fc)
+	description := buildTransformDescription(srcDescription, srcHeader, mode, extendDown, srcFormat, format, quality,
+		tileSize, minZoom, maxZoom, resampling, fc)
 
 	// Create PMTiles writer.
 	encoding := ""
@@ -331,7 +366,7 @@ func main() {
 		Bounds:      cog.Bounds{MinLon: float64(bounds[0]), MinLat: float64(bounds[1]), MaxLon: float64(bounds[2]), MaxLat: float64(bounds[3])},
 		TileFormat:  tileFormat,
 		TileSize:    tileSize,
-		TempDir:     outputDir,
+		TempDir:     tmpDir,
 		Name:        "pmtransform",
 		Description: description,
 		Attribution: attribution,
@@ -339,14 +374,35 @@ func main() {
 		Encoding:    encoding,
 	})
 	if err != nil {
+		cleanup()
 		log.Fatalf("Creating PMTiles writer: %v", err)
 	}
 
 	// Run transform.
 	genStart := time.Now()
-	stats, err := tile.Transform(cfg, reader, writer)
+	mainCfg := cfg
+	if extendDown {
+		mainCfg.MinZoom = srcMinZoom
+	}
+	stats, err := tile.Transform(mainCfg, reader, writer)
+	if err == nil && extendDown {
+		// Downsample the source's lowest level into the added levels. The
+		// rebuild also re-renders srcMinZoom itself; those tiles were already
+		// written above, so they are dropped here.
+		extCfg := cfg
+		extCfg.Mode = tile.TransformRebuild
+		extCfg.MaxZoom = srcMinZoom
+		capped := &zoomCap{TileWriter: writer, maxZoom: min(srcMinZoom-1, maxZoom)}
+		var ext tile.Stats
+		ext, err = tile.Transform(extCfg, reader, capped)
+		stats.TileCount += ext.TileCount - capped.dropped.Load()
+		stats.UniformTiles += ext.UniformTiles
+		stats.EmptyTiles += ext.EmptyTiles
+		stats.TotalBytes += ext.TotalBytes
+	}
 	if err != nil {
 		writer.Abort()
+		cleanup()
 		log.Fatalf("Transform: %v", err)
 	}
 
@@ -358,6 +414,7 @@ func main() {
 
 	// Finalize PMTiles file.
 	if err := writer.Finalize(); err != nil {
+		cleanup()
 		log.Fatalf("Finalizing PMTiles: %v", err)
 	}
 
@@ -443,8 +500,8 @@ func parseHexColor(s string) (color.RGBA, error) {
 }
 
 func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
-	mode tile.TransformMode, srcFormat, targetFormat string, quality int,
-	tileSize, minZoom, maxZoom int, resampling string, resamplingGamma float64, fc *color.RGBA) string {
+	mode tile.TransformMode, extendDown bool, srcFormat, targetFormat string, quality int,
+	tileSize, minZoom, maxZoom int, resampling string, fc *color.RGBA) string {
 
 	var b strings.Builder
 
@@ -456,6 +513,9 @@ func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 		modeStr = "re-encode"
 	case tile.TransformRebuild:
 		modeStr = "rebuild"
+	}
+	if extendDown {
+		modeStr += fmt.Sprintf(" + added zoom %d-%d", minZoom, min(int(srcHeader.MinZoom)-1, maxZoom))
 	}
 	b.WriteString(fmt.Sprintf("  Mode: %s\n", modeStr))
 
@@ -478,12 +538,8 @@ func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 		b.WriteString(fmt.Sprintf("  Zoom: %d - %d\n", minZoom, maxZoom))
 	}
 
-	if mode == tile.TransformRebuild {
-		if resamplingGamma != 1.0 {
-			b.WriteString(fmt.Sprintf("  Resampling: %s (gamma %.2g)\n", resampling, resamplingGamma))
-		} else {
-			b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
-		}
+	if mode == tile.TransformRebuild || extendDown {
+		b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
 	}
 
 	if fc != nil {
@@ -527,4 +583,55 @@ func sameFile(a, b string) bool {
 		return false
 	}
 	return os.SameFile(fa, fb)
+}
+
+// zoomCap drops tiles above maxZoom and forwards the rest.
+type zoomCap struct {
+	tile.TileWriter
+	maxZoom int
+	dropped atomic.Int64
+}
+
+func (w *zoomCap) WriteTile(z, x, y int, data []byte) error {
+	if z > w.maxZoom {
+		w.dropped.Add(1)
+		return nil
+	}
+	return w.TileWriter.WriteTile(z, x, y, data)
+}
+
+// isFlagSet reports whether a flag was explicitly passed on the command line.
+func isFlagSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+// makeTmpDir creates a per-run directory for temporary tile and spill files
+// under dir (default: the output file's directory) and returns a cleanup that
+// removes it. The cleanup also runs on SIGINT/SIGTERM, so an interrupted run
+// does not leave gigabytes of *.tmp files behind. log.Fatal skips defers, so
+// fatal paths after this point must call cleanup themselves.
+func makeTmpDir(dir, outputPath string) (string, func()) {
+	if dir == "" {
+		dir = filepath.Dir(outputPath)
+	}
+	tmp, err := os.MkdirTemp(dir, ".pmtransform-tmp-*")
+	if err != nil {
+		log.Fatalf("Creating temp directory: %v", err)
+	}
+	cleanup := func() { os.RemoveAll(tmp) }
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		cleanup()
+		log.Printf("Interrupted; removed temp directory %s", tmp)
+		os.Exit(130)
+	}()
+	return tmp, cleanup
 }

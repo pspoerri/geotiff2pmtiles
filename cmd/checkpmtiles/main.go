@@ -22,7 +22,7 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
+	if len(os.Args) != 2 || strings.HasPrefix(os.Args[1], "-") {
 		fmt.Fprintf(os.Stderr, "Usage: checkpmtiles <file.pmtiles | https://...>\n")
 		os.Exit(2)
 	}

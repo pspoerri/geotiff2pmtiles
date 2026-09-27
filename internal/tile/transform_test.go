@@ -459,3 +459,35 @@ func TestTransformRebuild_FillColor_StatsConsistency(t *testing.T) {
 		t.Errorf("EmptyTiles = %d, want 0 (fill should cover all positions)", stats.EmptyTiles)
 	}
 }
+
+// TestTransformReencode_FillColor_ReplacesTransparentPixels verifies that
+// re-encode mode substitutes the fill color for transparent pixels, not only
+// for missing tiles.
+func TestTransformReencode_FillColor_ReplacesTransparentPixels(t *testing.T) {
+	tileSize := 8
+	fill := color.RGBA{255, 0, 0, 255}
+	bounds := testBounds()
+	reader := &mockPMTilesReader{
+		tiles: map[[3]int][]byte{
+			{2, 2, 1}: encodePNGTile(t, tileSize, color.RGBA{}),
+		},
+		header: pmtiles.Header{MinZoom: 2, MaxZoom: 2,
+			MinLon: bounds[0], MinLat: bounds[1], MaxLon: bounds[2], MaxLat: bounds[3]},
+	}
+	writer := newMockTileWriter()
+	cfg := TransformConfig{
+		MinZoom: 2, MaxZoom: 2, TileSize: tileSize, Concurrency: 1,
+		Encoder: testEncoder(t), SourceFormat: "png",
+		Mode: TransformReencode, FillColor: &fill, Bounds: bounds,
+	}
+	if _, err := Transform(cfg, reader, writer); err != nil {
+		t.Fatalf("Transform: %v", err)
+	}
+	img, err := encode.DecodeImage(writer.tiles[[3]int{2, 2, 1}], "png")
+	if err != nil {
+		t.Fatalf("DecodeImage: %v", err)
+	}
+	if got := color.RGBAModel.Convert(img.At(3, 3)); got != fill {
+		t.Errorf("pixel = %v, want fill %v", got, fill)
+	}
+}
