@@ -37,7 +37,7 @@ You can visualize generated PMTiles files at [pmtiles.io](https://pmtiles.io/).
 | **Bands** | Any band can be mapped to R, G, B or alpha, e.g. NIR-R-G false color |
 | **Transparency** | GDAL_NODATA, `--nodata`, an alpha band, or a GDAL internal mask (how JPEG COGs usually mark nodata), which makes masked pixels transparent |
 | **CRS** | Native: UTM (EPSG:326xx, 327xx, 258xx), Swiss LV95 (2056), WGS84 (4326), Web Mercator (3857). Other EPSG codes known to [wroge/crs](https://github.com/wroge/crs) use a slower fallback, which is logged when used. Files may use different CRSs. Pixel-is-point rasters (e.g. Copernicus DEM, SRTM) are placed as GDAL places them |
-| **Longitudes** | -180..180 and 0..360 grids; data that crosses the antimeridian (e.g. UTM zones 1 and 60) |
+| **Longitudes** | -180..180 and 0..360 grids; data that crosses the antimeridian (e.g. UTM zones 1 and 60); rasters around a pole (e.g. EPSG:3413, 3031) get bounds over every longitude |
 
 ### Limitations
 
@@ -351,7 +351,7 @@ Keep only z10-z14 (tiles are copied, not re-encoded):
 | ------- | ------- |
 | `coginfo [-raw] <file.tif>` | COG metadata: EPSG, size, bounds, levels, GDAL metadata; test-reads a tile of every level |
 | `pmheader --show <file.pmtiles>` | Show the header and metadata |
-| `pmheader [flags] <in.pmtiles> [out.pmtiles]` | Patch header fields and metadata without touching tile data; `--rebuild-dirs` fixes an oversized root directory. **Without an output path the input is edited in place** |
+| `pmheader [flags] <in.pmtiles> [out.pmtiles]` | Patch header fields and metadata without touching tile data (uncompressed or gzip-compressed directories, leaves at any depth); `--rebuild-dirs` fixes an oversized root directory. **Without an output path the input is edited in place** |
 | `checkpmtiles <file-or-URL>` | Validate a PMTiles v3 archive: header, every directory, zoom range and tile count (exit code 1 on error) |
 
 `make build-all` builds geotiff2pmtiles, pmtransform, checkpmtiles and pmheader into
