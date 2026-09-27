@@ -320,6 +320,50 @@ func TestMixedCRSSourcesLandInPlace(t *testing.T) {
 	}
 }
 
+// EPSG:4326 grids whose longitudes run 0..360 or 190..260 render their part
+// past 180 into the western tiles, and a -180..180 source beside them keeps
+// its own convention.
+func TestLon360SourcesRenderWest(t *testing.T) {
+	gray := func(v uint8) func(x, y int) [3]uint8 { return func(x, y int) [3]uint8 { return [3]uint8{v, v, v} } }
+	geographic := []uint16{1024, 2, 2048, 4326}
+	src := func(minLon, maxLat, scale float64, w, h int, v uint8) string {
+		return writeTestGeoTIFF(t, testGeoTIFF{W: w, H: h, TieX: minLon, TieY: maxLat, Scale: scale,
+			GeoKeys: geographic, RGB: gray(v)})
+	}
+	srcs := openTestSources(t,
+		src(0, 80, 5, 72, 32, 100),    // 0..360
+		src(190, 40, 5, 16, 16, 150),  // 190..270
+		src(-180, 80, 5, 72, 32, 200)) // -180..180
+	for _, tt := range []struct {
+		name    string
+		src     int
+		z       int
+		lon     float64
+		want    uint8
+		visible bool
+	}{
+		{"0..360 west", 0, 2, -150, 100, true},
+		{"0..360 east", 0, 2, 30, 100, true},
+		{"190..270 at z1", 1, 1, -150, 150, true},
+		{"190..270 at z2", 1, 2, -150, 150, true},
+		{"190..270 elsewhere", 1, 2, 30, 0, false},
+		{"-180..180 west", 2, 2, -150, 200, true},
+		{"-180..180 east", 2, 2, 30, 200, true},
+	} {
+		infos := mustSourceInfos(t, srcs[tt.src:tt.src+1])
+		tx, ty := coord.LonLatToTile(tt.lon, 20, tt.z)
+		img := renderTile(tt.z, tx, ty, 64, infos, cog.NewTileCache(16), ResamplingNearest, nil)
+		px, py := coord.TilePixelCoords(tt.lon, 20, tt.z, tx, ty, 64)
+		var got [4]uint8
+		if img != nil {
+			copy(got[:], img.Pix[img.PixOffset(int(px), int(py)):])
+		}
+		if visible := got[3] != 0; visible != tt.visible || visible && got[0] != tt.want {
+			t.Errorf("%s: pixel at lon %v = %v, want %d visible=%v", tt.name, tt.lon, got, tt.want, tt.visible)
+		}
+	}
+}
+
 func TestBuildSourceInfosRejectsUnknownCRS(t *testing.T) {
 	for _, tt := range []struct {
 		keys []uint16
