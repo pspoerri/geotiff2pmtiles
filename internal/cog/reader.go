@@ -1276,12 +1276,9 @@ func (r *Reader) decodeJPEGStripTile(ifd *IFD, tileRow int) (image.Image, error)
 		if size == 0 {
 			continue
 		}
-		if offset+size > uint64(r.src.Size()) {
-			return nil, fmt.Errorf("strip %d data [%d:%d] exceeds file size %d", s, offset, offset+size, r.src.Size())
-		}
-		data, err := r.src.Slice(offset, offset+size)
+		data, err := r.slice("data", offset, size)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("strip %d: %w", s, err)
 		}
 		img, err := decodeJPEGBytes(ifd, data)
 		if err != nil {
