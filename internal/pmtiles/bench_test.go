@@ -1,6 +1,11 @@
 package pmtiles
 
-import "testing"
+import (
+	"bytes"
+	"fmt"
+	"path/filepath"
+	"testing"
+)
 
 // --- ZXYToTileID benchmark ---
 
@@ -102,4 +107,82 @@ func BenchmarkTileHash(b *testing.B) {
 		sink += tileHash(data)
 	}
 	_ = sink
+}
+
+// writeBenchArchive writes every tile of z0..maxZoom: the west quarter of
+// the world ("land") gets distinct tiles, the rest one shared "ocean" blob,
+// so the directory holds long run-length entries like a global raster.
+func writeBenchArchive(b *testing.B, maxZoom int) string {
+	b.Helper()
+	path := filepath.Join(b.TempDir(), "bench.pmtiles")
+	w, err := NewWriter(path, WriterOptions{MinZoom: 0, MaxZoom: maxZoom, TileSize: 256})
+	if err != nil {
+		b.Fatal(err)
+	}
+	ocean := bytes.Repeat([]byte{0x0F}, 64)
+	for z := 0; z <= maxZoom; z++ {
+		n := 1 << z
+		for x := 0; x < n; x++ {
+			for y := 0; y < n; y++ {
+				data := ocean
+				if x < n/4 {
+					data = []byte(fmt.Sprintf("land %d/%d/%d", z, x, y))
+				}
+				if err := w.WriteTile(z, x, y, data); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	}
+	if err := w.Finalize(); err != nil {
+		b.Fatal(err)
+	}
+	return path
+}
+
+// BenchmarkOpenReader measures opening a z0-9 archive (349,525 addressed
+// tiles, three quarters in ocean runs): directory parsing and indexing.
+func BenchmarkOpenReader(b *testing.B) {
+	path := writeBenchArchive(b, 9)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		r, err := OpenReader(path)
+		if err != nil {
+			b.Fatal(err)
+		}
+		r.Close()
+	}
+}
+
+// BenchmarkReadTile measures the tile lookup plus the file read.
+func BenchmarkReadTile(b *testing.B) {
+	r, err := OpenReader(writeBenchArchive(b, 9))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer r.Close()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := r.ReadTile(9, (i*37)&511, (i*101)&511); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkTilesAtZoom measures listing the 262,144 tiles of z9.
+func BenchmarkTilesAtZoom(b *testing.B) {
+	r, err := OpenReader(writeBenchArchive(b, 9))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer r.Close()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if got := len(r.TilesAtZoom(9)); got != 1<<18 {
+			b.Fatalf("TilesAtZoom(9) = %d tiles, want %d", got, 1<<18)
+		}
+	}
 }

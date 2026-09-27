@@ -11,17 +11,16 @@ import (
 )
 
 // Reader provides read access to an existing PMTiles v3 archive.
+//
+// The index is the archive's tile entries, sorted by TileID and kept as
+// run-length entries: memory grows with the directory, not with the number
+// of addressed tiles (a global archive addresses tens of millions of tiles,
+// most of them in a few long ocean runs).
 type Reader struct {
-	file    *os.File
-	tileIdx map[uint64]tileRef // tileID -> location in file
-	entries []Entry            // all tile entries (expanded from run lengths)
-	header  Header
-}
-
-// tileRef records the absolute file offset and length of a tile's data.
-type tileRef struct {
-	offset uint64
-	length uint32
+	file     *os.File
+	entries  []Entry // tile entries (RunLength >= 1), sorted by TileID
+	numTiles int     // addressed tiles: the sum of the run lengths
+	header   Header
 }
 
 // OpenReader opens a PMTiles v3 archive for reading.
@@ -79,38 +78,36 @@ func OpenReader(path string) (*Reader, error) {
 		}
 	}
 
-	// Expand run-length entries and build index. Per the PMTiles v3 spec a
-	// run of N tile IDs shares ONE blob: every ID in [TileID, TileID+N)
-	// resolves to the same Offset/Length.
-	tileIdx := make(map[uint64]tileRef, len(allEntries)*2)
-	var expanded []Entry
+	// Directories are sorted by the spec; sorting is linear on sorted input
+	// and keeps the binary searches below correct if a writer got it wrong.
+	sort.Slice(allEntries, func(i, j int) bool {
+		return allEntries[i].TileID < allEntries[j].TileID
+	})
+	numTiles := 0
 	for _, e := range allEntries {
-		for r := uint32(0); r < e.RunLength; r++ {
-			tileID := e.TileID + uint64(r)
-			ref := tileRef{
-				offset: header.TileDataOffset + e.Offset,
-				length: e.Length,
-			}
-			tileIdx[tileID] = ref
-			expanded = append(expanded, Entry{
-				TileID:    tileID,
-				Offset:    ref.offset,
-				Length:    ref.length,
-				RunLength: 1,
-			})
-		}
+		numTiles += int(e.RunLength)
 	}
 
-	sort.Slice(expanded, func(i, j int) bool {
-		return expanded[i].TileID < expanded[j].TileID
-	})
-
 	return &Reader{
-		file:    f,
-		header:  header,
-		entries: expanded,
-		tileIdx: tileIdx,
+		file:     f,
+		header:   header,
+		entries:  allEntries,
+		numTiles: numTiles,
 	}, nil
+}
+
+// find returns the entry whose run covers tileID. Per the PMTiles v3 spec
+// a run of N tile IDs shares ONE blob: every ID in [TileID, TileID+N)
+// resolves to the same Offset/Length.
+func (r *Reader) find(tileID uint64) (Entry, bool) {
+	// The last entry starting at or before tileID is the only candidate.
+	i := sort.Search(len(r.entries), func(i int) bool {
+		return r.entries[i].TileID > tileID
+	}) - 1
+	if i < 0 || tileID-r.entries[i].TileID >= uint64(r.entries[i].RunLength) {
+		return Entry{}, false
+	}
+	return r.entries[i], true
 }
 
 // Header returns the parsed PMTiles header.
@@ -121,14 +118,13 @@ func (r *Reader) Header() Header {
 // ReadTile returns the raw encoded bytes for a tile at z/x/y.
 // Returns nil, nil if the tile does not exist.
 func (r *Reader) ReadTile(z, x, y int) ([]byte, error) {
-	tileID := ZXYToTileID(z, x, y)
-	ref, ok := r.tileIdx[tileID]
+	e, ok := r.find(ZXYToTileID(z, x, y))
 	if !ok {
 		return nil, nil
 	}
 
-	data := make([]byte, ref.length)
-	if _, err := r.file.ReadAt(data, int64(ref.offset)); err != nil {
+	data := make([]byte, e.Length)
+	if _, err := r.file.ReadAt(data, int64(r.header.TileDataOffset+e.Offset)); err != nil {
 		return nil, fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err)
 	}
 	return data, nil
@@ -136,35 +132,49 @@ func (r *Reader) ReadTile(z, x, y int) ([]byte, error) {
 
 // TilesAtZoom returns all [z, x, y] coordinates that have tiles at the given zoom level.
 func (r *Reader) TilesAtZoom(z int) [][3]int {
-	// Compute the tile ID range for this zoom level.
-	var minID uint64
-	for i := 0; i < z; i++ {
-		n := uint64(1) << uint(i)
-		minID += n * n
+	if z < 0 || z > 31 {
+		return nil // no tile ID addresses zoom 32 or deeper
 	}
-	n := uint64(1) << uint(z)
-	maxID := minID + n*n // exclusive
+	// The tile ID range [minID, maxID) of this zoom level.
+	minID := ZXYToTileID(z, 0, 0)
+	maxID := minID + uint64(1)<<uint(2*z)
 
-	// Binary search for the first entry >= minID.
+	// The entries whose runs overlap [minID, maxID); a run may start at a
+	// lower zoom and continue into this one.
 	start := sort.Search(len(r.entries), func(i int) bool {
-		return r.entries[i].TileID >= minID
+		return r.entries[i].TileID+uint64(r.entries[i].RunLength) > minID
 	})
+	end := sort.Search(len(r.entries), func(i int) bool {
+		return r.entries[i].TileID >= maxID
+	})
+	entries := r.entries[start:end]
+	clip := func(e Entry) (lo, hi uint64) {
+		return max(e.TileID, minID), min(e.TileID+uint64(e.RunLength), maxID)
+	}
 
-	var tiles [][3]int
-	for i := start; i < len(r.entries); i++ {
-		e := r.entries[i]
-		if e.TileID >= maxID {
-			break
+	// Count first so the result is allocated once, at its final size.
+	n := 0
+	for _, e := range entries {
+		lo, hi := clip(e)
+		n += int(hi - lo)
+	}
+	if n == 0 {
+		return nil
+	}
+	tiles := make([][3]int, 0, n)
+	for _, e := range entries {
+		lo, hi := clip(e)
+		for id := lo; id < hi; id++ {
+			_, x, y := TileIDToZXY(id)
+			tiles = append(tiles, [3]int{z, x, y})
 		}
-		_, x, y := TileIDToZXY(e.TileID)
-		tiles = append(tiles, [3]int{z, x, y})
 	}
 	return tiles
 }
 
-// NumTiles returns the total number of tiles in the archive.
+// NumTiles returns the total number of addressed tiles in the archive.
 func (r *Reader) NumTiles() int {
-	return len(r.entries)
+	return r.numTiles
 }
 
 // ReadMetadata reads and decompresses the JSON metadata from the archive.
