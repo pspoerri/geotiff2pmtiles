@@ -72,7 +72,7 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 
 | Flag            | Default       | Description                                        |
 | --------------- | ------------- | -------------------------------------------------- |
-| `--format`      | `auto`        | Tile encoding: `auto`, `jpeg`, `png`, `webp`, `terrarium`. `auto` picks `terrarium` for float/signed-integer elevation data, `webp` when nodata is active, else `jpeg`. An explicit value is always used as given |
+| `--format`      | `auto`        | Tile encoding: `auto`, `jpeg`, `png`, `webp`, `terrarium`. `auto` picks `terrarium` for float/signed-integer elevation data, `webp` when nodata or an internal mask is active, else `jpeg`. An explicit value is always used as given |
 | `--quality`     | `85`          | JPEG/WebP quality, 1-100. Ignored for `png`/`terrarium`, and for WebP in builds without libwebp (lossless only) |
 | `--min-zoom`    | auto (`-1`)   | Minimum zoom level. Auto: the highest zoom at which the whole extent fits in one tile (whole world → 0), capped at `--max-zoom` |
 | `--max-zoom`    | auto (`-1`)   | Maximum zoom level, 0-30. Auto: from the finest file's pixel size and `--tile-size` |
@@ -127,8 +127,8 @@ Detected settings are logged at startup:
 1. **CRS**: each file's EPSG code from its GeoKeys, else guessed from its `.tfw`
    coordinates (see Limitations). `--source-epsg` sets it for all files.
 2. **Format** (`--format auto`): float or signed-integer samples in the first file →
-   `terrarium`; nodata active → `webp`; otherwise `jpeg`. A GDAL internal mask does not
-   count as nodata here: pass `--format webp` or `png` to keep masked areas transparent.
+   `terrarium`; nodata active or a GDAL internal mask in any file → `webp`; otherwise
+   `jpeg`.
 3. **Bands and rescale** (9-16 bit input): GDAL band descriptions (red/green/blue/nir) in
    the first file set the band order and value range. Otherwise linear over the GDAL
    STATISTICS_MINIMUM/MAXIMUM of the rendered bands, else over a pixel scan, merged over
