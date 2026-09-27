@@ -30,8 +30,16 @@ const (
 
 // TransformConfig holds configuration for the PMTiles transform pipeline.
 type TransformConfig struct {
-	Encoder          encode.Encoder
-	FillColor        *color.RGBA
+	// Encoder encodes re-encoded and rebuilt tiles, and the fill tiles of
+	// FillMissing; passthrough without FillMissing needs none.
+	Encoder encode.Encoder
+	// NodataColor, when set, replaces transparent pixels of the decoded
+	// tiles. Passthrough copies tiles without decoding and ignores it.
+	NodataColor *color.RGBA
+	// FillMissing, when set, is the colour of solid tiles written at the
+	// positions inside Bounds that the source archive does not have. It
+	// needs no decoding, so passthrough applies it too.
+	FillMissing      *color.RGBA
 	SourceFormat     string // format of input tiles (for decoding)
 	OutputDir        string
 	MinZoom          int
@@ -146,7 +154,7 @@ func transformPassthrough(cfg TransformConfig, reader PMTilesReader, writer Tile
 	}
 
 	// Fill empty tiles if requested.
-	if cfg.FillColor != nil {
+	if cfg.FillMissing != nil {
 		fc, err := fillEmptyTiles(cfg, reader, writer)
 		if err != nil {
 			return Stats{}, err
@@ -220,8 +228,8 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 					}
 
 					rgba := imageToRGBA(img)
-					if cfg.FillColor != nil {
-						applyFillColorTransform(rgba, *cfg.FillColor)
+					if cfg.NodataColor != nil {
+						applyFillColorTransform(rgba, *cfg.NodataColor)
 					}
 					td := newTileData(rgba, cfg.TileSize)
 					if td.IsUniform() {
@@ -257,7 +265,7 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 		}
 	}
 
-	if cfg.FillColor != nil {
+	if cfg.FillMissing != nil {
 		fc, err := fillEmptyTiles(cfg, reader, writer)
 		if err != nil {
 			return Stats{}, err
@@ -308,11 +316,11 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 
 	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64
 
-	// When FillColor is set, build a set of source tiles at max zoom so we
+	// When FillMissing is set, build a set of source tiles at max zoom so we
 	// can distinguish "source tile exists" from "fill needed" while iterating
 	// all positions from bounds.
 	var sourceTilesAtMax map[[2]int]bool
-	if cfg.FillColor != nil {
+	if cfg.FillMissing != nil {
 		srcTiles := reader.TilesAtZoom(effectiveMaxZoom)
 		sourceTilesAtMax = make(map[[2]int]bool, len(srcTiles))
 		for _, t := range srcTiles {
@@ -327,12 +335,12 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 		fillTileShared *TileData // shared uniform fill tile (immutable, safe to share)
 		fillEncoded    []byte    // pre-encoded bytes for the fill tile
 	)
-	if cfg.FillColor != nil {
-		fillTileShared = newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+	if cfg.FillMissing != nil {
+		fillTileShared = newTileDataUniform(*cfg.FillMissing, cfg.TileSize)
 		var encErr error
 		fillEncoded, encErr = cfg.Encoder.Encode(fillTileShared.AsImage())
 		if encErr != nil {
-			return Stats{}, fmt.Errorf("encoding fill color tile: %w", encErr)
+			return Stats{}, fmt.Errorf("encoding fill tile: %w", encErr)
 		}
 	}
 
@@ -351,10 +359,10 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 		var realTiles [][3]int
 		var nFillTiles int64
 
-		if isMaxZoom && cfg.FillColor == nil {
+		if isMaxZoom && cfg.FillMissing == nil {
 			// No fill — only process existing source tiles.
 			realTiles = reader.TilesAtZoom(z)
-		} else if cfg.FillColor != nil {
+		} else if cfg.FillMissing != nil {
 			allTiles := coord.TilesInBounds(z,
 				float64(cfg.Bounds[0]), float64(cfg.Bounds[1]),
 				float64(cfg.Bounds[2]), float64(cfg.Bounds[3]))
@@ -510,13 +518,13 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 										return
 									}
 									rgba := imageToRGBA(img)
-									if cfg.FillColor != nil {
-										applyFillColorTransform(rgba, *cfg.FillColor)
+									if cfg.NodataColor != nil {
+										applyFillColorTransform(rgba, *cfg.NodataColor)
 									}
 									td = newTileData(rgba, cfg.TileSize)
 								}
 							}
-							if td == nil && cfg.FillColor != nil {
+							if td == nil && cfg.FillMissing != nil {
 								td = fillTileShared
 							}
 						} else {
@@ -651,15 +659,18 @@ func parentTiles(tiles [][3]int) [][3]int {
 }
 
 // fillEmptyTiles generates tiles for positions within the bounds that are
-// missing from the source archive, filling them with the configured solid color.
+// missing from the source archive, filling them with the FillMissing color.
 // Used by passthrough and reencode modes where tiles are copied from the source.
 func fillEmptyTiles(cfg TransformConfig, reader PMTilesReader, writer TileWriter) (Stats, error) {
-	if cfg.FillColor == nil {
+	if cfg.FillMissing == nil {
 		return Stats{}, nil
+	}
+	if cfg.Encoder == nil {
+		return Stats{}, fmt.Errorf("filling missing tiles needs an encoder for the fill tile")
 	}
 
 	fillImg := image.NewRGBA(image.Rect(0, 0, cfg.TileSize, cfg.TileSize))
-	c := *cfg.FillColor
+	c := *cfg.FillMissing
 	pix := fillImg.Pix
 	for i := 0; i < len(pix); i += 4 {
 		pix[i] = c.R

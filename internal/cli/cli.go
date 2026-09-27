@@ -75,6 +75,35 @@ func ParseOptionalColor(s string) (*color.RGBA, error) {
 	return &c, nil
 }
 
+// FillColors resolves --nodata-color and --fill-missing from their flag
+// values. --fill-color, when it was set on fs, is the deprecated alias that
+// sets both, and it cannot be combined with either of them.
+func FillColors(fs *flag.FlagSet, nodataColor, fillMissing, fillColor string) (nodata, missing *color.RGBA, err error) {
+	if IsFlagSet(fs, "fill-color") {
+		if IsFlagSet(fs, "nodata-color") || IsFlagSet(fs, "fill-missing") {
+			return nil, nil, fmt.Errorf("--fill-color sets both --nodata-color and --fill-missing; pass those two instead of combining them with it")
+		}
+		log.Printf("WARNING: --fill-color is deprecated; use --nodata-color %q --fill-missing %q", fillColor, fillColor)
+		nodataColor, fillMissing = fillColor, fillColor
+	}
+	if nodata, err = ParseOptionalColor(nodataColor); err != nil {
+		return nil, nil, fmt.Errorf("--nodata-color: %w", err)
+	}
+	if missing, err = ParseOptionalColor(fillMissing); err != nil {
+		return nil, nil, fmt.Errorf("--fill-missing: %w", err)
+	}
+	return nodata, missing, nil
+}
+
+// FormatColor formats an optional colour for settings summaries and
+// archive descriptions.
+func FormatColor(c *color.RGBA) string {
+	if c == nil {
+		return "none"
+	}
+	return fmt.Sprintf("rgba(%d,%d,%d,%d)", c.R, c.G, c.B, c.A)
+}
+
 // HumanSize formats a byte count with a binary unit, e.g. "1.5 MB".
 func HumanSize(bytes int64) string {
 	const (

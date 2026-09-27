@@ -45,6 +45,8 @@ func main() {
 		resampling      string
 		memLimitMB      int
 		noSpill         bool
+		nodataColor     string
+		fillMissing     string
 		fillColor       string
 		attribution     string
 		layerType       string
@@ -73,7 +75,9 @@ func main() {
 	flag.IntVar(&memLimitMB, "mem-limit", 0, "MB of encoded tiles allowed to queue for the spill file before workers pause (0 = auto: 90% of RAM minus 2 GB; spilling is off if that is under 512 MB)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
 	flag.StringVar(&tmpDirFlag, "tmp-dir", "", "Directory for temporary files, about 2x the output size at peak (default: the output file's directory)")
-	flag.StringVar(&fillColor, "fill-color", "0,0,0,0", "RGBA color, e.g. \"0,0,0,255\" or \"#000000ff\": replaces transparent/nodata pixels and fills tile positions without data inside the bounds; \"\" = leave missing tiles absent. Not applied to jpeg output unless set explicitly")
+	flag.StringVar(&nodataColor, "nodata-color", "none", "RGBA color, e.g. \"0,0,0,255\" or \"#000000ff\", that replaces transparent/nodata pixels; none = keep them transparent")
+	flag.StringVar(&fillMissing, "fill-missing", "0,0,0,0", "RGBA color of the solid tiles written at tile positions inside the bounds that have no data; none or \"\" = leave them absent. Not applied to jpeg output unless set explicitly")
+	flag.StringVar(&fillColor, "fill-color", "", "deprecated: sets both --nodata-color and --fill-missing")
 	flag.StringVar(&attribution, "attribution", "", "Attribution string for data sources (stored in metadata)")
 	flag.StringVar(&layerType, "type", "baselayer", "Layer type: baselayer, overlay")
 	flag.StringVar(&bandsStr, "bands", "auto", "1-indexed band numbers for R,G,B, e.g. \"4,1,2\" for NIR-R-G (auto: 1,2,3; gray from band 1 for 1-2 band input)")
@@ -157,14 +161,9 @@ func main() {
 		log.Printf("WARNING: --resampling-gamma has no effect with --resampling %s", resampling)
 	}
 
-	// Parse fill color.
-	var fc *color.RGBA
-	if fillColor != "" {
-		c, err := cli.ParseColor(fillColor)
-		if err != nil {
-			log.Fatalf("Fill color: %v", err)
-		}
-		fc = &c
+	nodataFill, missingFill, err := cli.FillColors(flag.CommandLine, nodataColor, fillMissing, fillColor)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	// Collect GeoTIFF files.
@@ -305,11 +304,17 @@ func main() {
 	}
 	// JPEG cannot store transparency: the transparent default fill would
 	// turn every tile position without data into a black tile.
-	if format == "jpeg" && fc != nil && fc.A < 255 {
-		if cli.IsFlagSet(flag.CommandLine, "fill-color") {
-			log.Printf("WARNING: --fill-color alpha %d cannot be stored in jpeg; filled areas will be black", fc.A)
-		} else {
-			fc = nil
+	if format == "jpeg" {
+		explicit := cli.IsFlagSet(flag.CommandLine, "fill-missing") || cli.IsFlagSet(flag.CommandLine, "fill-color")
+		if missingFill != nil && missingFill.A < 255 {
+			if explicit {
+				log.Printf("WARNING: --fill-missing alpha %d cannot be stored in jpeg; filled tiles will be black", missingFill.A)
+			} else {
+				missingFill = nil
+			}
+		}
+		if nodataFill != nil && nodataFill.A < 255 {
+			log.Printf("WARNING: --nodata-color alpha %d cannot be stored in jpeg; nodata areas will be black", nodataFill.A)
 		}
 	}
 
@@ -433,8 +438,11 @@ func main() {
 		fmt.Printf("  %-14s %s\n", "Resampling:", resampling)
 	}
 	fmt.Printf("  %-14s %d\n", "Concurrency:", concurrency)
-	if fc != nil {
-		fmt.Printf("  %-14s rgba(%d,%d,%d,%d)\n", "Fill color:", fc.R, fc.G, fc.B, fc.A)
+	if nodataFill != nil {
+		fmt.Printf("  %-14s %s\n", "Nodata color:", cli.FormatColor(nodataFill))
+	}
+	if missingFill != nil {
+		fmt.Printf("  %-14s %s\n", "Fill missing:", cli.FormatColor(missingFill))
 	}
 	if noSpill {
 		fmt.Printf("  %-14s disabled (all in memory)\n", "Disk spill:")
@@ -481,13 +489,14 @@ func main() {
 		Resampling:       resamplingMode,
 		ResamplingGamma:  resamplingGamma,
 		IsTerrarium:      format == "terrarium",
-		FillColor:        fc,
+		NodataColor:      nodataFill,
+		FillMissing:      missingFill,
 		MemoryLimitBytes: memoryLimitBytes,
 		OutputDir:        tmpDir,
 	}
 
 	// Build description for PMTiles metadata.
-	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling, resamplingGamma, fc, bandCfg)
+	description := buildDescription(sources, mergedBounds, gaps, format, quality, tileSize, minZoom, maxZoom, resampling, resamplingGamma, nodataFill, missingFill, bandCfg)
 
 	// Create PMTiles writer.
 	encoding := ""
@@ -585,7 +594,7 @@ func isTIFF(name string) bool {
 }
 
 func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog.CoverageGap,
-	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string, resamplingGamma float64, fc *color.RGBA, bandCfg cog.BandConfig) string {
+	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string, resamplingGamma float64, nodataFill, missingFill *color.RGBA, bandCfg cog.BandConfig) string {
 
 	var b strings.Builder
 
@@ -603,8 +612,11 @@ func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog
 	} else {
 		b.WriteString(fmt.Sprintf("  Resampling: %s\n", resampling))
 	}
-	if fc != nil {
-		b.WriteString(fmt.Sprintf("  Fill color: rgba(%d,%d,%d,%d)\n", fc.R, fc.G, fc.B, fc.A))
+	if nodataFill != nil {
+		b.WriteString(fmt.Sprintf("  Nodata color: %s\n", cli.FormatColor(nodataFill)))
+	}
+	if missingFill != nil {
+		b.WriteString(fmt.Sprintf("  Fill missing: %s\n", cli.FormatColor(missingFill)))
 	}
 	if bandCfg.Bands != ([3]int{1, 2, 3}) || bandCfg.AlphaBand != 0 || bandCfg.Rescale != cog.RescaleNone {
 		b.WriteString(fmt.Sprintf("  Bands: %d,%d,%d\n", bandCfg.Bands[0], bandCfg.Bands[1], bandCfg.Bands[2]))

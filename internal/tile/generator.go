@@ -68,9 +68,15 @@ func ParseResampling(s string) (Resampling, error) {
 
 // Config holds tile generation configuration.
 type Config struct {
-	Encoder          encode.Encoder
-	FillColor        *color.RGBA // when set, transparent/nodata pixels → fill color; missing tiles → solid fill
-	OutputDir        string      // directory for spill files (defaults to OS temp dir)
+	Encoder encode.Encoder
+	// NodataColor, when set, replaces transparent (nodata) pixels of the
+	// rendered tiles.
+	NodataColor *color.RGBA
+	// FillMissing, when set, is the colour of solid tiles written at the
+	// positions inside Bounds that no source covers; their parents are
+	// downsampled as if those tiles existed. Nil leaves them absent.
+	FillMissing      *color.RGBA
+	OutputDir        string // directory for spill files (defaults to OS temp dir)
 	MinZoom          int
 	MaxZoom          int
 	TileSize         int
@@ -162,7 +168,7 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		resamplingLUTs = buildGammaLUTs(cfg.ResamplingGamma)
 	}
 
-	// Pre-encode the fill-color tile once so identical fill tiles across all
+	// Pre-encode the fill tile once so identical fill tiles across all
 	// zoom levels reuse the same encoded bytes, skipping repeated encoder calls.
 	// For uniform tiles, DiskTileStore.Put ignores encoded bytes (stores compact
 	// TileData), so this cache is only used for WriteTile.
@@ -171,12 +177,12 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		fillTileShared  *TileData // shared uniform fill tile (immutable, safe to share)
 		fillColorCached []byte    // pre-encoded bytes for the fill tile
 	)
-	if cfg.FillColor != nil {
-		fillTileShared = newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+	if cfg.FillMissing != nil {
+		fillTileShared = newTileDataUniform(*cfg.FillMissing, cfg.TileSize)
 		var encErr error
 		fillColorCached, encErr = cfg.Encoder.Encode(fillTileShared.AsImage())
 		if encErr != nil {
-			return Stats{}, fmt.Errorf("encoding fill color tile: %w", encErr)
+			return Stats{}, fmt.Errorf("encoding fill tile: %w", encErr)
 		}
 	}
 
@@ -279,12 +285,12 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 								img = renderTile(z, x, y, cfg.TileSize, srcInfos, cogCache, cfg.Resampling, resamplingLUTs)
 							}
 							if img != nil {
-								if cfg.FillColor != nil {
-									applyFillColorTransform(img, *cfg.FillColor)
+								if cfg.NodataColor != nil {
+									applyFillColorTransform(img, *cfg.NodataColor)
 								}
 								td = newTileData(img, cfg.TileSize)
-							} else if cfg.FillColor != nil {
-								td = newTileDataUniform(*cfg.FillColor, cfg.TileSize)
+							} else if cfg.FillMissing != nil {
+								td = newTileDataUniform(*cfg.FillMissing, cfg.TileSize)
 							}
 						} else {
 							childZ := z + 1
@@ -331,12 +337,12 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							grayCount.Add(1)
 						}
 
-						// Encode the tile. Uniform fill-color tiles reuse
+						// Encode the tile. Uniform fill tiles reuse
 						// pre-encoded bytes to avoid redundant encoder calls;
 						// the PMTiles writer deduplicates identical content anyway,
 						// but skipping re-encoding saves CPU for sparse datasets.
 						var data []byte
-						if fillColorCached != nil && td.IsUniform() && td.Color() == *cfg.FillColor {
+						if fillColorCached != nil && td.IsUniform() && td.Color() == *cfg.FillMissing {
 							data = fillColorCached
 						} else {
 							var err error
