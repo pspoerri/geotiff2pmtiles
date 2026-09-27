@@ -92,6 +92,15 @@ func openTestSource(t *testing.T) []*cog.Reader {
 	return []*cog.Reader{r}
 }
 
+func mustMergedBounds(t *testing.T, sources []*cog.Reader) cog.Bounds {
+	t.Helper()
+	b, err := cog.MergedBoundsWGS84(sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 // failingWriter fails every WriteTile for which fail returns true and
 // counts all calls.
 type failingWriter struct {
@@ -194,7 +203,7 @@ func TestGenerate_ErrorRemovesSpillFiles(t *testing.T) {
 		MaxZoom:          6,
 		TileSize:         64,
 		Concurrency:      2,
-		Bounds:           cog.MergedBoundsWGS84(sources),
+		Bounds:           mustMergedBounds(t, sources),
 		MemoryLimitBytes: 64 << 20,
 	}
 	w := &failingWriter{fail: func(z int) bool { return z == 5 }}
@@ -221,7 +230,7 @@ func TestGenerate_WorkerErrorCancelsLevel(t *testing.T) {
 		MaxZoom:     8,
 		TileSize:    64,
 		Concurrency: 4,
-		Bounds:      cog.MergedBoundsWGS84(sources),
+		Bounds:      mustMergedBounds(t, sources),
 	}
 	total := len(coord.TilesInBounds(8, cfg.Bounds.MinLon, cfg.Bounds.MinLat, cfg.Bounds.MaxLon, cfg.Bounds.MaxLat))
 	var failed atomic.Bool

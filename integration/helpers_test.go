@@ -383,7 +383,10 @@ func runPipeline(t *testing.T, cfg pipelineConfig) string {
 		src.SetBandConfig(cfg.BandCfg)
 	}
 
-	mergedBounds := cog.MergedBoundsWGS84(sources)
+	mergedBounds, err := cog.MergedBoundsWGS84(sources)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	minZoom := cfg.MinZoom
 	maxZoom := cfg.MaxZoom

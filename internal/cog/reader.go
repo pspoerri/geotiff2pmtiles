@@ -75,7 +75,9 @@ func (cfg BandConfig) String() string {
 	return b.String()
 }
 
-// Bounds represents geographic bounds in WGS84.
+// Bounds represents geographic bounds in WGS84. MaxLon exceeds 180 when the
+// data crosses the antimeridian; MinLon stays in [-180, 180) (see
+// coord.WrapLonRange).
 type Bounds struct {
 	MinLon, MaxLon float64
 	MinLat, MaxLat float64
@@ -2264,15 +2266,25 @@ func CheckCoverageGaps(sources []*Reader) []CoverageGap {
 	return gaps
 }
 
+// boundsEdgeSamples is the number of intervals MergedBoundsWGS84 samples on
+// each edge of a source. Projected edges curve, so their extremes can lie
+// between the corners: a Sentinel-2 UTM tile straddling its central meridian
+// at 60°N reaches ~400 m further north mid-edge than at its corners, and 16
+// intervals miss under 2 m of it.
+const boundsEdgeSamples = 16
+
 // MergedBoundsWGS84 computes the WGS84 bounding box that covers all sources.
 // Sources with an unknown projection are assumed to already be in WGS84.
-// Corners the projection cannot transform are skipped; it panics if no
-// corner of any source transforms, since every bound would be garbage.
-// MaxLon exceeds 180 when the sources cross the antimeridian (see
+//
+// Each source's edges are sampled, not only its corners, and a pole inside a
+// source (a polar stereographic raster, say) widens the box to every
+// longitude. Points the projection cannot transform are skipped; if none of
+// any source transforms, it returns an error, since every bound would be
+// garbage. MaxLon exceeds 180 when the sources cross the antimeridian (see
 // coord.WrapLonRange).
-func MergedBoundsWGS84(sources []*Reader) Bounds {
+func MergedBoundsWGS84(sources []*Reader) (Bounds, error) {
 	if len(sources) == 0 {
-		return Bounds{}
+		return Bounds{}, nil
 	}
 
 	// Projected longitudes may lie outside ±180 (UTM zone 60, 0..360 grids).
@@ -2282,10 +2294,18 @@ func MergedBoundsWGS84(sources []*Reader) Bounds {
 		MinLat: 90,
 		MaxLat: -90,
 	}
+	finite := 0
+	add := func(lon, lat float64) {
+		if math.IsNaN(lon) || math.IsInf(lon, 0) || math.IsNaN(lat) || math.IsInf(lat, 0) {
+			return
+		}
+		finite++
+		merged.MinLon, merged.MaxLon = math.Min(merged.MinLon, lon), math.Max(merged.MaxLon, lon)
+		merged.MinLat, merged.MaxLat = math.Min(merged.MinLat, lat), math.Max(merged.MaxLat, lat)
+	}
 
 	// Sources usually share one CRS; build each projection once.
 	projs := map[int]coord.Projection{}
-	finite := 0
 
 	for _, src := range sources {
 		minX, minY, maxX, maxY := src.BoundsInCRS()
@@ -2300,41 +2320,44 @@ func MergedBoundsWGS84(sources []*Reader) Bounds {
 			projs[epsg] = proj
 		}
 
-		// Convert corners to WGS84.
-		corners := [][2]float64{
-			{minX, minY},
-			{minX, maxY},
-			{maxX, minY},
-			{maxX, maxY},
+		for i := 0; i <= boundsEdgeSamples; i++ {
+			t := float64(i) / boundsEdgeSamples
+			x, y := minX+t*(maxX-minX), minY+t*(maxY-minY)
+			add(proj.ToWGS84(x, minY))
+			add(proj.ToWGS84(x, maxY))
+			add(proj.ToWGS84(minX, y))
+			add(proj.ToWGS84(maxX, y))
 		}
 
-		for _, c := range corners {
-			lon, lat := proj.ToWGS84(c[0], c[1])
-			if math.IsNaN(lon) || math.IsInf(lon, 0) || math.IsNaN(lat) || math.IsInf(lat, 0) {
-				continue
-			}
-			finite++
-
-			if lon < merged.MinLon {
-				merged.MinLon = lon
-			}
-			if lon > merged.MaxLon {
-				merged.MaxLon = lon
-			}
-			if lat < merged.MinLat {
-				merged.MinLat = lat
-			}
-			if lat > merged.MaxLat {
-				merged.MaxLat = lat
+		// A pole inside the raster lies on no edge, and the data around it
+		// spans every longitude.
+		for _, lat := range []float64{90, -90} {
+			if poleInside(proj, lat, minX, minY, maxX, maxY, src.PixelSize()) {
+				add(-180, lat)
+				add(180, lat)
 			}
 		}
 	}
 	if finite == 0 {
-		panic(fmt.Sprintf("cog: no corner of %d source(s) in EPSG:%d transforms to WGS84", len(sources), sources[0].EPSG()))
+		return Bounds{}, fmt.Errorf("no point of %d source(s) transforms to WGS84 (%s, EPSG:%d)",
+			len(sources), sources[0].Path(), sources[0].EPSG())
 	}
 	merged.MinLon, merged.MaxLon = coord.WrapLonRange(merged.MinLon, merged.MaxLon)
 
-	return merged
+	return merged, nil
+}
+
+// poleInside reports whether the pole at lat (±90) lies strictly inside the
+// extent [minX, maxX] x [minY, maxY] as a point, as it does in polar
+// stereographic or azimuthal projections: longitudes 0 and 90 must map to
+// within res (a pixel) of each other. Where the pole is a line instead (the
+// top edge of an EPSG:4326 raster) or at infinity (Web Mercator), the edge
+// samples already account for it.
+func poleInside(proj coord.Projection, lat, minX, minY, maxX, maxY, res float64) bool {
+	x, y := proj.FromWGS84(0, lat)
+	x2, y2 := proj.FromWGS84(90, lat)
+	return math.Abs(x-x2) <= res && math.Abs(y-y2) <= res &&
+		x > minX && x < maxX && y > minY && y < maxY
 }
 
 func max(a, b int) int {
