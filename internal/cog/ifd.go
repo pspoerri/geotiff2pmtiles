@@ -52,6 +52,7 @@ const (
 	dtSRational = 10
 	dtFloat     = 11
 	dtDouble    = 12
+	dtIFD       = 13
 	dtLong8     = 16
 	dtSLong8    = 17
 	dtIFD8      = 18
@@ -148,8 +149,24 @@ type tiffEntry struct {
 	DataType uint16
 }
 
+// maxIFDs bounds the IFD chain. A COG has one IFD per overview and mask, so
+// the limit only stops a corrupt chain from growing without end.
+const maxIFDs = 1 << 16
+
 // parseTIFF reads all IFDs from a TIFF file.
+//
+// Every count and offset in the file is untrusted: the chain is checked for
+// loops, and tag data is checked against the file size before anything is
+// allocated for it.
 func parseTIFF(r io.ReadSeeker) ([]IFD, binary.ByteOrder, error) {
+	fileSize, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, nil, err
+	}
+
 	// Read header.
 	var header [8]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
@@ -186,9 +203,17 @@ func parseTIFF(r io.ReadSeeker) ([]IFD, binary.ByteOrder, error) {
 
 	var ifds []IFD
 	offset := firstIFDOffset
+	seen := make(map[uint64]bool)
 
 	for offset != 0 {
-		ifd, nextOffset, err := parseOneIFD(r, bo, offset, isBigTIFF)
+		if seen[offset] {
+			return nil, nil, fmt.Errorf("IFD chain loops back to offset %d", offset)
+		}
+		if len(ifds) == maxIFDs {
+			return nil, nil, fmt.Errorf("more than %d IFDs", maxIFDs)
+		}
+		seen[offset] = true
+		ifd, nextOffset, err := parseOneIFD(r, bo, offset, isBigTIFF, uint64(fileSize))
 		if err != nil {
 			return nil, nil, fmt.Errorf("parsing IFD at offset %d: %w", offset, err)
 		}
@@ -199,7 +224,7 @@ func parseTIFF(r io.ReadSeeker) ([]IFD, binary.ByteOrder, error) {
 	return ifds, bo, nil
 }
 
-func parseOneIFD(r io.ReadSeeker, bo binary.ByteOrder, offset uint64, bigTIFF bool) (IFD, uint64, error) {
+func parseOneIFD(r io.ReadSeeker, bo binary.ByteOrder, offset uint64, bigTIFF bool, fileSize uint64) (IFD, uint64, error) {
 	if _, err := r.Seek(int64(offset), io.SeekStart); err != nil {
 		return IFD{}, 0, err
 	}
@@ -217,6 +242,11 @@ func parseOneIFD(r io.ReadSeeker, bo binary.ByteOrder, offset uint64, bigTIFF bo
 			return IFD{}, 0, err
 		}
 		numEntries = uint64(bo.Uint16(buf[:]))
+	}
+	// Tags are distinct 16-bit numbers, so a larger BigTIFF count is garbage
+	// and must not size the allocation below.
+	if numEntries > 1<<16 {
+		return IFD{}, 0, fmt.Errorf("directory claims %d entries", numEntries)
 	}
 
 	entrySize := 12
@@ -251,7 +281,7 @@ func parseOneIFD(r io.ReadSeeker, bo binary.ByteOrder, offset uint64, bigTIFF bo
 
 	// Resolve entries that point to external data.
 	for i := range entries {
-		if err := resolveEntry(r, bo, &entries[i], bigTIFF); err != nil {
+		if err := resolveEntry(r, bo, &entries[i], bigTIFF, fileSize); err != nil {
 			return IFD{}, 0, fmt.Errorf("resolving entry tag %d: %w", entries[i].Tag, err)
 		}
 	}
@@ -291,9 +321,9 @@ func dataTypeSize(dt uint16) int {
 		return 1
 	case dtShort, dtSShort:
 		return 2
-	case dtLong, dtSLong, dtFloat, dtIFD8:
+	case dtLong, dtSLong, dtFloat, dtIFD:
 		return 4
-	case dtRational, dtSRational, dtDouble, dtLong8, dtSLong8:
+	case dtRational, dtSRational, dtDouble, dtLong8, dtSLong8, dtIFD8:
 		return 8
 	default:
 		return 1
@@ -301,10 +331,16 @@ func dataTypeSize(dt uint16) int {
 }
 
 // resolveEntry reads the actual data for an entry if it doesn't fit inline.
-func resolveEntry(r io.ReadSeeker, bo binary.ByteOrder, e *tiffEntry, bigTIFF bool) error {
-	totalSize := int(e.Count) * dataTypeSize(e.DataType)
+func resolveEntry(r io.ReadSeeker, bo binary.ByteOrder, e *tiffEntry, bigTIFF bool, fileSize uint64) error {
+	// Bound the count before multiplying: a garbage BigTIFF count would
+	// otherwise wrap to a size that looks inline, or size a huge allocation.
+	size := uint64(dataTypeSize(e.DataType))
+	if e.Count > fileSize/size {
+		return fmt.Errorf("%d values of %d bytes exceed the file size %d", e.Count, size, fileSize)
+	}
+	totalSize := e.Count * size
 
-	inlineSize := 4
+	inlineSize := uint64(4)
 	if bigTIFF {
 		inlineSize = 8
 	}
@@ -320,6 +356,9 @@ func resolveEntry(r io.ReadSeeker, bo binary.ByteOrder, e *tiffEntry, bigTIFF bo
 		dataOffset = bo.Uint64(e.Value)
 	} else {
 		dataOffset = uint64(bo.Uint32(e.Value))
+	}
+	if dataOffset > fileSize-totalSize {
+		return fmt.Errorf("data [%d:+%d] exceeds the file size %d", dataOffset, totalSize, fileSize)
 	}
 
 	if _, err := r.Seek(int64(dataOffset), io.SeekStart); err != nil {
@@ -458,81 +497,82 @@ func parseGDALMetadataXML(xmlStr string) *GDALMeta {
 	return meta
 }
 
+// getUint16Val returns the first value of an unsigned integer entry, or 0.
 func getUint16Val(e tiffEntry, bo binary.ByteOrder) uint16 {
-	switch e.DataType {
-	case dtShort:
-		return bo.Uint16(e.Value)
-	case dtLong:
-		return uint16(bo.Uint32(e.Value))
-	default:
-		return uint16(e.Value[0])
-	}
+	return uint16(getUint32(e, bo))
 }
 
+// getUint32 returns the first value of an unsigned integer entry, or 0.
 func getUint32(e tiffEntry, bo binary.ByteOrder) uint32 {
-	switch e.DataType {
-	case dtShort:
-		return uint32(bo.Uint16(e.Value))
-	case dtLong:
-		return bo.Uint32(e.Value)
-	case dtLong8:
-		return uint32(bo.Uint64(e.Value))
-	default:
-		return uint32(e.Value[0])
+	if v := getUint64Slice(e, bo); len(v) > 0 {
+		return uint32(v[0])
 	}
+	return 0
 }
 
+// getUint16Slice is getUint64Slice narrowed to uint16, for SHORT arrays that
+// a writer may also store as BYTE or LONG.
 func getUint16Slice(e tiffEntry, bo binary.ByteOrder) []uint16 {
-	n := int(e.Count)
-	result := make([]uint16, n)
-	for i := 0; i < n; i++ {
-		result[i] = bo.Uint16(e.Value[i*2 : i*2+2])
+	v := getUint64Slice(e, bo)
+	if v == nil {
+		return nil
+	}
+	result := make([]uint16, len(v))
+	for i, x := range v {
+		result[i] = uint16(x)
 	}
 	return result
 }
 
+// getUint64Slice decodes an unsigned integer entry of any width, dispatching
+// on its declared type; other types give nil.
 func getUint64Slice(e tiffEntry, bo binary.ByteOrder) []uint64 {
-	n := int(e.Count)
-	result := make([]uint64, n)
+	var get func([]byte) uint64
 	switch e.DataType {
-	case dtLong:
-		for i := 0; i < n; i++ {
-			result[i] = uint64(bo.Uint32(e.Value[i*4 : i*4+4]))
-		}
-	case dtLong8:
-		for i := 0; i < n; i++ {
-			result[i] = bo.Uint64(e.Value[i*8 : i*8+8])
-		}
+	case dtByte:
+		get = func(b []byte) uint64 { return uint64(b[0]) }
 	case dtShort:
-		for i := 0; i < n; i++ {
-			result[i] = uint64(bo.Uint16(e.Value[i*2 : i*2+2]))
-		}
+		get = func(b []byte) uint64 { return uint64(bo.Uint16(b)) }
+	case dtLong, dtIFD:
+		get = func(b []byte) uint64 { return uint64(bo.Uint32(b)) }
+	case dtLong8, dtIFD8:
+		get = bo.Uint64
+	default:
+		return nil
 	}
-	return result
-}
-
-func getFloat64Slice(e tiffEntry, bo binary.ByteOrder) []float64 {
-	n := int(e.Count)
-	result := make([]float64, n)
 	size := dataTypeSize(e.DataType)
-	for i := 0; i < n; i++ {
-		off := i * size
-		switch e.DataType {
-		case dtDouble:
-			bits := bo.Uint64(e.Value[off : off+8])
-			result[i] = float64FromBits(bits)
-		case dtFloat:
-			bits := bo.Uint32(e.Value[off : off+4])
-			result[i] = float64(float32FromBits(bits))
-		}
+	result := make([]uint64, valueCount(e))
+	for i := range result {
+		result[i] = get(e.Value[i*size:])
 	}
 	return result
 }
 
-func float64FromBits(bits uint64) float64 {
-	return math.Float64frombits(bits)
+// getFloat64Slice decodes a FLOAT or DOUBLE entry; other types give nil.
+func getFloat64Slice(e tiffEntry, bo binary.ByteOrder) []float64 {
+	var get func([]byte) float64
+	switch e.DataType {
+	case dtDouble:
+		get = func(b []byte) float64 { return math.Float64frombits(bo.Uint64(b)) }
+	case dtFloat:
+		get = func(b []byte) float64 { return float64(math.Float32frombits(bo.Uint32(b))) }
+	default:
+		return nil
+	}
+	size := dataTypeSize(e.DataType)
+	result := make([]float64, valueCount(e))
+	for i := range result {
+		result[i] = get(e.Value[i*size:])
+	}
+	return result
 }
 
-func float32FromBits(bits uint32) float32 {
-	return math.Float32frombits(bits)
+// valueCount returns how many values of the entry's type its Value holds:
+// Count, unless a malformed entry claims more than its data has.
+func valueCount(e tiffEntry) int {
+	n := len(e.Value) / dataTypeSize(e.DataType)
+	if e.Count < uint64(n) {
+		return int(e.Count)
+	}
+	return n
 }

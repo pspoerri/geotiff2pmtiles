@@ -169,6 +169,10 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 	}
 
 	first := &ifds[0]
+	if first.Width == 0 || first.Height == 0 {
+		src.Close()
+		return nil, fmt.Errorf("%s: image is %dx%d pixels", path, first.Width, first.Height)
+	}
 
 	// Strip-based TIFFs: convert the strip layout into virtual tiles.
 	var sl *stripLayout
