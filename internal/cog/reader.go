@@ -304,6 +304,11 @@ func (r *Reader) ID() int {
 	return r.id
 }
 
+// SetID assigns the reader's cache key. OpenAll assigns IDs itself; a reader
+// opened any other way -- one at a time through OpenSource, say -- needs a
+// unique one before it can share a TileCache with others.
+func (r *Reader) SetID(id int) { r.id = id }
+
 // GeoInfo returns the parsed geographic metadata.
 func (r *Reader) GeoInfo() GeoInfo {
 	return r.geo
