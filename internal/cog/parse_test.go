@@ -1,6 +1,8 @@
 package cog
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"strings"
 	"testing"
@@ -92,6 +94,36 @@ func TestOpenSourceMalformed(t *testing.T) {
 			entry(tagCompression, dtShort, 1),
 			entry(tagStripOffsets, dtLong, 8),
 			entry(tagStripByteCounts, dtLong, 1))},
+		// Strips too short for the size they claim, however well they
+		// compress: a byte of deflate, 16 bytes of zstd for 2^16 rows of
+		// 2^16 pixels, and a byte count past the end of the file.
+		{"huge-deflate-strip.tif", stripped(false,
+			entry(tagImageWidth, dtLong, 1<<20),
+			entry(tagImageLength, dtLong, 1<<12),
+			entry(tagCompression, dtShort, 8),
+			entry(tagStripOffsets, dtLong, 8),
+			entry(tagStripByteCounts, dtLong, 1))},
+		{"huge-rows-per-strip.tif", stripped(false,
+			entry(tagImageWidth, dtLong, 1<<16),
+			entry(tagImageLength, dtLong, 1<<16),
+			entry(tagRowsPerStrip, dtLong, 1<<16),
+			entry(tagCompression, dtShort, 50000),
+			entry(tagStripOffsets, dtLong, 8),
+			entry(tagStripByteCounts, dtLong, 16))},
+		{"huge-strip-count-past-eof.tif", stripped(false,
+			entry(tagImageWidth, dtLong, 1<<20),
+			entry(tagImageLength, dtLong, 1<<9),
+			entry(tagCompression, dtShort, 1),
+			entry(tagStripOffsets, dtLong, 8),
+			entry(tagStripByteCounts, dtLong, 1<<32-1))},
+		// 2^31 x 2^31 pixels of 4 samples: 2^64 samples, 0 in a uint64.
+		{"wrapping-sample-count.tif", stripped(false,
+			entry(tagImageWidth, dtLong, 1<<31),
+			entry(tagImageLength, dtLong, 1<<31),
+			entry(tagSamplesPerPixel, dtShort, 4),
+			entry(tagCompression, dtShort, 1),
+			entry(tagStripOffsets, dtLong, 8),
+			entry(tagStripByteCounts, dtLong, 1))},
 		// A layout the decoders reject fails at open, not at the first read.
 		{"predictor-on-4-bit.tif", tinyImage(false,
 			entry(tagBitsPerSample, dtShort, 4), entry(tagPredictor, dtShort, 2))},
@@ -105,6 +137,58 @@ func TestOpenSourceMalformed(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.name) {
 				t.Errorf("error %q does not name the file", err)
+			}
+		})
+	}
+}
+
+// A strip TIFF's virtual tile is its full width by RowsPerStrip, so a large
+// image in one strip makes a tile of more than 2^28 samples. Its data vouches
+// for that size, and it must open: the tile cap refused 12000x8000 RGB
+// single-strip files. 1-bit samples keep the strip at 33 MB.
+func TestOpenSourceLargeStrip(t *testing.T) {
+	const w, h = 16384, 16392 // 2^28 + 2^17 samples
+	raw := make([]byte, w/8*h)
+	var deflated bytes.Buffer
+	zw, err := zlib.NewWriterLevel(&deflated, zlib.BestSpeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw.Write(raw)
+	zw.Close()
+
+	for _, tt := range []struct {
+		name        string
+		compression uint64
+		strip       []byte
+		wantErr     bool
+	}{
+		{"uncompressed", 1, raw, false},
+		{"deflate", 8, deflated.Bytes(), false},
+		// An uncompressed strip must hold every byte of its rows.
+		{"uncompressed-short", 1, raw[:len(raw)-1], true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := buildTIFF(false, [][]byte{tt.strip}, func(offs []uint64) [][]tagEntry {
+				return [][]tagEntry{{
+					entry(tagImageWidth, dtLong, w),
+					entry(tagImageLength, dtLong, h),
+					entry(tagBitsPerSample, dtShort, 1),
+					entry(tagCompression, dtShort, tt.compression),
+					entry(tagPhotometric, dtShort, 1),
+					entry(tagStripOffsets, dtLong, offs[0]),
+					entry(tagRowsPerStrip, dtLong, h),
+					entry(tagStripByteCounts, dtLong, uint64(len(tt.strip))),
+				}}
+			})
+			r, err := openCrafted(t, tt.name+".tif", data)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("OpenSource error = %v, want error %v", err, tt.wantErr)
+			}
+			if err == nil {
+				r.Close()
+			} else if !strings.Contains(err.Error(), "TILED=YES") {
+				t.Errorf("error %q does not suggest rewriting the file tiled", err)
 			}
 		})
 	}
