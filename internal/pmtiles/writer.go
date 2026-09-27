@@ -3,6 +3,7 @@ package pmtiles
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 )
@@ -33,12 +35,15 @@ type Writer struct {
 	dedupMax   int                   // largest tile considered for dedup
 	cmpBuf     []byte                // scratch for comparing dedup candidates
 	outputPath string
-	entries    []Entry
+	entries    []Entry // entries[:compacted] sorted and run-merged, chunk by chunk
 	opts       WriterOptions
 	header     Header
 
 	tmpOffset uint64
+	addressed int64 // number of tiles written
 	dedupHits int64 // number of tiles that reused existing data
+	compacted int   // see entries
+	newHits   int   // dedup hits among entries[compacted:]
 	mu        sync.Mutex
 	finalized bool
 }
@@ -121,13 +126,14 @@ func (w *Writer) WriteTile(z, x, y int, data []byte) error {
 			return err
 		}
 		if same {
-			w.entries = append(w.entries, Entry{
+			w.addEntry(Entry{
 				TileID:    tileID,
 				Offset:    de.offset,
 				Length:    de.length,
 				RunLength: 1,
 			})
 			w.dedupHits++
+			w.newHits++
 			return nil
 		}
 	}
@@ -144,7 +150,7 @@ func (w *Writer) WriteTile(z, x, y int, data []byte) error {
 		w.dedup[hash] = dedupEntry{offset: offset, length: uint32(n)}
 	}
 
-	w.entries = append(w.entries, Entry{
+	w.addEntry(Entry{
 		TileID:    tileID,
 		Offset:    offset,
 		Length:    uint32(len(data)),
@@ -152,6 +158,25 @@ func (w *Writer) WriteTile(z, x, y int, data []byte) error {
 	})
 
 	return nil
+}
+
+// addEntry records a written tile. The caller holds w.mu.
+//
+// Before append would grow the slice, runs of one deduplicated blob (fill
+// tiles, mostly) are merged if enough dedup hits came in since the last
+// time: the entries added since are sorted, as workers write interleaved
+// Hilbert batches, and merged in place. A global --fill-color archive then
+// keeps an entry per run of fill tiles rather than 24 bytes per tile; an
+// archive without repeats never pays for the sort. Runs across two batches
+// are merged by BuildDirectory.
+func (w *Writer) addEntry(e Entry) {
+	if tail := w.entries[w.compacted:]; len(w.entries) == cap(w.entries) && 4*w.newHits >= len(tail) {
+		slices.SortFunc(tail, func(a, b Entry) int { return cmp.Compare(a.TileID, b.TileID) })
+		w.entries = w.entries[:w.compacted+len(optimizeRunLengths(tail))]
+		w.compacted, w.newHits = len(w.entries), 0
+	}
+	w.entries = append(w.entries, e)
+	w.addressed++
 }
 
 // tmpHolds reports whether the temp file holds data at offset. The caller
@@ -231,7 +256,7 @@ func (w *Writer) Finalize() error {
 	w.header.LeafDirLength = leafDirLength
 	w.header.TileDataOffset = tileDataOffset
 	w.header.TileDataLength = tileDataLength
-	w.header.NumAddressedTiles = uint64(len(w.entries))
+	w.header.NumAddressedTiles = uint64(w.addressed)
 	w.header.NumTileEntries = uint64(numTileEntries)
 	w.header.NumTileContents = uint64(len(src))
 
@@ -249,7 +274,7 @@ func (w *Writer) clusterOffsets() (src []dedupEntry, length uint64) {
 	// Only tiles small enough to be deduplicated can share an offset, so
 	// only those need to be remembered.
 	seen := make(map[uint64]uint64) // old offset → new offset
-	src = make([]dedupEntry, 0, len(w.entries)-int(w.dedupHits))
+	src = make([]dedupEntry, 0, w.addressed-w.dedupHits)
 	for i := range w.entries {
 		e := &w.entries[i]
 		if int(e.Length) <= w.dedupMax {
