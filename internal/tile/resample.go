@@ -69,16 +69,12 @@ type sourceInfo struct {
 // Projection, which CRSFallback needs for its datum-shift cache.
 // floatNodata, when set, replaces every source's GDAL_NODATA in the float path.
 //
-// An EPSG:4326 source whose longitudes run past 180 from at most a pixel
-// west of 0 (a 0..360 grid, one of pixel centres from 0, or a Pacific
-// 100..260 one) gets a WGS84Identity with Lon360 set, so that longitudes
-// west of the grid are sampled at lon+360. The 1e-6° margins keep a world
-// raster ending at 180.0000001 in the usual convention.
+// EPSG:4326 sources get the WGS84Identity their longitude range calls for
+// (see coord.WGS84ForGrid), so 0..360 grids are sampled at lon+360.
 func buildSourceInfos(sources []*cog.Reader, floatNodata *float64) ([]sourceInfo, error) {
 	type projKey struct {
-		epsg      int
-		lon360    bool
-		lon360Min float64
+		epsg int
+		wgs  coord.WGS84Identity // an EPSG:4326 grid's 0..360 handling
 	}
 	projIdx := map[projKey]int{}
 	var projs []coord.Projection
@@ -87,8 +83,8 @@ func buildSourceInfos(sources []*cog.Reader, floatNodata *float64) ([]sourceInfo
 		epsg := src.EPSG()
 		minX, minY, maxX, maxY := src.BoundsInCRS()
 		key := projKey{epsg: epsg}
-		if epsg == 4326 && minX >= -src.GeoInfo().PixelSizeX-1e-6 && maxX > 180+1e-6 {
-			key.lon360, key.lon360Min = true, min(minX, 0)
+		if epsg == 4326 {
+			key.wgs = coord.WGS84ForGrid(minX, maxX, src.GeoInfo().PixelSizeX)
 		}
 		idx, ok := projIdx[key]
 		if !ok {
@@ -99,8 +95,9 @@ func buildSourceInfos(sources []*cog.Reader, floatNodata *float64) ([]sourceInfo
 				}
 				return nil, fmt.Errorf("%s: unsupported EPSG code: %d", src.Path(), epsg)
 			}
-			if key.lon360 {
-				proj = &coord.WGS84Identity{Lon360: true, Lon360Min: key.lon360Min}
+			if key.wgs.Lon360 {
+				w := key.wgs
+				proj = &w
 			}
 			idx = len(projs)
 			projIdx[key] = idx
@@ -209,14 +206,9 @@ func prepareTileSources(srcInfos []sourceInfo, z, tx, ty, tileSize int) []tileSo
 // all four corners and taking the extremes.
 func tileCRSBounds(z, tx, ty int, proj coord.Projection) (minX, minY, maxX, maxY float64) {
 	minLon, minLat, maxLon, maxLat := coord.TileBounds(z, tx, ty)
-	if w, ok := proj.(*coord.WGS84Identity); ok && w.Lon360 && minLon < w.Lon360Min {
-		// Lon360 jumps by 360 at Lon360Min, at or just west of Greenwich,
-		// which a western tile's east corners sit on or straddle (and the
-		// z0 tile spans): shift the tile whole.
-		if maxLon > w.Lon360Min {
-			return w.Lon360Min, minLat, w.Lon360Min + 360, maxLat
-		}
-		return minLon + 360, minLat, maxLon + 360, maxLat
+	if w, ok := proj.(*coord.WGS84Identity); ok {
+		minX, maxX = w.LonRange(minLon, maxLon)
+		return minX, minLat, maxX, maxLat
 	}
 	x1, y1 := proj.FromWGS84(minLon, minLat)
 	x2, y2 := proj.FromWGS84(minLon, maxLat)

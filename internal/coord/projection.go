@@ -86,11 +86,43 @@ type WGS84Identity struct {
 func (w *WGS84Identity) ToWGS84(x, y float64) (lon, lat float64) { return x, y }
 func (w *WGS84Identity) EPSG() int                               { return 4326 }
 
+// WGS84ForGrid returns the projection for an EPSG:4326 grid spanning
+// longitudes minX..maxX with pixels pixelSizeX wide. A grid that runs past
+// 180° from at most one pixel west of 0 stores the western hemisphere at
+// lon+360: 0..360, pixel centres from 0 (GFS/ERA5: -0.125..359.875) or a
+// Pacific 100..260 grid. Any other grid gets the plain identity; the 1e-6°
+// margin keeps a world raster ending at 180.0000001 in the usual convention.
+func WGS84ForGrid(minX, maxX, pixelSizeX float64) WGS84Identity {
+	const eps = 1e-6
+	if minX < -pixelSizeX-eps || maxX <= 180+eps {
+		return WGS84Identity{}
+	}
+	return WGS84Identity{Lon360: true, Lon360Min: min(minX, 0)}
+}
+
+// wraps reports whether lon is stored at lon+360 in the grid.
+func (w *WGS84Identity) wraps(lon float64) bool { return w.Lon360 && lon < w.Lon360Min }
+
 func (w *WGS84Identity) FromWGS84(lon, lat float64) (x, y float64) {
-	if w.Lon360 && lon < w.Lon360Min {
+	if w.wraps(lon) {
 		lon += 360
 	}
 	return lon, lat
+}
+
+// LonRange returns the grid x range holding the longitudes minLon..maxLon.
+// Projecting the two ends is not enough on a Lon360 grid, which jumps by 360
+// at Lon360Min: a range across that point (such as the z0 tile) needs the
+// whole grid width, and one ending on it stays in one piece.
+func (w *WGS84Identity) LonRange(minLon, maxLon float64) (minX, maxX float64) {
+	switch {
+	case !w.wraps(minLon):
+		return minLon, maxLon
+	case maxLon > w.Lon360Min:
+		return w.Lon360Min, w.Lon360Min + 360
+	default:
+		return minLon + 360, maxLon + 360
+	}
 }
 
 // WrapLonRange shifts the longitude range [minLon, maxLon] by whole turns

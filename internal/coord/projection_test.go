@@ -87,6 +87,47 @@ func TestWGS84Identity_Lon360(t *testing.T) {
 	}
 }
 
+func TestWGS84ForGrid(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		minX, maxX, px float64
+		want           WGS84Identity
+	}{
+		{"world", -180, 180, 0.25, WGS84Identity{}},
+		{"world with rounding noise", -180, 180.0000001, 0.25, WGS84Identity{}},
+		{"0..360", 0, 360, 0.25, WGS84Identity{Lon360: true}},
+		{"GFS pixel centres from 0", -0.125, 359.875, 0.25, WGS84Identity{Lon360: true, Lon360Min: -0.125}},
+		{"Pacific 100..260", 100, 260, 0.1, WGS84Identity{Lon360: true}},
+		{"more than a pixel west of 0", -0.3, 359.7, 0.25, WGS84Identity{}},
+		{"-10..350", -10, 350, 1, WGS84Identity{}},
+	} {
+		if got := WGS84ForGrid(tt.minX, tt.maxX, tt.px); got != tt.want {
+			t.Errorf("%s: WGS84ForGrid(%v, %v, %v) = %+v, want %+v", tt.name, tt.minX, tt.maxX, tt.px, got, tt.want)
+		}
+	}
+}
+
+func TestWGS84Identity_LonRange(t *testing.T) {
+	plain := &WGS84Identity{}
+	lon360 := &WGS84Identity{Lon360: true, Lon360Min: -0.125}
+	for _, tt := range []struct {
+		name             string
+		w                *WGS84Identity
+		minLon, maxLon   float64
+		wantMin, wantMax float64
+	}{
+		{"plain identity", plain, -180, 0, -180, 0},
+		{"east of the wrap point", lon360, 10, 20, 10, 20},
+		{"west of it: shifted whole", lon360, -90, -45, 270, 315},
+		{"east edge on the wrap point", lon360, -90, -0.125, 270, 359.875},
+		{"across it (z0 tile)", lon360, -180, 180, -0.125, 359.875},
+	} {
+		if gotMin, gotMax := tt.w.LonRange(tt.minLon, tt.maxLon); gotMin != tt.wantMin || gotMax != tt.wantMax {
+			t.Errorf("%s: LonRange(%v, %v) = (%v, %v), want (%v, %v)", tt.name, tt.minLon, tt.maxLon, gotMin, gotMax, tt.wantMin, tt.wantMax)
+		}
+	}
+}
+
 func TestWrapLonRange(t *testing.T) {
 	tests := []struct {
 		name             string

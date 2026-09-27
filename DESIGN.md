@@ -638,8 +638,8 @@ end at ±180.0000000001. `TilesInBounds` wraps columns for such bounds and
 1 lost everything past 180°.
 
 `WGS84Identity.Lon360` serves 0..360 grids (and e.g. 100..260) by mapping longitudes west
-of the grid to lon+360. It is decided per source, not per run: an EPSG:4326 source with
-minX ≥ -(pixel size) - 1e-6 and maxX > 180+1e-6 gets its own projection, so a -180..180
+of the grid to lon+360. `coord.WGS84ForGrid` decides it per source, not per run: an
+EPSG:4326 source with minX ≥ -(pixel size) - 1e-6 and maxX > 180+1e-6 gets its own projection, so a -180..180
 source next to a 0..360 one keeps its convention. The margins keep a world raster ending at
 180.0000001 in the usual convention.
 
@@ -649,12 +649,13 @@ PixelIsPoint grid once its tiepoint is moved to the corner. Detection used to re
 minX ≥ -1e-6, which these grids missed, so their western hemisphere rendered empty under
 full-world bounds. `Lon360Min` = min(minX, 0) is where the wrap happens, so the strip
 between that edge and Greenwich is sampled where it is rather than past the grid's east
-end, and projections are keyed on (EPSG, Lon360, Lon360Min).
+end, and projections are keyed on the EPSG code and the `WGS84Identity` value.
 
 Lon360's jump at `Lon360Min` sits on or just west of a tile edge (and inside the z0 tile),
-so a western tile's east corners stay near 0 instead of 360; `tileCRSBounds` shifts
-western tiles whole (+360) and gives a tile straddling `Lon360Min`, the z0 tile included,
-[Lon360Min, Lon360Min+360]. Without that, a source entirely in 180..360 was skipped at max
+so a western tile's east corners stay near 0 instead of 360. `WGS84Identity.LonRange`,
+which `tileCRSBounds` uses instead of projecting corners, shifts western tiles whole (+360)
+and gives a tile straddling `Lon360Min`, the z0 tile included, [Lon360Min, Lon360Min+360].
+It shares one `wraps` predicate with `FromWGS84`, so point and range lookups cannot drift. Without that, a source entirely in 180..360 was skipped at max
 zoom 0 and 1.
 
 Tradeoffs: the western edge is per source but reaches only a pixel west of 0, so grids

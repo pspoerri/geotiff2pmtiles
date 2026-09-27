@@ -35,7 +35,7 @@ internal/
     utm.go                          UTM zones (EPSG:326xx/327xx/258xx) <-> WGS84, Krüger series
     fallback.go                     Any other EPSG code via wroge/crs, with a cached datum-shift grid
     mercator.go                     WGS84 <-> Web Mercator tile math, TilesInBounds (wraps at the antimeridian), CRS pixel size <-> ground metres
-    projection.go                   Projection interface, ForEPSG, WGS84Identity (with Lon360/Lon360Min), CRS units, WrapLonRange
+    projection.go                   Projection interface, ForEPSG, WGS84Identity (0..360 grids: WGS84ForGrid, LonRange), CRS units, WrapLonRange
     hilbert.go                      Hilbert curve for spatial tile ordering
   tile/
     generator.go                    Parallel tile generation pipeline (GeoTIFF sources)
@@ -148,10 +148,11 @@ These hold across packages; code that touches pixels or coordinates must follow 
 ## Per-source projection
 
 Each source is reprojected from its own CRS. `buildSourceInfos` runs once in `Generate`
-and creates one `coord.Projection` per distinct (EPSG, Lon360, Lon360Min), shared
-read-only by all workers (`CRSFallback` keeps its datum-shift cache per instance).
-EPSG:4326 sources whose longitudes run from at most a pixel west of 0 past 180 get
-`WGS84Identity{Lon360: true, Lon360Min: min(minX, 0)}`, decided per source. Per output
+and creates one `coord.Projection` per distinct EPSG code and, for EPSG:4326, per
+`WGS84Identity` value, shared read-only by all workers (`CRSFallback` keeps its
+datum-shift cache per instance). `coord.WGS84ForGrid` decides per source whether an
+EPSG:4326 grid stores longitudes 0..360, and `WGS84Identity.LonRange` maps a tile's
+longitudes to the grid's x range for `tileCRSBounds`, so the wrap rule lives in one place. Per output
 tile, `prepareTileSources` computes the tile's box and pixel size once per distinct
 projection (overlap test, overview choice) and keeps the overlapping sources in input
 order, which is also their priority. Lon/lat per output column and row are
