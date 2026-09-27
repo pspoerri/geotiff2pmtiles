@@ -130,3 +130,102 @@ func BenchmarkDecodeRawTile(b *testing.B) {
 		})
 	}
 }
+
+// --- Local views and the float/uint16 caches ---
+
+// BenchmarkTileCache_LocalGetHit measures the render hot path: per-pixel
+// lookups through a Local view that stay within one 2×2 tile neighbourhood,
+// so the memo answers them all.
+func BenchmarkTileCache_LocalGetHit(b *testing.B) {
+	cache := NewTileCache(256)
+	img := solidRGBA(256, color.RGBA{100, 150, 200, 255})
+	for i := 0; i < 4; i++ {
+		cache.Put(1, 0, 10+i&1, 20+i>>1, img)
+	}
+	local := cache.Local()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = local.Get(1, 0, 10+i&1, 20+i>>1&1)
+	}
+}
+
+var localSink *TileCache
+
+// BenchmarkTileCache_Local measures creating a Local view, once per rendered tile.
+func BenchmarkTileCache_Local(b *testing.B) {
+	cache := NewTileCache(256)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		localSink = cache.Local()
+	}
+}
+
+func BenchmarkFloatTileCache_GetHit(b *testing.B) {
+	cache := NewFloatTileCache(256)
+	cache.Put(1, 0, 10, 20, make([]float32, 256*256), 256, 256)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = cache.Get(1, 0, 10, 20)
+	}
+}
+
+func BenchmarkFloatTileCache_LocalGetHit(b *testing.B) {
+	cache := NewFloatTileCache(256)
+	for i := 0; i < 4; i++ {
+		cache.Put(1, 0, 10+i&1, 20+i>>1, make([]float32, 256*256), 256, 256)
+	}
+	local := cache.Local()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = local.Get(1, 0, 10+i&1, 20+i>>1&1)
+	}
+}
+
+func BenchmarkUint16TileCache_GetHit(b *testing.B) {
+	cache := NewUint16TileCache(256)
+	cache.Put(1, 0, 10, 20, make([]uint16, 256*256), 256, 256, 1)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _, _, _ = cache.Get(1, 0, 10, 20)
+	}
+}
+
+func BenchmarkUint16TileCache_LocalGetHit(b *testing.B) {
+	cache := NewUint16TileCache(256)
+	for i := 0; i < 4; i++ {
+		cache.Put(1, 0, 10+i&1, 20+i>>1, make([]uint16, 256*256), 256, 256, 1)
+	}
+	local := cache.Local()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _, _, _ = local.Get(1, 0, 10+i&1, 20+i>>1&1)
+	}
+}
+
+// BenchmarkCaches_GetHitParallel measures Get hits on the shared caches from
+// all goroutines at once, over 1024 tiles spread across the shards.
+func BenchmarkCaches_GetHitParallel(b *testing.B) {
+	tc, fc, uc := NewTileCache(4096), NewFloatTileCache(4096), NewUint16TileCache(4096)
+	img, f, u := image.NewRGBA(image.Rect(0, 0, 1, 1)), []float32{1}, []uint16{1}
+	for i := 0; i < 1024; i++ {
+		tc.Put(1, 0, i%32, i/32, img)
+		fc.Put(1, 0, i%32, i/32, f, 1, 1)
+		uc.Put(1, 0, i%32, i/32, u, 1, 1, 1)
+	}
+	for _, c := range []struct {
+		name string
+		get  func(col, row int)
+	}{
+		{"Tile", func(col, row int) { _ = tc.Get(1, 0, col, row) }},
+		{"Float", func(col, row int) { _, _, _ = fc.Get(1, 0, col, row) }},
+		{"Uint16", func(col, row int) { _, _, _, _, _ = uc.Get(1, 0, col, row) }},
+	} {
+		b.Run(c.name, func(b *testing.B) {
+			b.RunParallel(func(pb *testing.PB) {
+				for i := 0; pb.Next(); i++ {
+					c.get(i%32, i/32%32)
+				}
+			})
+		})
+	}
+}
