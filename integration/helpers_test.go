@@ -580,7 +580,7 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
 		MinZoom:    minZoom,
 		MaxZoom:    maxZoom,
-		Bounds:     cog.Bounds{MinLon: float64(bounds[0]), MinLat: float64(bounds[1]), MaxLon: float64(bounds[2]), MaxLat: float64(bounds[3])},
+		Bounds:     srcHeader.Bounds(),
 		TileFormat: enc.PMTileType(),
 		TileSize:   tileSize,
 		TempDir:    outputDir,

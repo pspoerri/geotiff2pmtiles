@@ -8,11 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cli"
-	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
 	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
 	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 	"github.com/pspoerri/geotiff2pmtiles/internal/pmtiles"
@@ -141,7 +141,8 @@ func main() {
 	srcFormat := pmtiles.TileTypeString(srcHeader.TileType)
 
 	// Read source metadata for description/attribution/type propagation.
-	var srcDescription, srcAttribution, srcType string
+	var srcDescription, srcAttribution, srcType, srcEncoding string
+	var srcExtra map[string]any
 	if srcMeta, err := reader.ReadMetadata(); err != nil {
 		// Metadata controls pixel semantics (terrarium detection), so a read
 		// failure must be visible: a silent fallback to RGBA downsampling
@@ -158,9 +159,11 @@ func main() {
 		if v, ok := srcMeta["type"].(string); ok {
 			srcType = v
 		}
-		if v, ok := srcMeta["encoding"].(string); ok && v == "terrarium" {
-			terrarium = true
+		if v, ok := srcMeta["encoding"].(string); ok {
+			srcEncoding = v
+			terrarium = terrarium || v == "terrarium"
 		}
+		srcExtra = passthroughMetadata(srcMeta)
 	}
 
 	// Carry forward source attribution and type when not explicitly overridden.
@@ -188,9 +191,8 @@ func main() {
 	if minZoom < 0 {
 		// Extend the pyramid down to the zoom where all data fits in one tile
 		// (same rule as geotiff2pmtiles), never dropping source levels.
-		minZoom = min(int(srcHeader.MinZoom), coord.MinZoomForSingleTile(
-			float64(srcHeader.MinLon), float64(srcHeader.MinLat),
-			float64(srcHeader.MaxLon), float64(srcHeader.MaxLat)), maxZoom)
+		b := srcHeader.Bounds()
+		minZoom = min(int(srcHeader.MinZoom), coord.MinZoomForSingleTile(b.MinLon, b.MinLat, b.MaxLon, b.MaxLat), maxZoom)
 	}
 	if maxZoom > int(srcHeader.MaxZoom) {
 		log.Fatalf("--max-zoom %d exceeds the source max zoom %d; pmtransform cannot add detail (let the viewer overzoom)", maxZoom, srcHeader.MaxZoom)
@@ -342,14 +344,14 @@ func main() {
 		tileSize, minZoom, maxZoom, resampling, nodataFill, missingFill)
 
 	// Create PMTiles writer.
-	encoding := ""
+	encoding := srcEncoding
 	if terrarium {
 		encoding = "terrarium"
 	}
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
 		MinZoom:     minZoom,
 		MaxZoom:     maxZoom,
-		Bounds:      cog.Bounds{MinLon: float64(bounds[0]), MinLat: float64(bounds[1]), MaxLon: float64(bounds[2]), MaxLat: float64(bounds[3])},
+		Bounds:      srcHeader.Bounds(),
 		TileFormat:  tileFormat,
 		TileSize:    tileSize,
 		TempDir:     tmpDir,
@@ -358,6 +360,7 @@ func main() {
 		Attribution: attribution,
 		Type:        layerType,
 		Encoding:    encoding,
+		Extra:       srcExtra,
 	})
 	if err != nil {
 		cleanup()
@@ -469,6 +472,24 @@ func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 	}
 
 	return b.String()
+}
+
+// derivedMetadataKeys are the metadata keys pmtiles.Writer derives from its
+// options, which pmtransform sets from the source or its flags.
+var derivedMetadataKeys = []string{"name", "description", "format", "type", "minzoom", "maxzoom", "bounds", "center", "attribution", "encoding"}
+
+// passthroughMetadata returns the source metadata keys that the writer does
+// not derive, so that provenance such as a composite's scene list survives
+// the transform. They go to WriterOptions.Extra, which overrides derived
+// keys, so the derived ones must stay out.
+func passthroughMetadata(meta map[string]any) map[string]any {
+	extra := map[string]any{}
+	for k, v := range meta {
+		if !slices.Contains(derivedMetadataKeys, k) {
+			extra[k] = v
+		}
+	}
+	return extra
 }
 
 // sameFile reports whether two paths name the same existing file.
