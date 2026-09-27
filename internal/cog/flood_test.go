@@ -233,3 +233,91 @@ func TestMarkTileCandidatesTolerance(t *testing.T) {
 		}
 	}
 }
+
+// BuildFloodMask must match nodata on the stored samples. Matching the
+// decoded RGB failed twice: a GDAL_NODATA tag made the decode zero
+// exact-nodata pixels before they could be compared, and 9-16 bit RGB is
+// rescaled to 8 bits while nodata and tolerance stay raw.
+func TestBuildFloodMaskRawSamples(t *testing.T) {
+	// ring is 0 on the image edge, 1 one pixel in and 2 further inside.
+	ring := func(x, y int) int { return min(min(min(x, y), min(7-x, 7-y)), 2) }
+	rgb := func(edge, inner uint16, interior [3]uint16) func(x, y, s int) uint16 {
+		return func(x, y, s int) uint16 {
+			switch ring(x, y) {
+			case 0:
+				return edge
+			case 1:
+				return inner
+			}
+			return interior[s]
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		m    memTIFF
+		cfg  BandConfig
+	}{
+		{
+			"8-bit, no tag",
+			memTIFF{bits: 8, sample: rgb(255, 250, [3]uint16{100, 120, 80})},
+			BandConfig{HasNodata: true, Nodata: 255, NodataTolerance: 10},
+		},
+		{
+			"8-bit, GDAL_NODATA=255",
+			memTIFF{bits: 8, nodata: "255", sample: rgb(255, 250, [3]uint16{100, 120, 80})},
+			BandConfig{HasNodata: true, Nodata: 255, NodataTolerance: 10},
+		},
+		{
+			"16-bit, rescaled",
+			memTIFF{bits: 16, nodata: "65535", sample: rgb(65535, 65530, [3]uint16{1000, 7000, 3000})},
+			BandConfig{HasNodata: true, Nodata: 65535, NodataTolerance: 10,
+				Rescale: RescaleLinear, RescaleMin: 0, RescaleMax: 5000},
+		},
+		{
+			// -32768 and -32763 around 100, -1, 200.
+			"signed 16-bit",
+			memTIFF{bits: 16, signed: true, nodata: "-32768",
+				sample: rgb(0x8000, 0x8000+5, [3]uint16{100, 0xffff, 200})},
+			BandConfig{HasNodata: true, Nodata: -32768, NodataTolerance: 10,
+				Rescale: RescaleLinear, RescaleMin: -1000, RescaleMax: 1000},
+		},
+		{
+			// The alpha-0 edge carries junk RGB; the flood must still
+			// pass through it to reach the near-nodata ring.
+			"8-bit RGBA",
+			memTIFF{bits: 8, spp: 4, sample: func(x, y, s int) uint16 {
+				switch ring(x, y) {
+				case 0:
+					return [4]uint16{255, 255, 255, 0}[s]
+				case 1:
+					return [4]uint16{3, 3, 3, 255}[s]
+				}
+				return [4]uint16{100, 120, 80, 255}[s]
+			}},
+			BandConfig{HasNodata: true, Nodata: 0, NodataTolerance: 5},
+		},
+	} {
+		m := tc.m
+		m.w, m.h, m.tw, m.th = 8, 8, 4, 4
+		if m.spp == 0 {
+			m.spp = 3
+		}
+		r := m.reader()
+		r.SetBandConfig(tc.cfg)
+		if err := r.BuildFloodMask(2); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		for y := 0; y < 8; y++ {
+			for x := 0; x < 8; x++ {
+				img, err := r.ReadTile(0, x/4, y/4)
+				if err != nil {
+					t.Fatalf("%s: %v", tc.name, err)
+				}
+				_, _, _, a := img.At(x%4, y%4).RGBA()
+				if want := ring(x, y) == 2; (a != 0) != want {
+					t.Errorf("%s: pixel (%d,%d) alpha %d, want opaque=%v", tc.name, x, y, a>>8, want)
+				}
+			}
+		}
+	}
+}

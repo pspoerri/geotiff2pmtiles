@@ -65,11 +65,15 @@ func (r *Reader) BuildFloodMask(workers int) error {
 	flood := newBitmap(W * H)
 
 	// Pass 1: decode each source tile and mark "near-nodata" pixels in
-	// `candidate`. Decoding is done with HasNodata temporarily disabled so the
-	// raw RGB values reach us untouched — we then apply the tolerance check
-	// ourselves at the output (post-band-reorder) level. The bandCfg mutation
-	// happens before any worker starts and is restored after all have stopped,
-	// so workers always observe HasNodata=false.
+	// `candidate`. Raw-decoded sources are matched on their stored samples:
+	// the decoded RGB of 9-16 bit input is rescaled while nodata and the
+	// tolerance are raw, and with HasNodata off the decode falls back to the
+	// GDAL_NODATA tag and zeroes exact matches before we could compare them.
+	// JPEG has no raw samples; it is decoded with HasNodata temporarily
+	// disabled so the RGB reaches us untouched, and matched after the band
+	// reorder. The bandCfg mutation happens before any worker starts and is
+	// restored after all have stopped, so workers always observe
+	// HasNodata=false.
 	saved := r.bandCfg
 	r.bandCfg.HasNodata = false
 	r.floodMask = nil // make sure decode paths don't try to consult a partial mask
@@ -78,6 +82,27 @@ func (r *Reader) BuildFloodMask(workers int) error {
 	tol := int(saved.NodataTolerance)
 	if tol < 0 {
 		tol = 0
+	}
+	raw := ifd.Compression != 7 && !r.IsIEEEFloat() && ifd.bitsPerSample() <= 16
+	match := newRawNodata(saved, ifd, tol)
+	markTile := func(tc, tr, xLim, yLim int) error {
+		if !raw {
+			img, err := r.ReadTile(0, tc, tr)
+			if err != nil {
+				return err
+			}
+			markTileCandidates(candidate, toRGBA(img), W, tc*tw, tr*th, xLim, yLim, nd, tol)
+			return nil
+		}
+		samples, _, _, spp, err := r.ReadUint16Tile(0, tc, tr)
+		if err != nil {
+			return err
+		}
+		if samples == nil {
+			samples = make([]uint16, tw*th*spp) // an empty tile reads as zero
+		}
+		markSampleCandidates(candidate, samples, spp, tw, &match, W, tc*tw, tr*th, xLim, yLim)
+		return nil
 	}
 
 	if workers <= 0 {
@@ -105,16 +130,6 @@ func (r *Reader) BuildFloodMask(workers int) error {
 				}
 				tr := n / tilesAcross
 				tc := n % tilesAcross
-				img, err := r.ReadTile(0, tc, tr)
-				if err != nil {
-					errMu.Lock()
-					if firstErr == nil {
-						firstErr = fmt.Errorf("BuildFloodMask: tile (%d,%d): %w", tc, tr, err)
-					}
-					errMu.Unlock()
-					failed.Store(true)
-					return
-				}
 				yLim := th
 				if tr*th+th > H {
 					yLim = H - tr*th
@@ -123,7 +138,15 @@ func (r *Reader) BuildFloodMask(workers int) error {
 				if tc*tw+tw > W {
 					xLim = W - tc*tw
 				}
-				markTileCandidates(candidate, toRGBA(img), W, tc*tw, tr*th, xLim, yLim, nd, tol)
+				if err := markTile(tc, tr, xLim, yLim); err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("BuildFloodMask: tile (%d,%d): %w", tc, tr, err)
+					}
+					errMu.Unlock()
+					failed.Store(true)
+					return
+				}
 			}
 		}()
 	}
@@ -151,32 +174,106 @@ func (r *Reader) BuildFloodMask(workers int) error {
 // may safely touch adjacent tiles that share boundary words.
 func markTileCandidates(candidate bitmap, rgba *image.RGBA, W, x0, y0, xLim, yLim, nd, tol int) {
 	pix := rgba.Pix
+	acc := wordAcc{b: candidate, w: -1}
 	for y := 0; y < yLim; y++ {
 		rowBit := (y0+y)*W + x0
 		rowPix := y * rgba.Stride
-		var acc uint64
-		accW := -1
 		for x := 0; x < xLim; x++ {
 			i := rowPix + x*4
 			if absDiff(int(pix[i+0]), nd) <= tol &&
 				absDiff(int(pix[i+1]), nd) <= tol &&
 				absDiff(int(pix[i+2]), nd) <= tol {
-				idx := rowBit + x
-				w := idx >> 6
-				if w != accW {
-					if accW >= 0 {
-						candidate.orWordAtomic(accW, acc)
-					}
-					accW = w
-					acc = 0
-				}
-				acc |= 1 << (uint(idx) & 63)
+				acc.set(rowBit + x)
 			}
 		}
-		if accW >= 0 {
-			candidate.orWordAtomic(accW, acc)
+	}
+	acc.flush()
+}
+
+// markSampleCandidates is markTileCandidates for a tile of raw chunky
+// samples (spp per pixel, tw pixels per row), as ReadUint16Tile returns them.
+func markSampleCandidates(candidate bitmap, samples []uint16, spp, tw int, m *rawNodata, W, x0, y0, xLim, yLim int) {
+	acc := wordAcc{b: candidate, w: -1}
+	for y := 0; y < yLim; y++ {
+		rowBit := (y0+y)*W + x0
+		row := samples[y*tw*spp:]
+		for x := 0; x < xLim; x++ {
+			if m.match(row[x*spp : x*spp+spp]) {
+				acc.set(rowBit + x)
+			}
 		}
 	}
+	acc.flush()
+}
+
+// rawNodata is BuildFloodMask's near-nodata test on stored samples.
+type rawNodata struct {
+	bands []int  // the rendered bands, see renderedBands
+	alpha int    // the alpha band decodeRawTile uses, or -1
+	bias  uint16 // see signBias16; nd is in the biased space
+	nd    int
+	tol   int
+	hasND bool // false when nd cannot occur in this sample type
+}
+
+func newRawNodata(cfg BandConfig, ifd *IFD, tol int) rawNodata {
+	spp := max(int(ifd.SamplesPerPixel), 1)
+	bias := ifd.sampleBias()
+	m := rawNodata{bands: renderedBands(cfg, spp), alpha: -1, bias: uint16(bias), nd: int(cfg.Nodata) + bias, tol: tol}
+	m.hasND = m.nd >= 0 && m.nd <= 65535 && len(m.bands) > 0
+	// The same alpha band decodeRawTile resolves: explicit, or band 4 of
+	// 8-bit data with four or more bands.
+	if cfg.AlphaBand > 0 {
+		m.alpha = cfg.AlphaBand - 1
+	} else if cfg.AlphaBand == 0 && ifd.bitsPerSample() <= 8 && spp >= 4 {
+		m.alpha = 3
+	}
+	if m.alpha >= spp {
+		m.alpha = -1
+	}
+	return m
+}
+
+// match reports whether the pixel with samples px is near-nodata: every
+// rendered band within tol of nodata, or a zero alpha. Pixels the decode
+// makes transparent through their alpha stay candidates, so the flood can
+// pass through them whatever RGB they carry.
+func (m *rawNodata) match(px []uint16) bool {
+	if m.alpha >= 0 && px[m.alpha]^m.bias == 0 {
+		return true
+	}
+	if !m.hasND {
+		return false
+	}
+	for _, b := range m.bands {
+		if absDiff(int(px[b]^m.bias), m.nd) > m.tol {
+			return false
+		}
+	}
+	return true
+}
+
+// wordAcc assembles candidate bits into a word-local accumulator and merges
+// each finished word with an atomic OR.
+type wordAcc struct {
+	b   bitmap
+	w   int
+	acc uint64
+}
+
+func (a *wordAcc) set(idx int) {
+	if w := idx >> 6; w != a.w {
+		a.flush()
+		a.w = w
+	}
+	a.acc |= 1 << (uint(idx) & 63)
+}
+
+func (a *wordAcc) flush() {
+	if a.w >= 0 {
+		a.b.orWordAtomic(a.w, a.acc)
+	}
+	a.acc = 0
 }
 
 // scanlineFlood does a 4-connected scanline flood fill. Pixels in `flood` are
