@@ -31,21 +31,22 @@ You can visualize generated PMTiles files at [pmtiles.io](https://pmtiles.io/).
 | | |
 | --- | --- |
 | **Files** | GeoTIFF and Cloud Optimized GeoTIFF, including BigTIFF. TIFF with a `.tfw` world file. Directories are scanned recursively |
-| **Layout** | Tiled or stripped; pixel-interleaved, or band-interleaved (tiled: JPEG only; stripped: anything but JPEG). JPEG strips are decoded strip by strip; sparse tiles and strips (GDAL `SPARSE_OK`) read as nodata |
+| **Layout** | Tiled or stripped; pixel-interleaved, or band-interleaved (tiled: JPEG only; stripped: anything but JPEG). Other band-interleaved files fail at open; rewrite them with `gdal_translate -co INTERLEAVE=PIXEL`. JPEG strips are decoded strip by strip; sparse tiles and strips (GDAL `SPARSE_OK`) read as nodata |
 | **Compression** | JPEG, LZW, Deflate, ZSTD, uncompressed — with predictors |
 | **Pixel types** | 8-bit gray/RGB/RGBA · 1-7 bit gray (raw values; stretch with `--rescale linear --rescale-range`) · palette images (expanded through their color map) · WhiteIsZero gray · 9-16 bit unsigned (linear or log rescaling), bit-packed (e.g. 15-bit Sentinel-2 L2A) or padded to 16 bits · 32/64-bit float and 16/32-bit signed integer (elevation, written as Terrarium; signed 16-bit also as rescaled grayscale) |
 | **Bands** | Any band can be mapped to R, G, B or alpha, e.g. NIR-R-G false color |
 | **Transparency** | GDAL_NODATA, `--nodata`, an alpha band, or a GDAL internal mask (how JPEG COGs usually mark nodata), which makes masked pixels transparent |
 | **CRS** | Native: UTM (EPSG:326xx, 327xx, 258xx), Swiss LV95 (2056), WGS84 (4326), Web Mercator (3857). Other EPSG codes known to [wroge/crs](https://github.com/wroge/crs) use a slower fallback, which is logged when used. Files may use different CRSs. Pixel-is-point rasters (e.g. Copernicus DEM, SRTM) are placed as GDAL places them |
-| **Longitudes** | -180..180 and 0..360 grids; data that crosses the antimeridian (e.g. UTM zones 1 and 60); rasters around a pole (e.g. EPSG:3413, 3031) get bounds over every longitude |
+| **Longitudes** | -180..180 and 0..360 grids, including 0..360 grids whose edge lies half a pixel west of 0 (pixel centres from 0, as in GRIB-derived GFS or ERA5 data); data that crosses the antimeridian (e.g. UTM zones 1 and 60); rasters around a pole (e.g. EPSG:3413, 3031) get bounds over every longitude |
 
 ### Limitations
 
 - **CRS from GeoKeys only.** User-defined or WKT-only CRSs are rejected unless
   `--source-epsg` names the EPSG code, and `.prj` files are ignored. A plain TIFF with a `.tfw` has no CRS, so it is guessed from the coordinate
-  ranges (lon/lat → 4326, Swiss LV95 ranges → 2056, anything else → 3857) and a warning
-  names the file. Set the CRS of all inputs with `--source-epsg`, or per file with
-  `gdal_edit.py -a_srs EPSG:xxxx`.
+  ranges (lon/lat → 4326, Swiss LV95 ranges → 2056, anything else → 3857), and one
+  warning gives the number of such files and an example; it is not printed when
+  `--source-epsg` is set, and `coginfo` marks a guessed code. Set the CRS of all inputs
+  with `--source-epsg`, or per file with `gdal_edit.py -a_srs EPSG:xxxx`.
 - **Settings from the first file.** The band layout and bit depth (auto `--bands` and
   rescaling), the band-description preset, and the default nodata for image output come
   from the first input file. Inputs that differ need `--bands`, `--rescale-range` or
@@ -55,6 +56,8 @@ You can visualize generated PMTiles files at [pmtiles.io](https://pmtiles.io/).
   pixels still count towards the auto `--rescale-range`. A mask is used only when the
   full-resolution image has one and is tiled; a masked file's overviews without their own
   mask are skipped, which makes low zooms slower but keeps them masked.
+- **Large single-strip TIFFs** are decoded whole: a 12000×8000 RGB image stored as one
+  strip needs 1.2-1.6 GB of memory. `gdal_translate -co TILED=YES` avoids that.
 - **Longitudes**: grids written as e.g. -10..350 are not supported. Files on both sides of
   the antimeridian given as -180..180 (one ending at 180, one starting at -180) merge to
   whole-world bounds: the output is correct, but every tile column is visited.
@@ -102,8 +105,10 @@ geotiff2pmtiles [flags] <input-dir-or-files...> <output.pmtiles>
 | `--mem-profile` |               | Write a heap profile to the given file at exit     |
 | `--cpuprofile`, `--memprofile` |  | Deprecated spellings of `--cpu-profile` and `--mem-profile` |
 
-Invalid values (quality outside 1-100, a zoom range with min > max, a band the file does
-not have, an unknown CRS, …) stop the run before any output is written.
+Invalid values stop the run before any output is written: quality outside 1-100, a zoom
+range with min > max, a band the file does not have, an unknown CRS, a file without a
+geotransform (`--source-epsg` sets only the CRS, not the pixel grid), bounds beyond the
+poles (e.g. a projected file given `--source-epsg 4326`), and so on.
 
 ### Nodata color and missing tiles
 
@@ -118,7 +123,8 @@ Two different things can be colored:
 
 Recoloring nodata without filling missing tiles (`--nodata-color` alone) leaves missing
 tiles, and the matching quarters of the tiles above them, transparent. `--fill-color`, the
-old flag that set both, still works but prints a deprecation warning.
+old flag that set both, still works but prints a deprecation warning. JPEG has no alpha:
+in both tools, a translucent color is written as its RGB, opaque, and a warning names it.
 
 ### How defaults are chosen
 
@@ -272,7 +278,7 @@ pmtransform does not rewrite (e.g. a composite's scene list) are carried over.
 | `--rebuild`     | `false`       | Rebuild every level below max zoom by downsampling (needed to apply `--resampling` to existing levels) |
 | `--terrarium`   | `false` (auto-detected) | Treat tiles as terrarium-encoded elevations so downsampling happens in elevation space. Auto-detected from archive metadata written by geotiff2pmtiles |
 | `--nodata-color` | `none`       | RGBA color (`"0,0,0,255"` or `"#000000ff"`) that replaces transparent pixels. Forces re-encoding |
-| `--fill-missing` | `none`       | RGBA color of the solid tiles written at tile positions inside the bounds that the source lacks. Does not force re-encoding |
+| `--fill-missing` | `none`       | RGBA color of the solid tiles written at tile positions inside the bounds that the source lacks. Does not force re-encoding. For an archive that crosses the antimeridian, only the longitudes around the data are filled |
 | `--fill-color`  |               | Deprecated: sets both `--nodata-color` and `--fill-missing`, and cannot be combined with them |
 | `--concurrency` | `NumCPU`      | Number of parallel workers (>= 1)                  |
 | `--mem-limit`   | auto (`0`)    | MB of encoded tiles allowed to queue for the spill file while levels are rebuilt or added; see geotiff2pmtiles |
@@ -349,9 +355,9 @@ Keep only z10-z14 (tiles are copied, not re-encoded):
 
 | Command | Purpose |
 | ------- | ------- |
-| `coginfo [-raw] <file.tif>` | COG metadata: EPSG, size, bounds, levels, GDAL metadata; test-reads a tile of every level |
+| `coginfo [-raw] <file.tif>` | COG metadata: EPSG (marked when guessed), size, bounds, levels, GDAL metadata; test-reads a tile of every level |
 | `pmheader --show <file.pmtiles>` | Show the header and metadata |
-| `pmheader [flags] <in.pmtiles> [out.pmtiles]` | Patch header fields and metadata without touching tile data (uncompressed or gzip-compressed directories, leaves at any depth); `--rebuild-dirs` fixes an oversized root directory. **Without an output path the input is edited in place** |
+| `pmheader [flags] <in.pmtiles> [out.pmtiles]` | Patch header fields and metadata without touching tile data (uncompressed or gzip-compressed directories, leaves at any depth); `--rebuild-dirs` fixes an oversized root directory. **Without an output path the input is edited in place** (see below) |
 | `checkpmtiles <file-or-URL>` | Validate a PMTiles v3 archive: header, every directory, zoom range (min ≤ max, every tile inside it) and tile count (exit code 1 on error) |
 
 `make build-all` builds geotiff2pmtiles, pmtransform, checkpmtiles and pmheader into
@@ -384,13 +390,18 @@ directories at any depth.
 | `--min-lon`, `--min-lat`, `--max-lon`, `--max-lat` | | Override a header bound, in decimal degrees |
 | `--center-lon`, `--center-lat` | | Override the header's center, in decimal degrees |
 | `--tile-type`     |         | Override the tile type: `png`, `jpeg`, `webp`, `mvt` |
-| `--sync-metadata` | `true`  | Also update the metadata keys `minzoom`, `maxzoom`, `format`, `bounds` and `center` that the metadata has, to match the header overrides. `--set` wins over it |
+| `--sync-metadata` | `true`  | Also update the metadata keys `minzoom`, `maxzoom`, `format`, `bounds` and `center` that the metadata has, to match the header overrides. `--set` wins over it. Metadata compressed with brotli or zstd is left as it is, with a warning |
 | `--set`           |         | Set a metadata key: `key=value`, where a valid JSON value is stored as JSON and anything else as a string (repeatable) |
 | `--unset`         |         | Remove a metadata key (repeatable) |
 | `--metadata-file` |         | Replace the entire metadata with the JSON in this file |
 | `--rebuild-dirs`  | `false` | Rebuild the directories to fit the 16 KiB root budget (fixes an oversized root); directories and metadata are then gzip-compressed |
 | `--verbose`       | `false` | Print a summary of changes |
 | `--version`       |         | Print version and exit |
+
+When editing in place, pmheader overwrites the header where it is, and the metadata too if
+its new encoding fits the old metadata section. Otherwise, and for `--rebuild-dirs`, it
+writes a new file next to the archive, or next to the file a symlink points to, and
+renames it over that file, keeping its permissions.
 
 Examples:
 
