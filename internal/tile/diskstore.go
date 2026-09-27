@@ -310,7 +310,9 @@ func (s *DiskTileStore) decodeEncoded(key [3]int, data []byte) *TileData {
 		return &TileData{gray: g, tileSize: s.tileSize}
 	}
 
-	// General case: convert to RGBA (handles NRGBA from PNG, YCbCr from JPEG, etc.).
+	// General case: opaque decoder types (YCbCr from JPEG, Gray16/RGBA64
+	// from 16-bit PNG); images with alpha already come back from
+	// DecodeImage as straight *image.RGBA.
 	bounds := img.Bounds()
 	rgba := GetRGBA(bounds.Dx(), bounds.Dy())
 	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
