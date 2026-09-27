@@ -1579,16 +1579,19 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 		}
 	}
 
-	// Build rescaler. For 16-bit data with no explicit rescaling (e.g. coginfo
-	// or debug tools using zero-value BandConfig), fall back to linear 0-65535
-	// so values are at least visible rather than uint8-truncated.
+	// Build rescaler. For 9..16-bit data with no explicit rescaling (e.g.
+	// coginfo or debug tools using zero-value BandConfig), fall back to the
+	// full range of the sample type -- 0..65535, or -32768..32767 when signed
+	// -- so values are at least visible rather than uint8-truncated.
 	rescaleMode := cfg.Rescale
 	rescaleMin := cfg.RescaleMin
 	rescaleMax := cfg.RescaleMax
 	if is16 && rescaleMode == RescaleNone {
 		rescaleMode = RescaleLinear
-		rescaleMin = 0
-		rescaleMax = 65535
+		rescaleMin, rescaleMax = 0, float64(int(1)<<bits-1)
+		if bias != 0 {
+			rescaleMin, rescaleMax = -float64(int(1)<<(bits-1)), float64(int(1)<<(bits-1)-1)
+		}
 	}
 	rescaler := buildRescaler(rescaleMode, rescaleMin+fbias, rescaleMax+fbias)
 	// The identity (8-bit, no rescale: the CLI's RGB path) is inlined rather

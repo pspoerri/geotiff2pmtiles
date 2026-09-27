@@ -60,6 +60,36 @@ func TestSignedInt16RGBRescale(t *testing.T) {
 		}
 	}
 
+	// Without a rescale, the fallback is the full range of the sample type,
+	// signed or not; it was 0..65535 in biased space, which made every
+	// value <= 0 black. 15 bits unsigned now reach white rather than 127.
+	for _, tc := range []struct {
+		bits, format int
+		vals         []int
+		want         []uint8
+	}{
+		{16, 2, []int{-5000, 0, 1000, 8000}, []uint8{108, 128, 131, 159}},
+		{15, 1, []int{0, 16384, 32767}, []uint8{0, 128, 255}},
+	} {
+		raw := make([]uint16, len(tc.vals))
+		for i, v := range tc.vals {
+			raw[i] = uint16(v)
+		}
+		data := make([]byte, 2*len(raw))
+		for i, v := range raw {
+			binary.LittleEndian.PutUint16(data[2*i:], v)
+		}
+		if tc.bits == 15 {
+			data = pack(raw, len(raw), 1, 15)
+		}
+		r := oneTileReader(len(raw), 1, tc.bits, tc.format, "", data)
+		for x, w := range tc.want {
+			if got := grayAlpha(t, r, x); got != [2]uint8{w, 255} {
+				t.Errorf("%d-bit %d without rescale: gray %d, want %d", tc.bits, tc.vals[x], got[0], w)
+			}
+		}
+	}
+
 	samples := make([]uint16, len(vals))
 	for i, v := range vals {
 		samples[i] = uint16(v)
