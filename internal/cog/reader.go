@@ -105,6 +105,7 @@ type Reader struct {
 	path       string
 	src        ByteSource // the file's bytes: memory-mapped by Open, anything by OpenSource, closedSource after Close
 	ifds       []IFD
+	masks      []IFD // GDAL internal mask of each level (Width 0: none); nil if the file has none
 	geo        GeoInfo
 	bandCfg    BandConfig // band selection and rescaling config (set via SetBandConfig)
 	id         int        // unique numeric ID for fast cache keying (from nextReaderID, or SetID)
@@ -177,7 +178,7 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 		return nil, fmt.Errorf("%s: no IFDs found", path)
 	}
 
-	ifds = imageIFDs(ifds)
+	ifds, masks := imageIFDs(ifds)
 	first := &ifds[0]
 	if first.Width == 0 || first.Height == 0 {
 		src.Close()
@@ -232,6 +233,7 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 		src:   src,
 		bo:    bo,
 		ifds:  ifds,
+		masks: masks,
 		geo:   geo,
 		path:  path,
 		strip: sl,
@@ -424,27 +426,37 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 		return r.readStripTileRaw(ifd, row)
 	}
 
-	tileIdx := row*tilesAcross + col
+	data, err := r.readTileBytes(ifd, row*tilesAcross+col)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, ifd, nil
+}
+
+// readTileBytes reads tile tileIdx of a tiled IFD (an image level or its
+// mask) and undoes its compression and predictor. An empty tile comes back
+// as nil, a JPEG tile still compressed.
+func (r *Reader) readTileBytes(ifd *IFD, tileIdx int) ([]byte, error) {
 	if tileIdx >= len(ifd.TileOffsets) || tileIdx >= len(ifd.TileByteCounts) {
-		return nil, nil, fmt.Errorf("tile index %d out of range", tileIdx)
+		return nil, fmt.Errorf("tile index %d out of range", tileIdx)
 	}
 
 	offset := ifd.TileOffsets[tileIdx]
 	size := ifd.TileByteCounts[tileIdx]
 
 	if size == 0 {
-		return nil, ifd, nil // empty tile
+		return nil, nil // empty tile
 	}
 
 	data, err := r.slice("tile data", offset, size)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	var decompressed []byte
 	switch ifd.Compression {
 	case 7: // JPEG — not applicable for float tiles
-		return data, ifd, nil
+		return data, nil
 	case 1: // No compression
 		if ifd.Predictor == 2 || ifd.Predictor == 3 {
 			// data aliases the read-only mapping and applyPredictor rewrites
@@ -456,27 +468,27 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 	case 8, 32946: // Deflate / zlib
 		dec, err := decompressDeflate(data)
 		if err != nil {
-			return nil, nil, fmt.Errorf("decompressing deflate tile: %w", err)
+			return nil, fmt.Errorf("decompressing deflate tile: %w", err)
 		}
 		decompressed = dec
 	case 5: // LZW
 		dec, err := decompressLZW(data)
 		if err != nil {
-			return nil, nil, fmt.Errorf("decompressing LZW tile: %w", err)
+			return nil, fmt.Errorf("decompressing LZW tile: %w", err)
 		}
 		decompressed = dec
 	case 50000: // ZSTD (GDAL/libtiff)
 		dec, err := decompressZSTD(data)
 		if err != nil {
-			return nil, nil, fmt.Errorf("decompressing zstd tile: %w", err)
+			return nil, fmt.Errorf("decompressing zstd tile: %w", err)
 		}
 		decompressed = dec
 	default:
-		return nil, nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
+		return nil, fmt.Errorf("unsupported compression: %d", ifd.Compression)
 	}
 
 	applyPredictor(ifd, decompressed, int(ifd.TileWidth), r.bo)
-	return decompressed, ifd, nil
+	return decompressed, nil
 }
 
 // checkLayout rejects the sample layouts the decoders cannot handle -- they
@@ -1071,6 +1083,11 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
+	if level < len(r.masks) && r.masks[level].Width != 0 {
+		if img, err = r.applyMask(img, &r.masks[level], col, row); err != nil {
+			return nil, err
+		}
+	}
 	// A built flood mask supersedes per-pixel nodata matching. Level 0 maps
 	// 1:1 onto the mask; overview levels sample the mask at the center of
 	// each overview pixel's level-0 footprint so transparency survives reads
@@ -1089,6 +1106,36 @@ func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 		return rgba, nil
 	}
 	return img, nil
+}
+
+// applyMask makes the pixels of a decoded tile that the level's GDAL
+// internal mask m marks invalid (0) transparent, so that later sources show
+// through them. A missing (sparse) mask tile is all invalid, as GDAL reads
+// it: GDAL writes an all-valid mask tile but omits an all-invalid one.
+func (r *Reader) applyMask(img image.Image, m *IFD, col, row int) (image.Image, error) {
+	data, err := r.readTileBytes(m, row*m.TilesAcross()+col)
+	if err != nil {
+		return nil, fmt.Errorf("reading mask: %w", err)
+	}
+	rgba := toRGBA(img)
+	if data == nil {
+		clear(rgba.Pix)
+		return rgba, nil
+	}
+	w, h := int(m.TileWidth), int(m.TileHeight)
+	valid, rows := r.samples16(m, data, w, h, 1)
+	if rows < h {
+		return nil, fmt.Errorf("mask tile data too short: %d bytes hold %d of %d rows", len(data), rows, h)
+	}
+	for y := 0; y < min(h, rgba.Rect.Dy()); y++ {
+		for x := 0; x < min(w, rgba.Rect.Dx()); x++ {
+			if valid[y*w+x] == 0 {
+				i := y*rgba.Stride + x*4
+				clear(rgba.Pix[i : i+4])
+			}
+		}
+	}
+	return rgba, nil
 }
 
 // readTileDecoded is the raw decode dispatch, without flood-mask post-processing.
@@ -1333,6 +1380,12 @@ func toRGBA(src image.Image) *image.RGBA {
 	}
 	b := src.Bounds()
 	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	if _, ok := src.(*image.YCbCr); ok {
+		// JPEG tiles, masked or with nodata: draw's YCbCr path computes the
+		// same bytes as the loop below, 4x faster.
+		draw.Draw(dst, dst.Rect, src, b.Min, draw.Src)
+		return dst
+	}
 	// Use draw via image/color to handle YCbCr/Gray/etc generically.
 	for y := 0; y < b.Dy(); y++ {
 		for x := 0; x < b.Dx(); x++ {

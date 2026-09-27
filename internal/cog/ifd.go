@@ -168,17 +168,20 @@ func supportedCompression(c uint16) bool {
 }
 
 // imageIFDs keeps IFD 0 and the later IFDs that can serve as its overviews,
-// filtering ifds in place. GDAL interleaves 1-bit transparency masks with the
+// filtering ifds in place, and returns the GDAL internal mask of each kept
+// level (see levelMasks). GDAL interleaves 1-bit transparency masks with the
 // overviews, and other writers add pages, thumbnails or striped reduced
 // images; picked as a level by OverviewForZoom or ValueRange, those decode as
 // garbage or divide by zero. NewSubfileType is not required to mark an
 // overview, since some writers omit it.
-func imageIFDs(ifds []IFD) []IFD {
+func imageIFDs(ifds []IFD) (levels, masks []IFD) {
 	first := &ifds[0]
 	kept := ifds[:1]
 	for _, ifd := range ifds[1:] {
 		switch {
-		case ifd.NewSubfileType&(subfilePage|subfileMask) != 0, ifd.Photometric == 4: // page or mask
+		case ifd.usableMask():
+			masks = append(masks, ifd)
+		case ifd.NewSubfileType&(subfilePage|subfileMask) != 0, ifd.Photometric == 4: // page, or a mask we cannot apply
 		case ifd.TileWidth == 0 || ifd.TileHeight == 0: // striped: only IFD 0 is promoted to tiles
 		case ifd.Width == 0 || ifd.Height == 0 || ifd.Width > first.Width || ifd.Height > first.Height: // not a reduced image
 		case ifd.SamplesPerPixel != first.SamplesPerPixel || ifd.bitsPerSample() != first.bitsPerSample(): // thumbnail
@@ -187,7 +190,52 @@ func imageIFDs(ifds []IFD) []IFD {
 			kept = append(kept, ifd)
 		}
 	}
-	return kept
+	return levelMasks(kept, masks)
+}
+
+// usableMask reports whether ifd is a transparency mask the reader can
+// apply: NewSubfileType bit 2 and Photometric 4, as GDAL writes its internal
+// masks, tiled, one sample of 1..8 bits, compressed by other means than
+// JPEG, and with a tile at every position.
+func (ifd *IFD) usableMask() bool {
+	if ifd.NewSubfileType&subfileMask == 0 || ifd.Photometric != 4 || ifd.TileWidth == 0 || ifd.TileHeight == 0 {
+		return false
+	}
+	tiles := ifd.TilesAcross() * ifd.TilesDown()
+	bits := ifd.bitsPerSample()
+	return tiles > 0 && len(ifd.TileOffsets) >= tiles && len(ifd.TileByteCounts) >= tiles &&
+		ifd.SamplesPerPixel <= 1 && bits >= 1 && bits <= 8 && (ifd.Predictor <= 1 || bits == 8) &&
+		supportedCompression(ifd.Compression) && ifd.Compression != 7
+}
+
+// levelMasks returns, for each level, the mask of the same size and tiling
+// (a zero IFD if there is none), or nil when the file has no masks at all.
+// GDAL writes one per level, though not always right after its image.
+//
+// Once the full-resolution image has a mask, an overview without one is
+// dropped, filtering levels in place: read unmasked, it would turn the
+// masked area opaque at the zooms it serves, hiding the sources behind it,
+// while the next finer level masks it correctly and costs only speed.
+func levelMasks(levels, masks []IFD) ([]IFD, []IFD) {
+	if len(masks) == 0 {
+		return levels, nil
+	}
+	kept, paired := levels[:0], make([]IFD, 0, len(levels))
+	for _, l := range levels {
+		var m IFD
+		for _, c := range masks {
+			if c.Width == l.Width && c.Height == l.Height && c.TileWidth == l.TileWidth && c.TileHeight == l.TileHeight {
+				m = c
+				break
+			}
+		}
+		if m.Width == 0 && len(paired) > 0 && paired[0].Width != 0 {
+			continue // an overview of a masked image, without a mask
+		}
+		kept = append(kept, l)
+		paired = append(paired, m)
+	}
+	return kept, paired
 }
 
 // tiffEntry is a raw TIFF directory entry.
