@@ -9,7 +9,7 @@ Code structure, pipelines and memory model. For the reasoning behind them see
 ```
 cmd/
   geotiff2pmtiles/main.go          CLI: GeoTIFF/COG → PMTiles conversion
-  geotiff2pmtiles/sources.go       Per-source CRS checks, coverage holes per CRS, finest pixel size
+  geotiff2pmtiles/sources.go       Per-source CRS and geotransform checks, WGS84 bounds check, coverage holes (single CRS only), finest pixel size
   pmtransform/main.go              CLI: PMTiles → PMTiles transformation
   checkpmtiles/main.go             PMTiles v3 archive validator (local + HTTP; every directory at any depth)
   pmheader/main.go                 Patch PMTiles header/metadata/directories without touching tile data
@@ -35,7 +35,7 @@ internal/
     utm.go                          UTM zones (EPSG:326xx/327xx/258xx) <-> WGS84, Krüger series
     fallback.go                     Any other EPSG code via wroge/crs, with a cached datum-shift grid
     mercator.go                     WGS84 <-> Web Mercator tile math, TilesInBounds (wraps at the antimeridian), CRS pixel size <-> ground metres
-    projection.go                   Projection interface, ForEPSG, WGS84Identity (with Lon360), CRS units, WrapLonRange
+    projection.go                   Projection interface, ForEPSG, WGS84Identity (with Lon360/Lon360Min), CRS units, WrapLonRange
     hilbert.go                      Hilbert curve for spatial tile ordering
   tile/
     generator.go                    Parallel tile generation pipeline (GeoTIFF sources)
@@ -84,13 +84,16 @@ integration/
    levels; promotes strips (chunky or planar-separate) to virtual tiles, each strip
    keeping its rows (sparse strips read as nodata); and checks every level's layout, so a
    file the decoders cannot read fails here with its name.
-3. **CRS**: `--source-epsg` overrides every source's EPSG (`Reader.SetEPSG`); then every
-   source's CRS must resolve to a projection (unknown, user-defined 32767 and missing
-   CRSs fail). Coverage holes are searched per CRS.
+3. **CRS**: `--source-epsg` overrides every source's EPSG (`Reader.SetEPSG`); without it,
+   one warning covers the sources whose CRS was guessed from world-file coordinates
+   (`Reader.EPSGGuessed`). Then every source needs a geotransform (a positive pixel size)
+   and a CRS that resolves to a projection (unknown codes and user-defined 32767 fail).
+   Coverage holes are searched only when all sources share one CRS.
 4. **Plan**: detect the preset and format from the first source, the band config and
    rescale range (merged over all sources), and the merged WGS84 bounds
    (`cog.MergedBoundsWGS84`: 16 intervals along each source edge, and all longitudes when a
-   pole lies inside a source).
+   pole lies inside a source); `checkBoundsWGS84` rejects latitudes beyond ±90° plus the
+   coarsest source pixel.
    The auto max zoom comes from the finest source's ground pixel size.
 5. **Generate (max zoom)**: enumerate tiles in the bounds, sort them along the Hilbert curve,
    distribute batches to a worker pool.
@@ -136,19 +139,22 @@ These hold across packages; code that touches pixels or coordinates must follow 
   longitudes continuous around the projection's central meridian; callers wrap merged
   intervals with `coord.WrapLonRange`. `TilesInBounds` continues from column 0 past 180.
   The PMTiles header and metadata record crossing bounds as -180..180 with the centre on
-  the data (`pmtiles.archiveBounds`), because viewers do not accept wrapped bounds.
+  the data (`pmtiles.archiveBounds`, `archiveCenter`), because viewers do not accept
+  wrapped bounds. `WriterOptions.Center` overrides the derived centre, so a copy keeps
+  its source's `Header.Center()`.
 - **Out-of-domain points.** A projection returns ±Inf, never NaN, for a point it cannot
   transform: the per-pixel bounds checks reject Inf, but NaN comparisons are false.
 
 ## Per-source projection
 
 Each source is reprojected from its own CRS. `buildSourceInfos` runs once in `Generate`
-and creates one `coord.Projection` per distinct (EPSG, Lon360) pair, shared read-only by
-all workers (`CRSFallback` keeps its datum-shift cache per instance). EPSG:4326 sources
-whose longitudes run from ≥ 0 past 180 get `WGS84Identity{Lon360: true}`, decided per
-source. Per output tile, `prepareTileSources` computes the tile's box and pixel size once
-per distinct projection (overlap test, overview choice) and keeps the overlapping sources
-in input order, which is also their priority. Lon/lat per output column and row are
+and creates one `coord.Projection` per distinct (EPSG, Lon360, Lon360Min), shared
+read-only by all workers (`CRSFallback` keeps its datum-shift cache per instance).
+EPSG:4326 sources whose longitudes run from at most a pixel west of 0 past 180 get
+`WGS84Identity{Lon360: true, Lon360Min: min(minX, 0)}`, decided per source. Per output
+tile, `prepareTileSources` computes the tile's box and pixel size once per distinct
+projection (overlap test, overview choice) and keeps the overlapping sources in input
+order, which is also their priority. Lon/lat per output column and row are
 precomputed; a pixel is projected again only when the next candidate source's projection
 differs from the previous one, so single-CRS input costs one `FromWGS84` per pixel.
 
@@ -157,7 +163,9 @@ differs from the previous one, so single-CRS input costs one `FromWGS84` per pix
 - **Levels**: IFD 0 plus later IFDs that are tiled, no larger than IFD 0, of the same
   samples per pixel and depth, in a supported compression and with at most 2^28 samples per
   tile. Masks, pages, thumbnails and striped reduced images are dropped, so `IFDCount` and
-  `NumOverviews` count levels only.
+  `NumOverviews` count levels only. IFD 0 has the same cap, except that a strip file's
+  virtual tiles may exceed it when their strips hold the bytes to fill them
+  (`stripLayout.backed`).
 - **Internal masks**: a GDAL mask IFD (NewSubfileType bit 2 and Photometric 4, tiled, 1-8
   bit) is paired with the level of the same size and tiling. Masks are used only when
   level 0 has one; overviews without one are then dropped. `ReadTile` applies the mask
@@ -188,7 +196,9 @@ the CLI and the integration helpers both use it:
 
 `--fill-missing` is not an input of the mode choice: filling missing positions needs no
 decoding, so passthrough writes pre-encoded fill tiles (encoded in the source format) next
-to the copied ones.
+to the copied ones. They fill `fillBounds`: the header bounds, except that full-width
+(-180..180) bounds whose data crosses the antimeridian are narrowed to the shortest run of
+max-zoom columns round the globe that holds the data.
 
 Levels below the source's min zoom (requested with `--min-zoom`, or by default down to the
 zoom where all data fits in one tile) are added inside `tile.Transform` without forcing a
@@ -210,7 +220,8 @@ rebuild) and in rendered max-zoom tiles (geotiff2pmtiles).
 
 Source metadata keys that the writer does not derive (anything but name, description,
 format, type, minzoom, maxzoom, bounds, center, attribution, encoding) are passed through
-`WriterOptions.Extra`, and the output header keeps the source's exact E7 bounds.
+`WriterOptions.Extra`, and the output header keeps the source's exact E7 bounds and its
+centre (`WriterOptions.Center`, with the zoom clamped to the output range).
 
 ## Memory Efficiency
 
