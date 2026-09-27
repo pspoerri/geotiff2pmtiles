@@ -328,7 +328,9 @@ func TestMixedCRSSourcesLandInPlace(t *testing.T) {
 
 // EPSG:4326 grids whose longitudes run 0..360 or 190..260 render their part
 // past 180 into the western tiles, and a -180..180 source beside them keeps
-// its own convention.
+// its own convention. So do 0..360 grids with pixel centres from 0, whose
+// edge lies half a pixel west of it (as GDAL reads GRIB), including the
+// strip between that edge and Greenwich.
 func TestLon360SourcesRenderWest(t *testing.T) {
 	gray := func(v uint8) func(x, y int) [3]uint8 { return func(x, y int) [3]uint8 { return [3]uint8{v, v, v} } }
 	geographic := []uint16{1024, 2, 2048, 4326}
@@ -339,7 +341,10 @@ func TestLon360SourcesRenderWest(t *testing.T) {
 	srcs := openTestSources(t,
 		src(0, 80, 5, 72, 32, 100),    // 0..360
 		src(190, 40, 5, 16, 16, 150),  // 190..270
-		src(-180, 80, 5, 72, 32, 200)) // -180..180
+		src(-180, 80, 5, 72, 32, 200), // -180..180
+		src(-2.5, 80, 5, 72, 32, 120), // -2.5..357.5, centres 0..355
+		writeTestGeoTIFF(t, testGeoTIFF{W: 72, H: 32, TieX: 0, TieY: 80, Scale: 5, // the same as PixelIsPoint
+			GeoKeys: []uint16{1024, 2, 1025, 2, 2048, 4326}, RGB: gray(130)}))
 	for _, tt := range []struct {
 		name    string
 		src     int
@@ -355,6 +360,11 @@ func TestLon360SourcesRenderWest(t *testing.T) {
 		{"190..270 elsewhere", 1, 2, 30, 0, false},
 		{"-180..180 west", 2, 2, -150, 200, true},
 		{"-180..180 east", 2, 2, 30, 200, true},
+		{"centred 0..360 west", 3, 2, -150, 120, true},
+		{"centred 0..360 west of Greenwich", 3, 2, -1, 120, true},
+		{"centred 0..360 east", 3, 2, 30, 120, true},
+		{"PixelIsPoint 0..360 west", 4, 2, -150, 130, true},
+		{"PixelIsPoint 0..360 west of Greenwich", 4, 2, -1, 130, true},
 	} {
 		infos := mustSourceInfos(t, srcs[tt.src:tt.src+1])
 		tx, ty := coord.LonLatToTile(tt.lon, 20, tt.z)
@@ -367,6 +377,11 @@ func TestLon360SourcesRenderWest(t *testing.T) {
 		if visible := got[3] != 0; visible != tt.visible || visible && got[0] != tt.want {
 			t.Errorf("%s: pixel at lon %v = %v, want %d visible=%v", tt.name, tt.lon, got, tt.want, tt.visible)
 		}
+	}
+
+	// Grids that wrap at different longitudes need projections of their own.
+	if infos := mustSourceInfos(t, []*cog.Reader{srcs[0], srcs[3]}); infos[0].projIdx == infos[1].projIdx {
+		t.Error("0..360 grids with western edges 0 and -2.5 share a projection")
 	}
 }
 
