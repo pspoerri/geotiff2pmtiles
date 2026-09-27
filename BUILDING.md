@@ -2,7 +2,8 @@
 
 Requires Go (version in `go.mod`). Prebuilt binaries: see [README](README.md#installation).
 
-Install libwebp (only needed for lossy WebP):
+The default build uses CGo and links libwebp (for lossy WebP), so install it and a C
+compiler first. Skip this with `CGO=0` below, at the cost of lossless-only WebP:
 
 ```bash
 brew install webp                  # macOS
@@ -19,13 +20,15 @@ Then:
 ```bash
 make build            # geotiff2pmtiles
 make build-transform  # pmtransform
-make build-all        # all tools, into dist/
+make build-all        # geotiff2pmtiles, pmtransform, checkpmtiles, pmheader into dist/
 make build CGO=0      # without libwebp (lossless-only WebP)
 ```
 
-Or plain `go build ./cmd/geotiff2pmtiles/`. On Windows, run either from the
-[MSYS2](https://www.msys2.org) shell so libwebp is found; the Makefile adds `.exe` and links
-libwebp statically (pass `-ldflags "-extldflags=-static"` to a plain `go build`).
+Or plain `go build ./cmd/geotiff2pmtiles/` (`CGO_ENABLED=0 go build ...` without libwebp);
+`go build ./cmd/coginfo/` for coginfo, which the Makefile does not build. On Windows, run
+either from the [MSYS2](https://www.msys2.org) shell so libwebp is found; the Makefile adds
+`.exe` and links libwebp statically (pass `-ldflags "-extldflags=-static"` to a plain
+`go build`). coginfo, checkpmtiles and pmheader do not use libwebp.
 
 `make cross-all` cross-compiles geotiff2pmtiles. The Linux and macOS targets use CGo, so
 they need a C cross-compiler and libwebp for the target; `cross-windows*` builds with

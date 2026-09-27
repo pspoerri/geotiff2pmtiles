@@ -2,7 +2,38 @@
 
 Build instructions: [BUILDING.md](BUILDING.md). Code structure: [ARCHITECTURE.md](ARCHITECTURE.md).
 
-`make check` runs fmt, vet and the unit tests; plain `make` lists every target, grouped by purpose.
+`make check` runs `go fmt` (which rewrites files), `go vet` and `go test ./...`; plain
+`make` lists every target, grouped by purpose.
+
+## Tests
+
+Unit tests live next to the code in `internal/` and `cmd/` (the CLIs' flag handling,
+validation and helper functions). `internal/cog/tiffbuild_test.go` builds TIFF directories
+byte by byte, malformed ones included, for the parser tests, and provides `bytesSource`, a
+naive `ByteSource` that panics when the reader breaks the range contract.
+
+## Reproducing CI locally
+
+`make check` is a quick pre-commit pass, not what CI runs: CI fails on unformatted files
+instead of fixing them, uses the race detector, disables the test cache and checks the
+module files. The Linux job runs:
+
+```bash
+test -z "$(gofmt -l .)"                                  # formatting (lists offending files)
+go vet ./...
+go test -race -count=1 ./internal/... ./cmd/...          # unit tests
+go test -race -count=1 -timeout 120s -v ./integration/   # synthetic integration tests
+go mod tidy && git diff --exit-code go.mod go.sum        # module tidiness
+```
+
+The Windows jobs run the same tests without `-race` (mingw has no race runtime), and the
+release build cross-compiles the Linux and macOS binaries at `CGO_ENABLED=0`. To check that
+those configurations still compile:
+
+```bash
+CGO_ENABLED=0 go build ./...
+GOOS=windows GOARCH=amd64 go build ./...
+```
 
 ## Integration Tests
 
@@ -13,6 +44,9 @@ make test-integration            # Synthetic tests only (~8s, no download needed
 make test-integration-download   # Download all real satellite data (~1.2 GB total)
 make test-integration-all        # Download + run all tests
 ```
+
+Real-data tests skip themselves until their data is downloaded; once it is, `make test`
+and `make test-race` run them too.
 
 Eight real-data datasets are used, each exercising a different input type:
 
@@ -36,3 +70,6 @@ make example-swissimage-profile             # Run with CPU + memory profiling
 go tool pprof -http=:8080 dist/cpu.prof    # Interactive flame graph
 go tool pprof -http=:8081 dist/mem.prof    # Memory profile
 ```
+
+Any run can write profiles with `--cpu-profile <file>` and `--mem-profile <file>`
+(geotiff2pmtiles and pmtransform).
