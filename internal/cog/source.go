@@ -1,6 +1,7 @@
 package cog
 
 import (
+	"errors"
 	"fmt"
 	"io"
 )
@@ -15,13 +16,41 @@ import (
 type ByteSource interface {
 	// Size reports the total length of the source in bytes.
 	Size() int64
-	// Slice returns the bytes in [off, end). The result must not be mutated
-	// by the caller, and stays valid for as long as it is held. Slice is
-	// called concurrently by the tile generator's worker pool, so
-	// implementations must be safe for concurrent use.
+	// Slice returns the bytes in [off, end); the Reader only asks for
+	// 0 <= off <= end <= Size(), however corrupt the file's offsets are.
+	// The result must not be mutated, and is only valid until Close (for
+	// mmapSource it is a view of the mapping): callers that need the bytes
+	// afterwards must copy them. Slice is called concurrently by the tile
+	// generator's worker pool, so implementations must be safe for
+	// concurrent use.
 	Slice(off, end uint64) ([]byte, error)
 	io.Closer
 }
+
+// slice returns the size bytes at offset. The range comes from the file, so
+// it is checked against the source without overflow before Slice sees it.
+// what names the data in the error.
+func (r *Reader) slice(what string, offset, size uint64) ([]byte, error) {
+	n := uint64(r.src.Size())
+	if offset > n || size > n-offset {
+		if _, closed := r.src.(closedSource); closed {
+			return nil, errClosed
+		}
+		return nil, fmt.Errorf("%s [%d:+%d] exceeds file size %d", what, offset, size, n)
+	}
+	return r.src.Slice(offset, offset+size)
+}
+
+// errClosed is returned by reads from a closed Reader.
+var errClosed = errors.New("cog: reader is closed")
+
+// closedSource replaces a Reader's source on Close, so a later read fails
+// with an error instead of dereferencing a nil source.
+type closedSource struct{}
+
+func (closedSource) Size() int64                           { return 0 }
+func (closedSource) Slice(off, end uint64) ([]byte, error) { return nil, errClosed }
+func (closedSource) Close() error                          { return nil }
 
 // mmapSource is a ByteSource over a memory-mapped file. Slice hands back a
 // subslice of the mapping, so local reads stay allocation-free.

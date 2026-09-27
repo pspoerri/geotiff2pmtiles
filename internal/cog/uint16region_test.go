@@ -76,7 +76,7 @@ func uint16TiledReader(t *testing.T, w, h, tw, th, spp, emptyTile int) (*Reader,
 		TileOffsets:     offsets,
 		TileByteCounts:  counts,
 	}
-	return &Reader{bo: binary.LittleEndian, ifds: []IFD{ifd}, src: mmapSource(data)}, want
+	return &Reader{bo: binary.LittleEndian, ifds: []IFD{ifd}, src: bytesSource(data)}, want
 }
 
 // ReadUint16Region must return the stored samples, unscaled, for regions that
@@ -171,7 +171,7 @@ func TestReadUint16TileShortLastStrip(t *testing.T) {
 		SampleFormat: []uint16{1}, Compression: 1, PlanarConfig: 1, RowsPerStrip: 1,
 		StripOffsets: offs, StripByteCounts: counts}
 	sl := promoteStripsToTiles(&ifd)
-	r := &Reader{src: mmapSource(buf), bo: binary.LittleEndian, ifds: []IFD{ifd}, strip: sl}
+	r := &Reader{src: bytesSource(buf), bo: binary.LittleEndian, ifds: []IFD{ifd}, strip: sl}
 
 	s, _, _, _, err := r.ReadUint16Tile(0, 0, 1)
 	if err != nil {
@@ -191,7 +191,7 @@ func TestReadUint16TileEdgeLayouts(t *testing.T) {
 			SamplesPerPixel: 1, BitsPerSample: []uint16{bits}, SampleFormat: []uint16{1},
 			Compression: 1, PlanarConfig: planar,
 			TileOffsets: []uint64{0}, TileByteCounts: []uint64{uint64(len(data))}}
-		return &Reader{src: mmapSource(data), bo: binary.LittleEndian, ifds: []IFD{ifd}}
+		return &Reader{src: bytesSource(data), bo: binary.LittleEndian, ifds: []IFD{ifd}}
 	}
 	for _, tc := range []struct {
 		name string

@@ -84,8 +84,9 @@ func (b Bounds) CenterLat() float64 {
 	return (b.MinLat + b.MaxLat) / 2
 }
 
-// Reader provides tile-level access to a COG/GeoTIFF file.
-// The file is memory-mapped for lock-free concurrent access.
+// Reader provides tile-level access to a COG/GeoTIFF file. Its bytes come
+// from a ByteSource (the memory-mapped file for Open), which the tile readers
+// use lock-free and concurrently.
 type Reader struct {
 	bo    binary.ByteOrder
 	strip *stripLayout // non-nil for strip-based TIFFs promoted to virtual tiles
@@ -98,7 +99,7 @@ type Reader struct {
 	floodMask *bitmap
 
 	path       string
-	src        ByteSource // the file's bytes: memory-mapped by Open, anything by OpenSource
+	src        ByteSource // the file's bytes: memory-mapped by Open, anything by OpenSource, closedSource after Close
 	ifds       []IFD
 	geo        GeoInfo
 	bandCfg    BandConfig // band selection and rescaling config (set via SetBandConfig)
@@ -155,6 +156,9 @@ func Open(path string) (*Reader, error) {
 // requests against object storage, say -- goes through the same parser.
 // `name` is used for error messages and TFW sidecar lookup; for a remote
 // source the sidecar probe simply finds nothing.
+//
+// OpenSource takes ownership of src: it is closed if OpenSource fails, and by
+// Reader.Close otherwise, so the caller must not close it too.
 func OpenSource(name string, src ByteSource) (*Reader, error) {
 	path := name
 
@@ -292,14 +296,15 @@ func promoteStripsToTiles(ifd *IFD) *stripLayout {
 	return sl
 }
 
-// Close unmaps the memory-mapped file.
+// Close closes the underlying ByteSource (unmapping the file for Open).
+// Reads after Close return an error, and closing again does nothing.
 func (r *Reader) Close() error {
-	if r.src != nil {
-		err := r.src.Close()
-		r.src = nil
-		return err
+	if r.src == nil {
+		return nil
 	}
-	return nil
+	err := r.src.Close()
+	r.src = closedSource{}
+	return err
 }
 
 // Path returns the file path.
@@ -405,12 +410,7 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 		return nil, ifd, nil // empty tile
 	}
 
-	end := offset + size
-	if end > uint64(r.src.Size()) {
-		return nil, nil, fmt.Errorf("tile data [%d:%d] exceeds file size %d", offset, end, r.src.Size())
-	}
-
-	data, err := r.src.Slice(offset, end)
+	data, err := r.slice("tile data", offset, size)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -537,14 +537,9 @@ func (r *Reader) readStripsRaw(ifd *IFD, start, end int) ([]byte, error) {
 		if size == 0 {
 			continue
 		}
-		end := offset + size
-		if end > uint64(r.src.Size()) {
-			return nil, fmt.Errorf("strip %d data [%d:%d] exceeds file size %d", s, offset, end, r.src.Size())
-		}
-
-		chunk, err := r.src.Slice(offset, end)
+		chunk, err := r.slice("data", offset, size)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("strip %d: %w", s, err)
 		}
 
 		switch ifd.Compression {
@@ -907,7 +902,8 @@ func unpackBits(dst []uint16, data []byte, perRow, rows, bits, rowBytes int) {
 
 // ReadTile reads and decodes a single tile at the given column and row from the specified IFD level.
 // Level 0 is the full resolution; higher levels are overviews.
-// This is safe for concurrent use — the underlying data is memory-mapped read-only.
+// This is safe for concurrent use: the source is read-only and ByteSource
+// requires concurrent reads to be safe.
 func (r *Reader) ReadTile(level, col, row int) (image.Image, error) {
 	img, err := r.readTileDecoded(level, col, row)
 	if err != nil {
@@ -981,12 +977,7 @@ func (r *Reader) readTileDecoded(level, col, row int) (image.Image, error) {
 		return image.NewRGBA(image.Rect(0, 0, int(ifd.TileWidth), int(ifd.TileHeight))), nil
 	}
 
-	end := offset + size
-	if end > uint64(r.src.Size()) {
-		return nil, fmt.Errorf("tile data [%d:%d] exceeds file size %d", offset, end, r.src.Size())
-	}
-
-	data, err := r.src.Slice(offset, end)
+	data, err := r.slice("tile data", offset, size)
 	if err != nil {
 		return nil, err
 	}
@@ -1197,11 +1188,7 @@ func (r *Reader) decodePlanarSeparateJPEG(ifd *IFD, col, row, tilesAcross, tiles
 			planeSamples[p] = make([]uint8, tw*th) // zero plane
 			continue
 		}
-		end := offset + size
-		if end > uint64(r.src.Size()) {
-			return nil, fmt.Errorf("planar separate: tile [%d:%d] exceeds file size %d", offset, end, r.src.Size())
-		}
-		raw, err := r.src.Slice(offset, end)
+		raw, err := r.slice("planar separate: tile", offset, size)
 		if err != nil {
 			return nil, err
 		}
@@ -1773,17 +1760,22 @@ func (r *Reader) DebugIFD(level int) IFD {
 	return r.ifds[level]
 }
 
-// RawBytes returns n bytes from the memory-mapped data starting at offset.
+// RawBytes returns a copy of up to n bytes of the source starting at offset,
+// or nil when offset is at or past the end or the read fails.
 func (r *Reader) RawBytes(offset uint64, n int) []byte {
-	end := offset + uint64(n)
-	if end > uint64(r.src.Size()) {
-		end = uint64(r.src.Size())
+	size := uint64(r.src.Size())
+	if offset >= size || n <= 0 {
+		return nil
 	}
-	result := make([]byte, end-offset)
-	if b, err := r.src.Slice(offset, end); err == nil {
-		copy(result, b)
+	end := offset + uint64(n) // offset < size <= MaxInt64, so no overflow
+	if end > size {
+		end = size
 	}
-	return result
+	b, err := r.src.Slice(offset, end)
+	if err != nil {
+		return nil
+	}
+	return append([]byte(nil), b...)
 }
 
 // OpenAll opens multiple COG files and returns their readers.
