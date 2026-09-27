@@ -2,6 +2,7 @@ package cog
 
 import (
 	"encoding/binary"
+	"slices"
 	"testing"
 )
 
@@ -149,5 +150,68 @@ func TestUint16TileCacheCachesEmptyTiles(t *testing.T) {
 	}
 	if _, _, _, _, ok := local.Get(2, 0, 0, 0); ok {
 		t.Error("a Local view reported a hit for a tile never cached")
+	}
+}
+
+// TestReadUint16TileShortLastStrip checks that the short last virtual tile of
+// a 16-bit little-endian strip TIFF is read in the file's byte order, not
+// through the MSB-first bit unpacker (which byte-swapped it).
+func TestReadUint16TileShortLastStrip(t *testing.T) {
+	const w, h = 4, 300 // 256-row virtual tiles: the last one has 44 rows
+	buf := make([]byte, w*h*2)
+	for i := 0; i < w*h; i++ {
+		binary.LittleEndian.PutUint16(buf[i*2:], uint16(i))
+	}
+	offs := make([]uint64, h)
+	counts := make([]uint64, h)
+	for y := range offs {
+		offs[y], counts[y] = uint64(y*w*2), uint64(w*2)
+	}
+	ifd := IFD{Width: w, Height: h, SamplesPerPixel: 1, BitsPerSample: []uint16{16},
+		SampleFormat: []uint16{1}, Compression: 1, PlanarConfig: 1, RowsPerStrip: 1,
+		StripOffsets: offs, StripByteCounts: counts}
+	sl := promoteStripsToTiles(&ifd)
+	r := &Reader{src: mmapSource(buf), bo: binary.LittleEndian, ifds: []IFD{ifd}, strip: sl}
+
+	s, _, _, _, err := r.ReadUint16Tile(0, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := uint16(256 * w); s[0] != want {
+		t.Errorf("first sample of short tile = %d, want %d", s[0], want)
+	}
+}
+
+// TestReadUint16TileEdgeLayouts covers layouts that used to panic or error:
+// sub-byte depths (always packed, even when the length would fit one byte per
+// sample) and single-band planar-separate tiles (planar layout is moot).
+func TestReadUint16TileEdgeLayouts(t *testing.T) {
+	tile := func(w, h int, bits, planar uint16, data []byte) *Reader {
+		ifd := IFD{Width: uint32(w), Height: uint32(h), TileWidth: uint32(w), TileHeight: uint32(h),
+			SamplesPerPixel: 1, BitsPerSample: []uint16{bits}, SampleFormat: []uint16{1},
+			Compression: 1, PlanarConfig: planar,
+			TileOffsets: []uint64{0}, TileByteCounts: []uint64{uint64(len(data))}}
+		return &Reader{src: mmapSource(data), bo: binary.LittleEndian, ifds: []IFD{ifd}}
+	}
+	for _, tc := range []struct {
+		name string
+		r    *Reader
+		want []uint16
+	}{
+		{"1-bit 1x8", tile(1, 8, 1, 1, []byte{0x80, 0, 0x80, 0, 0, 0, 0, 0x80}), []uint16{1, 0, 1, 0, 0, 0, 0, 1}},
+		{"4-bit 2x2", tile(2, 2, 4, 1, []byte{0x12, 0x34}), []uint16{1, 2, 3, 4}},
+		{"16-bit planar=2 spp=1", tile(2, 1, 16, 2, []byte{0x10, 0, 0x20, 0}), []uint16{0x10, 0x20}},
+		// 4 packed 15-bit samples fill 8 bytes, the same as padded 16-bit words.
+		{"15-bit 4x1 packed", tile(4, 1, 15, 1, pack([]uint16{100, 101, 102, 103}, 4, 1, 15)), []uint16{100, 101, 102, 103}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _, _, err := tc.r.ReadUint16Tile(0, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(s, tc.want) {
+				t.Errorf("samples = %v, want %v", s, tc.want)
+			}
+		})
 	}
 }
