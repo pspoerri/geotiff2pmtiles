@@ -34,8 +34,8 @@ func checkSourceCRSs(sources []*cog.Reader) error {
 		}
 		checked[epsg] = true
 		switch proj := coord.ForEPSG(epsg); {
-		case proj == nil && epsg == 0:
-			return fmt.Errorf("%s has no CRS; set it with --source-epsg", src.Path())
+		case proj == nil && epsg == 0: // the reader guesses a CRS for any pixel grid
+			return fmt.Errorf("%s is not georeferenced: it has no GeoTIFF tags and no .tfw world file", src.Path())
 		case proj == nil && epsg == 32767: // GeoTIFF "user-defined"
 			return fmt.Errorf("%s: user-defined CRS is not supported; reproject to an EPSG CRS first (e.g. gdalwarp -t_srs EPSG:4326), or set its EPSG code with --source-epsg", src.Path())
 		case proj == nil:
