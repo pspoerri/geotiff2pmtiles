@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"io"
+	"log"
 	"math"
 	"os"
 	"regexp"
@@ -193,7 +194,8 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 
 	geo := parseGeoInfo(first)
 
-	// If GeoTIFF tags are absent, try a TFW sidecar.
+	// If GeoTIFF tags are absent, try a TFW sidecar. It only gives the pixel
+	// grid, so a CRS from the GeoKeys still applies.
 	if geo.PixelSizeX == 0 && geo.PixelSizeY == 0 {
 		if tfwPath := findTFW(path); tfwPath != "" {
 			tfw, err := parseTFW(tfwPath)
@@ -201,13 +203,18 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 				src.Close()
 				return nil, err
 			}
+			epsg := geo.EPSG
 			geo = tfw.toGeoInfo()
+			geo.EPSG = epsg
 		}
 	}
 
-	// Infer EPSG when GeoKeys didn't provide one.
+	// Infer EPSG when GeoKeys didn't provide one. The guess can be badly
+	// wrong (any metric grid outside Switzerland reads as Web Mercator), so
+	// say so.
 	if geo.EPSG == 0 && geo.PixelSizeX > 0 {
 		geo.EPSG = inferEPSG(geo, first.Width, first.Height)
+		log.Printf("WARNING: %s has no CRS in its GeoTIFF keys; guessed EPSG:%d from the coordinate ranges. If that is wrong, set the source CRS (--source-epsg)", path, geo.EPSG)
 	}
 
 	return &Reader{
@@ -353,9 +360,17 @@ func (r *Reader) BoundsInCRS() (minX, minY, maxX, maxY float64) {
 	return
 }
 
-// EPSG returns the detected EPSG code.
+// EPSG returns the source CRS: from the GeoKeys, guessed from a world file's
+// coordinate ranges, or as set by SetEPSG.
 func (r *Reader) EPSG() int {
 	return r.geo.EPSG
+}
+
+// SetEPSG overrides the source CRS, e.g. when the file carries none and the
+// guess from its coordinate ranges is wrong. Like SetBandConfig, call it
+// before the reader is shared with other goroutines.
+func (r *Reader) SetEPSG(epsg int) {
+	r.geo.EPSG = epsg
 }
 
 // readTileRaw reads and decompresses raw tile bytes at the given column and row.

@@ -92,8 +92,10 @@ func (tfw *TFW) toGeoInfo() GeoInfo {
 	}
 }
 
-// inferEPSG guesses the EPSG code from the coordinate ranges.
-// Falls back to EPSG:4326 (WGS84) when coordinates look like geographic lon/lat.
+// inferEPSG guesses the EPSG code from the coordinate ranges, for world-file
+// rasters without GeoKeys: EPSG:4326 for lon/lat-sized values, EPSG:2056 in
+// the Swiss LV95 box, EPSG:3857 for any other metric grid. OpenSource logs the
+// guess, and Reader.SetEPSG overrides it.
 func inferEPSG(info GeoInfo, width, height uint32) int {
 	maxX := info.OriginX + float64(width)*info.PixelSizeX
 	minY := info.OriginY - float64(height)*info.PixelSizeY
