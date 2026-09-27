@@ -1496,6 +1496,12 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Only the last virtual tile of a strip TIFF is legitimately short (see
+	// decodeRawFloat32Tile); a short tile is corrupt, such as truncated LZW,
+	// which decodes without error up to the damage.
+	if r.strip == nil && avail < w*h*spp*bps {
+		return nil, fmt.Errorf("tile data too short: %d of %d samples", avail/bps, w*h*spp)
+	}
 	if ifd.Photometric == 3 {
 		return r.expandPalette(ifd, buf, s16, avail, w, h, spp)
 	}

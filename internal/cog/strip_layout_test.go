@@ -150,3 +150,13 @@ func TestShortStripIsAnError(t *testing.T) {
 		t.Errorf("pixel (3,1) = %d, want 30", g)
 	}
 }
+
+// A tile is never legitimately short: truncated LZW rendered a transparent
+// tail with no error in the RGB path (the float path already failed).
+func TestShortTileIsAnError(t *testing.T) {
+	r := oneTileReader(4, 2, 8, 1, "", lzwLiterals([]byte{1, 2, 3, 4, 5}, true))
+	r.ifds[0].Compression = 5
+	if _, err := r.ReadTile(0, 0, 0); err == nil {
+		t.Error("ReadTile of a truncated LZW tile: expected an error")
+	}
+}
