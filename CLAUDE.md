@@ -30,7 +30,7 @@ Two main CLI tools in `cmd/`:
 - **geotiff2pmtiles** — COG → PMTiles conversion
 - **pmtransform** — PMTiles → PMTiles transformation (passthrough / re-encode / rebuild pyramid)
 
-Plus utilities: **pmheader** (patch header/metadata), **checkpmtiles** (validate an archive), **coginfo** (COG metadata), **debug** (low-level IFD dump).
+Plus utilities: **pmheader** (patch header/metadata), **checkpmtiles** (validate an archive), **coginfo** (COG metadata; `-raw` for a low-level IFD/tile dump). Shared CLI helpers live in `internal/cli`.
 
 Core packages in `internal/`:
 - **cog/** — Memory-mapped TIFF/COG reader, IFD parsing, GeoTIFF tags, TFW sidecar (with EPSG inference from coordinate ranges), LRU tile cache, strip-to-tile promotion
