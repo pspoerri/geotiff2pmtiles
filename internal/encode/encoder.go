@@ -13,7 +13,6 @@ const (
 	TileTypePNG     = 2
 	TileTypeJPEG    = 3
 	TileTypeWebP    = 4
-	TileTypeAVIF    = 5
 )
 
 // Encoder encodes an image into tile bytes.
