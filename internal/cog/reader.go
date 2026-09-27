@@ -1952,6 +1952,8 @@ func CheckCoverageGaps(sources []*Reader) []CoverageGap {
 
 // MergedBoundsWGS84 computes the WGS84 bounding box that covers all sources.
 // Sources with an unknown projection are assumed to already be in WGS84.
+// Corners the projection cannot transform are skipped; it panics if no
+// corner of any source transforms, since every bound would be garbage.
 func MergedBoundsWGS84(sources []*Reader) Bounds {
 	if len(sources) == 0 {
 		return Bounds{}
@@ -1966,6 +1968,7 @@ func MergedBoundsWGS84(sources []*Reader) Bounds {
 
 	// Sources usually share one CRS; build each projection once.
 	projs := map[int]coord.Projection{}
+	finite := 0
 
 	for _, src := range sources {
 		minX, minY, maxX, maxY := src.BoundsInCRS()
@@ -1990,6 +1993,10 @@ func MergedBoundsWGS84(sources []*Reader) Bounds {
 
 		for _, c := range corners {
 			lon, lat := proj.ToWGS84(c[0], c[1])
+			if math.IsNaN(lon) || math.IsInf(lon, 0) || math.IsNaN(lat) || math.IsInf(lat, 0) {
+				continue
+			}
+			finite++
 
 			if lon < merged.MinLon {
 				merged.MinLon = lon
@@ -2004,6 +2011,9 @@ func MergedBoundsWGS84(sources []*Reader) Bounds {
 				merged.MaxLat = lat
 			}
 		}
+	}
+	if finite == 0 {
+		panic(fmt.Sprintf("cog: no corner of %d source(s) in EPSG:%d transforms to WGS84", len(sources), sources[0].EPSG()))
 	}
 
 	return merged

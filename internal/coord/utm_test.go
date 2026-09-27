@@ -81,7 +81,11 @@ func TestCRSFallback_MatchesExact(t *testing.T) {
 		if !ok {
 			t.Fatalf("ForEPSG(%d) is not CRSFallback", tc.epsg)
 		}
-		wantX, wantY, _, err := p.fromWGS84(tc.lon, tc.lat, 0)
+		exact, err := crs.Transform(4326, tc.epsg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantX, wantY, _, err := exact(tc.lon, tc.lat, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
