@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"image/color"
@@ -59,6 +60,7 @@ func main() {
 		nodataFlood     bool
 		resamplingGamma float64
 		tmpDirFlag      string
+		sourceEPSG      int
 	)
 
 	flag.StringVar(&format, "format", "auto", "Tile encoding: auto, jpeg, png, webp, terrarium (auto: terrarium for float/signed-int elevation data, webp when nodata is active, else jpeg)")
@@ -82,10 +84,11 @@ func main() {
 	flag.StringVar(&layerType, "type", "baselayer", "Layer type: baselayer, overlay")
 	flag.StringVar(&bandsStr, "bands", "auto", "1-indexed band numbers for R,G,B, e.g. \"4,1,2\" for NIR-R-G (auto: 1,2,3; gray from band 1 for 1-2 band input)")
 	flag.StringVar(&alphaBandStr, "alpha-band", "auto", "Alpha band: auto (band 4 of 8-bit input with 4+ bands), none, or a 1-indexed band number")
-	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, linear, log, none (auto: GDAL band-description preset if present, else linear over --rescale-range for 16-bit input, none for 8-bit; ignored for terrarium)")
-	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range min,max for rescaling, min < max (default: from GDAL statistics, else sampled pixels, over all bands; the selected range is logged)")
-	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this integer in [-32768, 65535] are transparent (default: from the GDAL_NODATA tag). Ignored for terrarium, which uses the tag only")
-	flag.StringVar(&nodataTolStr, "nodata-tolerance", "", "Per-band tolerance applied to --nodata matching (default 0 = exact match). Useful for lossy-JPEG borders where strict 0 is smeared to 1..5; try 4–8.")
+	flag.StringVar(&rescaleStr, "rescale", "auto", "Rescale mode: auto, linear, log, none (auto: GDAL band-description preset if present, else linear over --rescale-range for 9-16-bit input, none for 8-bit; none maps the full range of the sample type, e.g. 0..65535 or -32768..32767 for Int16, to 0..255; ignored for terrarium)")
+	flag.StringVar(&rescaleRange, "rescale-range", "", "Input value range min,max for rescaling, min < max (default: min/max over all sources of the bands selected by --bands, never the alpha band, from GDAL STATISTICS_* metadata when every selected band has them, else a scan of up to 64 tiles of the coarsest overview; sources without usable values, e.g. all-nodata ocean tiles, are skipped; the selected range is logged)")
+	flag.StringVar(&nodataStr, "nodata", "", "Nodata value: pixels with all bands equal to this value are transparent (default: from the GDAL_NODATA tag). RGB outputs: an integer in [-32768, 65535]; terrarium: any float, overriding GDAL_NODATA of every source")
+	flag.StringVar(&nodataTolStr, "nodata-tolerance", "", "Per-band tolerance applied to --nodata matching (default 0 = exact match). Useful for lossy-JPEG borders where strict 0 is smeared to 1..5; try 4–8. RGB outputs only")
+	flag.IntVar(&sourceEPSG, "source-epsg", 0, "EPSG code of the input CRS for every input file, e.g. 32632, 25832 or 21781; overrides the GeoTIFF keys and the guess made for world-file (.tfw) inputs (0 = from the files)")
 	flag.BoolVar(&nodataFlood, "nodata-flood", false, "Source-level flood-fill from the COG outer edges through near-nodata pixels. Only edge-reachable pixels are made transparent; interior dark pixels (text, shadows, canopy) stay opaque. Requires --nodata; pair with a widened --nodata-tolerance (e.g. 40) for scanned/JPEG sources. Costs ~W*H/8 bytes of RAM per source. Not for terrarium output.")
 
 	flag.Usage = func() {
@@ -151,6 +154,9 @@ func main() {
 	if resamplingGamma <= 0 {
 		log.Fatalf("--resampling-gamma must be > 0, got %g", resamplingGamma)
 	}
+	if sourceEPSG < 0 {
+		log.Fatalf("--source-epsg must be an EPSG code, got %d", sourceEPSG)
+	}
 
 	// Resolve resampling method.
 	resamplingMode, err := tile.ParseResampling(resampling)
@@ -194,21 +200,27 @@ func main() {
 		log.Printf("Opened %d COG(s) in %v", len(sources), time.Since(start).Round(time.Millisecond))
 	}
 
-	// All sources are projected with the first file's CRS.
-	for _, src := range sources {
-		if src.EPSG() != sources[0].EPSG() {
-			log.Fatalf("%s is in EPSG:%d but %s is in EPSG:%d; all inputs must share one CRS, reproject them first (e.g. gdalwarp -t_srs EPSG:4326)",
-				src.Path(), src.EPSG(), sources[0].Path(), sources[0].EPSG())
+	if sourceEPSG > 0 {
+		for _, src := range sources {
+			src.SetEPSG(sourceEPSG)
 		}
+		log.Printf("Source CRS: EPSG:%d (from --source-epsg)", sourceEPSG)
+	}
+
+	// Every source is reprojected with its own CRS, so inputs may mix CRSs
+	// (e.g. Sentinel-2 tiles from several UTM zones). Reject unknown ones
+	// before they turn into bounds and zoom levels.
+	if err := checkSourceCRSs(sources); err != nil {
+		log.Fatal(err)
 	}
 
 	// Check for geographic holes in coverage.
-	gaps := cog.CheckCoverageGaps(sources)
+	gaps := coverageGaps(sources)
 	if len(gaps) > 0 {
 		log.Printf("WARNING: Detected %d geographic hole(s) in the input coverage:", len(gaps))
 		for i, g := range gaps {
-			log.Printf("  Hole %d: X [%.1f, %.1f], Y [%.1f, %.1f] (source CRS)",
-				i+1, g.MinX, g.MaxX, g.MinY, g.MaxY)
+			log.Printf("  Hole %d: X [%.1f, %.1f], Y [%.1f, %.1f] (EPSG:%d)",
+				i+1, g.MinX, g.MaxX, g.MinY, g.MaxY, g.epsg)
 		}
 	}
 
@@ -234,9 +246,9 @@ func main() {
 				format, src.Path(), src.FormatDescription())
 		}
 	}
-	if format == "terrarium" && (nodataStr != "" || nodataTolStr != "" || nodataFlood) {
-		log.Printf("WARNING: --nodata, --nodata-tolerance and --nodata-flood are ignored for terrarium output; only the GDAL_NODATA tag is used")
-		nodataStr, nodataTolStr, nodataFlood = "", "", false
+	if format == "terrarium" && (nodataTolStr != "" || nodataFlood) {
+		log.Printf("WARNING: --nodata-tolerance and --nodata-flood are ignored for terrarium output")
+		nodataTolStr, nodataFlood = "", false
 	}
 	if format == "terrarium" && resamplingGamma != 1.0 {
 		log.Printf("WARNING: --resampling-gamma has no effect for terrarium output")
@@ -253,7 +265,18 @@ func main() {
 	}
 
 	// Apply nodata: CLI override takes precedence, then preset/IFD auto-detection.
-	if nodataStr != "" {
+	// Terrarium reads the float samples, where any value can mark nodata;
+	// without --nodata each source's GDAL_NODATA tag applies.
+	var floatNodata *float64
+	if format == "terrarium" {
+		if nodataStr != "" {
+			v, err := strconv.ParseFloat(strings.TrimSpace(nodataStr), 64)
+			if err != nil {
+				log.Fatalf("--nodata: must be a number, got %q", nodataStr)
+			}
+			floatNodata = &v
+		}
+	} else if nodataStr != "" {
 		v, err := strconv.ParseFloat(strings.TrimSpace(nodataStr), 64)
 		if err != nil || v < -32768 || v > 65535 || v != math.Floor(v) {
 			log.Fatalf("--nodata: must be an integer in [-32768, 65535], got %q", nodataStr)
@@ -373,10 +396,6 @@ func main() {
 		log.Printf("Flood masks built in %v", time.Since(buildStart).Round(time.Millisecond))
 	}
 
-	if _, ok := coord.ForEPSG(sources[0].EPSG()).(*coord.CRSFallback); ok {
-		log.Printf("Note: EPSG:%d has no native implementation, falling back to github.com/wroge/crs projection.", sources[0].EPSG())
-	}
-
 	// Compute merged bounds in WGS84.
 	mergedBounds, err := cog.MergedBoundsWGS84(sources)
 	if err != nil {
@@ -387,8 +406,9 @@ func main() {
 			mergedBounds.MinLon, mergedBounds.MaxLon, mergedBounds.MinLat, mergedBounds.MaxLat)
 	}
 
-	// Determine zoom levels.
-	pixelSizeMeters := coord.PixelSizeInGroundMeters(sources[0].PixelSize(), sources[0].EPSG(), mergedBounds.CenterLat())
+	// Determine zoom levels: the auto max zoom keeps the finest source's
+	// detail.
+	pixelSizeMeters := finestPixelSize(sources, mergedBounds.CenterLat())
 	autoMax := coord.MaxZoomForResolution(pixelSizeMeters, mergedBounds.CenterLat(), tileSize)
 	if maxZoom < 0 {
 		maxZoom = autoMax
@@ -489,6 +509,7 @@ func main() {
 		Resampling:       resamplingMode,
 		ResamplingGamma:  resamplingGamma,
 		IsTerrarium:      format == "terrarium",
+		FloatNodata:      floatNodata,
 		NodataColor:      nodataFill,
 		FillMissing:      missingFill,
 		MemoryLimitBytes: memoryLimitBytes,
@@ -593,7 +614,7 @@ func isTIFF(name string) bool {
 	return strings.HasSuffix(lower, ".tif") || strings.HasSuffix(lower, ".tiff")
 }
 
-func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog.CoverageGap,
+func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []crsGap,
 	format string, quality int, tileSize int, minZoom, maxZoom int, resampling string, resamplingGamma float64, nodataFill, missingFill *color.RGBA, bandCfg cog.BandConfig) string {
 
 	var b strings.Builder
@@ -638,33 +659,32 @@ func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []cog
 
 	b.WriteString("\n")
 
-	epsg := sources[0].EPSG()
-	b.WriteString(fmt.Sprintf("Source: %d GeoTIFF file(s), EPSG:%d\n", len(sources), epsg))
-
-	mergedMinX, mergedMinY := math.MaxFloat64, math.MaxFloat64
-	mergedMaxX, mergedMaxY := -math.MaxFloat64, -math.MaxFloat64
-	for _, src := range sources {
-		minX, minY, maxX, maxY := src.BoundsInCRS()
-		if minX < mergedMinX {
-			mergedMinX = minX
-		}
-		if minY < mergedMinY {
-			mergedMinY = minY
-		}
-		if maxX > mergedMaxX {
-			mergedMaxX = maxX
-		}
-		if maxY > mergedMaxY {
-			mergedMaxY = maxY
-		}
+	var epsgs []string
+	for _, epsg := range sourceEPSGs(sources) {
+		epsgs = append(epsgs, fmt.Sprintf("EPSG:%d", epsg))
 	}
-	b.WriteString(fmt.Sprintf("  Extent (CRS): [%.2f, %.2f] - [%.2f, %.2f]\n",
-		mergedMinX, mergedMinY, mergedMaxX, mergedMaxY))
+	b.WriteString(fmt.Sprintf("Source: %d GeoTIFF file(s), %s\n", len(sources), strings.Join(epsgs, ", ")))
 
+	// A merged extent and pixel size in CRS units only mean something
+	// when all sources share the CRS.
+	pixelSize := fmt.Sprintf("%.3g m (finest source, on the ground)", finestPixelSize(sources, mergedBounds.CenterLat()))
+	if len(epsgs) == 1 {
+		mergedMinX, mergedMinY := math.MaxFloat64, math.MaxFloat64
+		mergedMaxX, mergedMaxY := -math.MaxFloat64, -math.MaxFloat64
+		finest := math.Inf(1)
+		for _, src := range sources {
+			minX, minY, maxX, maxY := src.BoundsInCRS()
+			mergedMinX, mergedMinY = min(mergedMinX, minX), min(mergedMinY, minY)
+			mergedMaxX, mergedMaxY = max(mergedMaxX, maxX), max(mergedMaxY, maxY)
+			finest = min(finest, src.PixelSize())
+		}
+		b.WriteString(fmt.Sprintf("  Extent (CRS): [%.2f, %.2f] - [%.2f, %.2f]\n",
+			mergedMinX, mergedMinY, mergedMaxX, mergedMaxY))
+		pixelSize = fmt.Sprintf("%g", finest)
+	}
 	b.WriteString(fmt.Sprintf("  Extent (WGS84): [%.6f, %.6f] - [%.6f, %.6f]\n",
 		mergedBounds.MinLon, mergedBounds.MinLat, mergedBounds.MaxLon, mergedBounds.MaxLat))
-
-	b.WriteString(fmt.Sprintf("  Pixel size: %g\n", sources[0].PixelSize()))
+	b.WriteString(fmt.Sprintf("  Pixel size: %s\n", pixelSize))
 
 	b.WriteString(fmt.Sprintf("  Data: %s\n", sources[0].FormatDescription()))
 
@@ -792,16 +812,47 @@ func resolveRescaleRange(rescaleRange string, sources []*cog.Reader, cfg cog.Ban
 		}
 		return minV, maxV, nil
 	}
+	ranges := make([]sourceRange, len(sources))
+	for i, src := range sources {
+		r := &ranges[i]
+		r.path = src.Path()
+		r.lo, r.hi, r.origin, r.err = src.ValueRange(cfg)
+	}
+	return mergeValueRanges(ranges)
+}
+
+// sourceRange is the result of one source's ValueRange.
+type sourceRange struct {
+	path   string
+	lo, hi float64
+	origin string
+	err    error
+}
+
+// mergeValueRanges returns the union of the sources' value ranges. With
+// several sources, one without usable values (all nodata, such as an
+// open-ocean tile of a composite) is skipped; any other error fails.
+func mergeValueRanges(ranges []sourceRange) (float64, float64, error) {
+	const hint = "\n  Hint: set it explicitly, e.g. --rescale-range 0,5000"
 	minV, maxV := math.Inf(1), math.Inf(-1)
 	origins := map[string]bool{}
-	for _, src := range sources {
-		lo, hi, origin, err := src.ValueRange(cfg)
-		if err != nil {
-			return 0, 0, fmt.Errorf("auto rescale range: %s: %w\n"+
-				"  Hint: set it explicitly, e.g. --rescale-range 0,5000", src.Path(), err)
+	var skipped []string
+	for _, r := range ranges {
+		if errors.Is(r.err, cog.ErrNoValueRange) && len(ranges) > 1 {
+			skipped = append(skipped, r.path)
+			continue
 		}
-		minV, maxV = math.Min(minV, lo), math.Max(maxV, hi)
-		origins[origin] = true
+		if r.err != nil {
+			return 0, 0, fmt.Errorf("auto rescale range: %s: %w"+hint, r.path, r.err)
+		}
+		minV, maxV = math.Min(minV, r.lo), math.Max(maxV, r.hi)
+		origins[r.origin] = true
+	}
+	if len(origins) == 0 {
+		return 0, 0, fmt.Errorf("auto rescale range: %w in any of the %d sources"+hint, cog.ErrNoValueRange, len(ranges))
+	}
+	if len(skipped) > 0 {
+		log.Printf("Auto rescale range: skipped %d source(s) without usable values (all nodata?), e.g. %s", len(skipped), skipped[0])
 	}
 	log.Printf("Auto rescale range: [%g, %g] (from %s)", minV, maxV, strings.Join(slices.Sorted(maps.Keys(origins)), " + "))
 	return minV, maxV, nil
