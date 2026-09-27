@@ -168,6 +168,12 @@ func TestSyncMetadataKeepsForm(t *testing.T) {
 	if _, ok := meta["center"]; ok {
 		t.Error("a key the metadata lacked was added")
 	}
+
+	// A format stored as something other than a string becomes the name.
+	meta = map[string]any{"format": 2.0}
+	if !syncMetadata(meta, patchOptions{tileTypeStr: "png"}, pmtiles.Header{TileType: pmtiles.TileTypePNG}) || meta["format"] != "png" {
+		t.Errorf("format = %#v, want \"png\"", meta["format"])
+	}
 }
 
 // Uncompressed directories and metadata, with leaves two levels deep: the

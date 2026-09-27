@@ -570,13 +570,17 @@ func syncMetadata(meta map[string]any, opts patchOptions, h pmtiles.Header) bool
 		var v any = s
 		switch old.(type) {
 		case float64:
-			v = nums[0]
-		case []any:
-			arr := make([]any, len(nums))
-			for i, n := range nums {
-				arr[i] = n
+			if len(nums) == 1 {
+				v = nums[0]
 			}
-			v = arr
+		case []any:
+			if len(nums) > 0 {
+				arr := make([]any, len(nums))
+				for i, n := range nums {
+					arr[i] = n
+				}
+				v = arr
+			}
 		}
 		if !reflect.DeepEqual(old, v) {
 			meta[key] = v

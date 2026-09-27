@@ -590,4 +590,11 @@ func TestTransformPassthrough_AddsLowerLevels(t *testing.T) {
 			t.Error("the source level was not copied as-is")
 		}
 	}
+
+	// Adding levels needs an encoder: an error, not a nil dereference.
+	cfg := TransformConfig{MinZoom: 0, MaxZoom: 2, TileSize: tileSize, Concurrency: 1,
+		SourceFormat: "png", Mode: TransformPassthrough, Bounds: bounds, OutputDir: t.TempDir()}
+	if _, err := Transform(cfg, reader, newMockTileWriter()); err == nil {
+		t.Error("adding levels without an encoder: want an error")
+	}
 }
