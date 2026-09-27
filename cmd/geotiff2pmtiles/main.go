@@ -714,12 +714,15 @@ func buildDescription(sources []*cog.Reader, mergedBounds cog.Bounds, gaps []crs
 		mergedBounds.MinLon, mergedBounds.MinLat, mergedBounds.MaxLon, mergedBounds.MaxLat))
 	b.WriteString(fmt.Sprintf("  Pixel size: %s\n", pixelSize))
 
-	b.WriteString(fmt.Sprintf("  Data: %s\n", sources[0].FormatDescription()))
+	b.WriteString(fmt.Sprintf("  Data: %s", sources[0].FormatDescription()))
 
-	if len(gaps) == 0 {
-		b.WriteString("  Holes: none")
-	} else {
-		b.WriteString(fmt.Sprintf("  Holes: %d gap(s)", len(gaps)))
+	// Holes are only looked for within one CRS (see coverageGaps).
+	switch {
+	case len(epsgs) > 1:
+	case len(gaps) == 0:
+		b.WriteString("\n  Holes: none")
+	default:
+		b.WriteString(fmt.Sprintf("\n  Holes: %d gap(s)", len(gaps)))
 	}
 
 	return b.String()
