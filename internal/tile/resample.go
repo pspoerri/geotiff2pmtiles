@@ -68,13 +68,24 @@ type sourceInfo struct {
 // different UTM zones) can be mixed. Sources sharing an EPSG code share one
 // Projection, which CRSFallback needs for its datum-shift cache.
 // floatNodata, when set, replaces every source's GDAL_NODATA in the float path.
+//
+// An EPSG:4326 source whose longitudes run past 180 from 0 or more (a 0..360
+// grid, or a Pacific 100..260 one) gets a WGS84Identity with Lon360 set, so
+// that western longitudes are sampled at lon+360. The 1e-6° margins keep a
+// world raster ending at 180.0000001 in the usual convention.
 func buildSourceInfos(sources []*cog.Reader, floatNodata *float64) ([]sourceInfo, error) {
-	projIdx := map[int]int{}
+	type projKey struct {
+		epsg   int
+		lon360 bool
+	}
+	projIdx := map[projKey]int{}
 	var projs []coord.Projection
 	infos := make([]sourceInfo, len(sources))
 	for i, src := range sources {
 		epsg := src.EPSG()
-		idx, ok := projIdx[epsg]
+		minX, minY, maxX, maxY := src.BoundsInCRS()
+		key := projKey{epsg, epsg == 4326 && minX >= -1e-6 && maxX > 180+1e-6}
+		idx, ok := projIdx[key]
 		if !ok {
 			proj := coord.ForEPSG(epsg)
 			if proj == nil {
@@ -83,15 +94,17 @@ func buildSourceInfos(sources []*cog.Reader, floatNodata *float64) ([]sourceInfo
 				}
 				return nil, fmt.Errorf("%s: unsupported EPSG code: %d", src.Path(), epsg)
 			}
+			if key.lon360 {
+				proj = &coord.WGS84Identity{Lon360: true}
+			}
 			idx = len(projs)
-			projIdx[epsg] = idx
+			projIdx[key] = idx
 			projs = append(projs, proj)
 		}
 		nodata := parseFloatNodata(src.NoData())
 		if floatNodata != nil {
 			nodata = float64(float32(*floatNodata)) // as stored, see parseFloatNodata
 		}
-		minX, minY, maxX, maxY := src.BoundsInCRS()
 		infos[i] = sourceInfo{
 			reader:  src,
 			proj:    projs[idx],
@@ -191,6 +204,14 @@ func prepareTileSources(srcInfos []sourceInfo, z, tx, ty, tileSize int) []tileSo
 // all four corners and taking the extremes.
 func tileCRSBounds(z, tx, ty int, proj coord.Projection) (minX, minY, maxX, maxY float64) {
 	minLon, minLat, maxLon, maxLat := coord.TileBounds(z, tx, ty)
+	if w, ok := proj.(*coord.WGS84Identity); ok && w.Lon360 && minLon < 0 {
+		// Lon360 jumps by 360 at Greenwich, which a western tile's east
+		// corners sit on (and the z0 tile spans): shift the tile whole.
+		if maxLon > 0 {
+			return 0, minLat, 360, maxLat
+		}
+		return minLon + 360, minLat, maxLon + 360, maxLat
+	}
 	x1, y1 := proj.FromWGS84(minLon, minLat)
 	x2, y2 := proj.FromWGS84(minLon, maxLat)
 	x3, y3 := proj.FromWGS84(maxLon, minLat)
