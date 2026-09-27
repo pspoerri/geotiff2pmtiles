@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"image"
 	"sync"
+	"sync/atomic"
 )
 
 // tileKey identifies a tile within a specific file and IFD level.
@@ -301,9 +302,16 @@ func (fc *FloatTileCache) Put(id int, level, col, row int, data []float32, width
 type Uint16TileCache struct {
 	shards [shardCount]uint16CacheShard
 
+	hits, misses atomic.Int64
+
 	// Set only on views created by Local.
 	parent *Uint16TileCache
 	memo   [4]uint16CacheEntry
+}
+
+// Stats reports cumulative hits and misses, for sizing the cache.
+func (uc *Uint16TileCache) Stats() (hits, misses int64) {
+	return uc.hits.Load(), uc.misses.Load()
 }
 
 // Local returns a single-goroutine view of uc; see TileCache.Local.
@@ -376,6 +384,11 @@ func (uc *Uint16TileCache) Get(id int, level, col, row int) (data []uint16, widt
 		data, width, height, spp, ok = e.data, e.width, e.height, e.spp, true
 	}
 	sh.mu.Unlock()
+	if ok {
+		uc.hits.Add(1)
+	} else {
+		uc.misses.Add(1)
+	}
 	return data, width, height, spp, ok
 }
 
