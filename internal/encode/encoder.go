@@ -3,6 +3,7 @@ package encode
 import (
 	"fmt"
 	"image"
+	"image/draw"
 )
 
 // TileType constants matching PMTiles v3 spec.
@@ -16,6 +17,11 @@ const (
 )
 
 // Encoder encodes an image into tile bytes.
+//
+// Pipeline tiles are *image.RGBA buffers holding straight (non-premultiplied)
+// alpha, not the premultiplied values the image package defines for that
+// type. Encoders read an *image.RGBA's Pix as straight and any other image
+// through its At colours with the usual Go semantics.
 type Encoder interface {
 	// Encode encodes an image to bytes in the tile format.
 	Encode(img image.Image) ([]byte, error)
@@ -58,3 +64,19 @@ func Formats() string {
 // WebPLossy reports whether this build encodes lossy WebP (and so honours
 // --quality for WebP).
 const WebPLossy = webpCGOAvailable
+
+// asNRGBA returns img as a straight-alpha *image.NRGBA. A pipeline
+// *image.RGBA is re-typed over the same Pix without copying, so the standard
+// library does not un-premultiply it a second time; other images are converted.
+func asNRGBA(img image.Image) *image.NRGBA {
+	switch m := img.(type) {
+	case *image.NRGBA:
+		return m
+	case *image.RGBA:
+		return &image.NRGBA{Pix: m.Pix, Stride: m.Stride, Rect: m.Rect}
+	}
+	b := img.Bounds()
+	n := image.NewNRGBA(b)
+	draw.Draw(n, b, img, b.Min, draw.Src)
+	return n
+}

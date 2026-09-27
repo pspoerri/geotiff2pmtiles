@@ -690,7 +690,9 @@ func fillEmptyTiles(cfg TransformConfig, reader PMTilesReader, writer TileWriter
 	}, nil
 }
 
-// imageToRGBA converts an image.Image to *image.RGBA.
+// imageToRGBA converts an encode.DecodeImage result to *image.RGBA. Images
+// with alpha already come back as straight-alpha *image.RGBA and pass through,
+// so draw.Draw, which would premultiply, only ever sees opaque images.
 func imageToRGBA(img image.Image) *image.RGBA {
 	if rgba, ok := img.(*image.RGBA); ok {
 		return rgba

@@ -15,7 +15,7 @@ type TerrariumEncoder struct{}
 func (e *TerrariumEncoder) Encode(img image.Image) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := &png.Encoder{CompressionLevel: png.BestSpeed}
-	err := enc.Encode(&buf, img)
+	err := enc.Encode(&buf, asNRGBA(img))
 	if err != nil {
 		return nil, err
 	}

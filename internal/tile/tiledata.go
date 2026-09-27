@@ -15,7 +15,8 @@ import (
 //
 // For a 256×256 tile: uniform ≈ 0 B, gray = 64 KB, RGBA = 256 KB.
 // TileData implements image.Image so it can be passed directly to encoders
-// without expansion.
+// without expansion. Colours hold straight (non-premultiplied) alpha, like
+// every pipeline *image.RGBA, so At reports them as color.NRGBA.
 type TileData struct {
 	img      *image.RGBA // non-nil for normal (multi-color, multi-channel) tiles
 	gray     *image.Gray // non-nil for single-channel tiles (R=G=B, A=255)
@@ -135,7 +136,7 @@ func (t *TileData) AsImage() image.Image {
 // --- image.Image interface ---
 
 func (t *TileData) ColorModel() color.Model {
-	return color.RGBAModel
+	return color.NRGBAModel
 }
 
 func (t *TileData) Bounds() image.Rectangle {
@@ -149,14 +150,7 @@ func (t *TileData) Bounds() image.Rectangle {
 }
 
 func (t *TileData) At(x, y int) color.Color {
-	if t.img != nil {
-		return t.img.At(x, y)
-	}
-	if t.gray != nil {
-		v := t.gray.GrayAt(x, y).Y
-		return color.RGBA{R: v, G: v, B: v, A: 255}
-	}
-	return t.color
+	return color.NRGBA(t.RGBAAt(x, y))
 }
 
 // --- Uniform and gray detection ---

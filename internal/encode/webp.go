@@ -11,7 +11,6 @@ import "C"
 import (
 	"fmt"
 	"image"
-	"image/draw"
 	"unsafe"
 )
 
@@ -29,7 +28,8 @@ func newWebPEncoder(quality int) (Encoder, error) {
 }
 
 func (e *WebPEncoder) Encode(img image.Image) ([]byte, error) {
-	rgba := imageToRGBA(img)
+	// WebPEncodeRGBA takes straight (non-premultiplied) RGBA bytes.
+	rgba := asNRGBA(img)
 	bounds := rgba.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
@@ -58,7 +58,9 @@ func (e *WebPEncoder) Format() string        { return "webp" }
 func (e *WebPEncoder) PMTileType() uint8     { return TileTypeWebP }
 func (e *WebPEncoder) FileExtension() string { return ".webp" }
 
-// DecodeWebP decodes WebP image bytes using native libwebp.
+// DecodeWebP decodes WebP image bytes using native libwebp. WebPDecodeRGBA
+// returns straight alpha, which the *image.RGBA result keeps (the pipeline
+// convention, see Encoder).
 func DecodeWebP(data []byte) (image.Image, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("webp: empty data")
@@ -84,14 +86,4 @@ func DecodeWebP(data []byte) (image.Image, error) {
 	src := unsafe.Slice((*byte)(unsafe.Pointer(ptr)), totalBytes)
 	copy(img.Pix, src)
 	return img, nil
-}
-
-func imageToRGBA(img image.Image) *image.RGBA {
-	if rgba, ok := img.(*image.RGBA); ok {
-		return rgba
-	}
-	bounds := img.Bounds()
-	rgba := image.NewRGBA(bounds)
-	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
-	return rgba
 }

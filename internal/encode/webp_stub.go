@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"fmt"
 	"image"
-	"image/draw"
 
 	"github.com/HugoSmits86/nativewebp"
 	"golang.org/x/image/webp"
@@ -30,7 +29,7 @@ func (e *WebPEncoder) Encode(img image.Image) ([]byte, error) {
 		return nil, fmt.Errorf("webp: empty image")
 	}
 	var buf bytes.Buffer
-	if err := nativewebp.Encode(&buf, img, nil); err != nil {
+	if err := nativewebp.Encode(&buf, asNRGBA(img), nil); err != nil {
 		return nil, fmt.Errorf("webp: %w", err)
 	}
 	return buf.Bytes(), nil
@@ -47,14 +46,4 @@ func DecodeWebP(data []byte) (image.Image, error) {
 		return nil, fmt.Errorf("webp: %w", err)
 	}
 	return img, nil
-}
-
-func imageToRGBA(img image.Image) *image.RGBA {
-	if rgba, ok := img.(*image.RGBA); ok {
-		return rgba
-	}
-	bounds := img.Bounds()
-	rgba := image.NewRGBA(bounds)
-	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
-	return rgba
 }

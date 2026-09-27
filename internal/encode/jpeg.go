@@ -17,6 +17,13 @@ func (e *JPEGEncoder) Encode(img image.Image) ([]byte, error) {
 	if quality <= 0 {
 		quality = 85
 	}
+	// JPEG has no alpha: write straight RGB and drop alpha, as the
+	// *image.RGBA fast path does, rather than compositing other image types
+	// (such as a semi-transparent uniform tile) onto black.
+	if _, ok := img.(*image.RGBA); !ok {
+		n := asNRGBA(img)
+		img = &image.RGBA{Pix: n.Pix, Stride: n.Stride, Rect: n.Rect}
+	}
 	err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality})
 	if err != nil {
 		return nil, err
