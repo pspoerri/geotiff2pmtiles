@@ -42,14 +42,14 @@ func TestOpenTFWEPSG(t *testing.T) {
 		gkProjectedCSTypeGeoKey, 0, 1, 32632)
 
 	tests := []struct {
-		name     string
-		extra    []tagEntry
-		wantEPSG int
-		wantWarn bool
+		name        string
+		extra       []tagEntry
+		wantEPSG    int
+		wantGuessed bool
 	}{
 		// The world file gives only the pixel grid; the GeoKeys CRS stays.
 		{"geokeys-and-tfw", []tagEntry{utm32}, 32632, false},
-		// No CRS anywhere: the guess from the coordinate ranges is logged.
+		// No CRS anywhere: the CRS is guessed from the coordinate ranges.
 		{"tfw-only", nil, 3857, true},
 	}
 	for _, tt := range tests {
@@ -68,9 +68,13 @@ func TestOpenTFWEPSG(t *testing.T) {
 			if g := r.GeoInfo(); g.OriginX != 500000 || g.OriginY != 5300000 || g.PixelSizeX != 10 {
 				t.Errorf("GeoInfo() = %+v, want the world file's grid", g)
 			}
-			warned := strings.Contains(logs.String(), path) && strings.Contains(logs.String(), "EPSG:3857")
-			if warned != tt.wantWarn {
-				t.Errorf("log %q: warning naming the file and guess = %v, want %v", logs, warned, tt.wantWarn)
+			if got := r.EPSGGuessed(); got != tt.wantGuessed {
+				t.Errorf("EPSGGuessed() = %v, want %v", got, tt.wantGuessed)
+			}
+			// The caller warns, once for all files and only if it does not
+			// set the CRS itself.
+			if logs.Len() != 0 {
+				t.Errorf("Open logged %q", logs)
 			}
 		})
 	}
@@ -86,5 +90,8 @@ func TestSetEPSG(t *testing.T) {
 	r.SetEPSG(32632)
 	if got := r.EPSG(); got != 32632 {
 		t.Errorf("EPSG() after SetEPSG(32632) = %d", got)
+	}
+	if r.EPSGGuessed() {
+		t.Error("EPSGGuessed() after SetEPSG = true")
 	}
 }
