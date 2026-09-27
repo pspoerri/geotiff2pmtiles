@@ -292,6 +292,10 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							tr := store.Get(childZ, 2*x+1, 2*y)
 							bl := store.Get(childZ, 2*x, 2*y+1)
 							br := store.Get(childZ, 2*x+1, 2*y+1)
+							if err := store.Err(); err != nil {
+								cancel(err)
+								return
+							}
 							if fillTileShared != nil {
 								// Reuse the shared fill tile instead of allocating
 								// a new uniform TileData per nil child.
@@ -351,7 +355,10 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 						// Store for next zoom level's downsampling, reusing the
 						// already-encoded bytes for efficient disk storage.
 						if z > cfg.MinZoom {
-							nextStore.Put(z, x, y, td, data)
+							if err := nextStore.Put(z, x, y, td, data); err != nil {
+								cancel(err)
+								return
+							}
 						}
 
 						td.Release()
@@ -369,11 +376,15 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 
 		// Drain the I/O goroutine so all tiles are on disk before the
 		// next zoom level starts reading from this store.
-		nextStore.Drain()
+		drainErr := nextStore.Drain()
 
-		// Check for errors.
+		// Check for errors: the first worker error, then any spill error
+		// that no worker saw before the level ended.
 		err := context.Cause(ctx)
 		cancel(nil)
+		if err == nil {
+			err = drainErr
+		}
 		if err != nil {
 			nextStore.Close()
 			return Stats{}, err

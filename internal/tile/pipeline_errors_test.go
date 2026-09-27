@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -293,5 +294,41 @@ func TestTransformRebuild_ErrorRemovesSpillFiles(t *testing.T) {
 	}
 	if left := spillFiles(t, cfg.OutputDir); len(left) > 0 {
 		t.Errorf("spill files left after the error: %v", left)
+	}
+}
+
+// A spill file that cannot be written must fail the run.
+func TestTransformRebuild_SpillWriteErrorFails(t *testing.T) {
+	cfg := worldTransformConfig(t, TransformRebuild, 3)
+	cfg.OutputDir = filepath.Join(cfg.OutputDir, "missing")
+
+	if _, err := Transform(cfg, noiseReader(t, 3, cfg.TileSize), newMockTileWriter()); err == nil {
+		t.Fatal("Transform succeeded although no spill file could be created")
+	}
+}
+
+// A spilled tile that cannot be read back must fail the run instead of
+// being downsampled as a missing (transparent) quadrant.
+func TestTransformRebuild_SpillReadErrorFails(t *testing.T) {
+	cfg := worldTransformConfig(t, TransformRebuild, 3)
+	cfg.Concurrency = 1
+	var once sync.Once
+	w := &failingWriter{hook: func(z int) {
+		if z != 2 {
+			return
+		}
+		// The z3 spill file is complete; lose its contents once the
+		// first z2 tile has been built from it.
+		once.Do(func() {
+			for _, p := range spillFiles(t, cfg.OutputDir) {
+				if err := os.Truncate(p, 0); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}}
+
+	if _, err := Transform(cfg, noiseReader(t, 3, cfg.TileSize), w); err == nil {
+		t.Fatal("Transform succeeded although spilled tiles could not be read back")
 	}
 }

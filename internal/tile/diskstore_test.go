@@ -3,7 +3,9 @@ package tile
 import (
 	"image/color"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -342,10 +344,64 @@ func TestDiskTileStore_BackpressureNoDeadlock(t *testing.T) {
 		case <-time.After(10 * time.Second):
 			t.Fatalf("round %d: Put stuck in the backpressure wait (memBytes=%d)", r, store.memBytes.Load())
 		}
-		store.Drain()
+		if err := store.Drain(); err != nil {
+			t.Fatalf("round %d: Drain: %v", r, err)
+		}
 		if n := store.Len(); n != producers*puts {
 			t.Fatalf("round %d: Len = %d, want %d", r, n, producers*puts)
 		}
 		store.Close()
+	}
+}
+
+// --- I/O errors ---
+
+// A spill file that cannot be created must fail the zoom level instead of
+// being logged while the tiles silently pile up in memory.
+func TestDiskTileStore_SpillCreateErrorSurfaces(t *testing.T) {
+	store := NewDiskTileStore(DiskTileStoreConfig{
+		TileSize:         4,
+		TempDir:          filepath.Join(t.TempDir(), "missing"),
+		MemoryLimitBytes: 1024 * 1024,
+		Format:           "png",
+	})
+	defer store.Close()
+
+	td := newTileData(grayCheckerImage(4, 10, 20), 4)
+	store.Put(1, 0, 0, td, encodePNG(t, td))
+	if err := store.Drain(); err == nil {
+		t.Fatal("Drain: want an error when the spill file cannot be created")
+	}
+	// The tile never reached disk but is still readable from memory.
+	if store.Get(1, 0, 0) == nil {
+		t.Error("tile lost after the spill error")
+	}
+}
+
+// A spilled tile that cannot be read back must be reported, not returned
+// as nil, which the pyramid would treat as a missing tile.
+func TestDiskTileStore_ReadBackErrorSurfaces(t *testing.T) {
+	store := NewDiskTileStore(DiskTileStoreConfig{
+		TileSize:         4,
+		TempDir:          t.TempDir(),
+		MemoryLimitBytes: 1024 * 1024,
+		Format:           "png",
+	})
+	defer store.Close()
+
+	td := newTileData(grayCheckerImage(4, 10, 20), 4)
+	store.Put(1, 0, 0, td, encodePNG(t, td))
+	if err := store.Drain(); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if err := os.Truncate(store.TempFilePath(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if store.Get(1, 0, 0) != nil {
+		t.Fatal("Get of a truncated spill file returned a tile")
+	}
+	if err := store.Err(); err == nil || !strings.Contains(err.Error(), "z1/0/0") {
+		t.Errorf("Err = %v, want a read error naming z1/0/0", err)
 	}
 }

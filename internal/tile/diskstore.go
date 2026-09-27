@@ -89,6 +89,9 @@ type DiskTileStore struct {
 	drainOnce sync.Once      // ensures Drain() is idempotent
 	verbose   bool
 
+	// First spill write, read-back or decode error; see Err.
+	err atomic.Pointer[error]
+
 	// Stats (updated by I/O goroutine only, read after Drain).
 	totalDiskTiles int64 // tiles written to disk
 	totalDiskBytes int64 // total encoded bytes on disk
@@ -176,7 +179,10 @@ func NewDiskTileStore(cfg DiskTileStoreConfig) *DiskTileStore {
 // non-uniform tiles (e.g., from the output encoder).
 // If disk spilling is enabled, non-uniform tiles are also sent to the
 // dedicated I/O goroutine for eventual eviction from memory.
-func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) {
+//
+// Spilling happens in the background, so the returned error is the store's
+// first I/O error so far (see Err), not necessarily one about this tile.
+func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) error {
 	key := [3]int{z, x, y}
 
 	// Uniform tiles are tiny (4 bytes) — keep as TileData, never spill.
@@ -185,7 +191,7 @@ func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) {
 		s.uniforms[key] = td
 		s.mu.Unlock()
 		s.mapOverhead.Add(mapOverheadUniform)
-		return
+		return s.Err()
 	}
 
 	// Store encoded bytes in memory (much smaller than raw pixels:
@@ -218,11 +224,29 @@ func (s *DiskTileStore) Put(z, x, y int, td *TileData, encoded []byte) {
 		}
 		s.spillMu.Unlock()
 	}
+	return s.Err()
+}
+
+// Err returns the first spill write, read-back or decode error, or nil.
+// A tile that could not be read back makes Get return nil, which callers
+// cannot tell apart from a missing tile, so check Err before trusting the
+// result of a zoom level.
+func (s *DiskTileStore) Err() error {
+	if p := s.err.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// setErr records err unless an earlier error is already recorded.
+func (s *DiskTileStore) setErr(err error) {
+	s.err.CompareAndSwap(nil, &err)
 }
 
 // Get retrieves tile data. Checks uniform tiles first, then decodes in-memory
 // encoded bytes, then falls back to reading from disk.
-// Returns nil if the tile is not present anywhere.
+// Returns nil if the tile is not present anywhere, or if it cannot be read
+// back; the latter is recorded and reported by Err.
 func (s *DiskTileStore) Get(z, x, y int) *TileData {
 	key := [3]int{z, x, y}
 
@@ -240,7 +264,7 @@ func (s *DiskTileStore) Get(z, x, y int) *TileData {
 
 	// In-memory encoded tile: decode back to pixel data.
 	if enc != nil {
-		return s.decodeEncoded(enc)
+		return s.decodeEncoded(key, enc)
 	}
 
 	// Slow path: read encoded bytes from disk.
@@ -249,25 +273,30 @@ func (s *DiskTileStore) Get(z, x, y int) *TileData {
 	}
 
 	// Load the file handle (lock-free). ReadAt uses pread under the hood,
-	// so concurrent reads are safe without any mutex.
+	// so concurrent reads are safe without any mutex. It is only nil once
+	// Close has run.
 	f := s.readFile.Load()
 	if f == nil {
+		s.setErr(fmt.Errorf("disk tile store: tile z%d/%d/%d read after Close", z, x, y))
 		return nil
 	}
 
 	buf := make([]byte, de.length)
 	_, err := f.ReadAt(buf, de.offset)
 	if err != nil {
+		s.setErr(fmt.Errorf("disk tile store: reading tile z%d/%d/%d: %w", z, x, y, err))
 		return nil
 	}
 
-	return s.decodeEncoded(buf)
+	return s.decodeEncoded(key, buf)
 }
 
-// decodeEncoded decodes encoded image bytes (from memory or disk) back to a TileData.
-func (s *DiskTileStore) decodeEncoded(data []byte) *TileData {
+// decodeEncoded decodes encoded image bytes (from memory or disk) back to a
+// TileData. A decode error is recorded (see Err) and returns nil.
+func (s *DiskTileStore) decodeEncoded(key [3]int, data []byte) *TileData {
 	img, err := encode.DecodeImage(data, s.format)
 	if err != nil {
+		s.setErr(fmt.Errorf("disk tile store: decoding tile z%d/%d/%d: %w", key[0], key[1], key[2], err))
 		return nil
 	}
 
@@ -298,6 +327,11 @@ func (s *DiskTileStore) decodeEncoded(data []byte) *TileData {
 // Invariant: a non-uniform tile is always in either s.encoded or s.index
 // (or both during the brief window inside the critical section).
 // A Get() will always find it.
+//
+// The first create or write error is recorded (see Err) and ends spilling:
+// a short write would shift every later offset, and the zoom level fails
+// anyway. Later tiles stay in s.encoded, but their bytes are still released
+// so that no Put() is left waiting on the memory limit.
 func (s *DiskTileStore) ioLoop() {
 	defer s.ioWg.Done()
 
@@ -305,11 +339,17 @@ func (s *DiskTileStore) ioLoop() {
 	var fileOff int64 // current write position (local, no sharing)
 
 	for req := range s.ioCh {
+		if s.Err() != nil {
+			s.release(req.memBytes)
+			continue
+		}
+
 		// Lazily create the temp file on first write.
 		if file == nil {
 			f, err := os.CreateTemp(s.dir, "pmtiles-tilestore-*.tmp")
 			if err != nil {
-				log.Printf("WARNING: disk tile store: failed to create temp file: %v (tile stays in memory)", err)
+				s.setErr(fmt.Errorf("disk tile store: creating spill file: %w", err))
+				s.release(req.memBytes)
 				continue
 			}
 			file = f
@@ -321,7 +361,8 @@ func (s *DiskTileStore) ioLoop() {
 
 		n, err := file.Write(req.encoded)
 		if err != nil {
-			log.Printf("WARNING: disk tile store: write error: %v (tile stays in memory)", err)
+			s.setErr(fmt.Errorf("disk tile store: writing spill file: %w", err))
+			s.release(req.memBytes)
 			continue
 		}
 
@@ -339,25 +380,29 @@ func (s *DiskTileStore) ioLoop() {
 		s.mapOverhead.Add(mapOverheadIndex)
 		s.totalDiskTiles++
 		s.totalDiskBytes += int64(n)
-
-		// Release the bytes and wake blocked Put() calls. The decrement
-		// happens under spillMu: a Put() that has just seen memBytes over
-		// the limit holds spillMu until Wait has registered it, so the
-		// Broadcast cannot fall between its check and its Wait and be lost.
-		s.spillMu.Lock()
-		s.memBytes.Add(-req.memBytes)
-		s.spillMu.Unlock()
-		s.memCond.Broadcast()
+		s.release(req.memBytes)
 	}
 }
 
-// Drain blocks until all pending I/O operations are complete.
+// release subtracts n bytes from memBytes and wakes blocked Put() calls.
+// The decrement happens under spillMu: a Put() that has just seen memBytes
+// over the limit holds spillMu until Wait has registered it, so the
+// Broadcast cannot fall between its check and its Wait and be lost.
+func (s *DiskTileStore) release(n int64) {
+	s.spillMu.Lock()
+	s.memBytes.Add(-n)
+	s.spillMu.Unlock()
+	s.memCond.Broadcast()
+}
+
+// Drain blocks until all pending I/O operations are complete and returns
+// the store's first I/O error (see Err).
 // Must be called after all Put() calls are done and before any subsequent
 // Get() calls on tiles that may have been spilled to disk (typically between
 // zoom levels in the generator).
-func (s *DiskTileStore) Drain() {
+func (s *DiskTileStore) Drain() error {
 	if s.ioCh == nil {
-		return
+		return s.Err()
 	}
 	s.drainOnce.Do(func() {
 		close(s.ioCh)
@@ -367,6 +412,7 @@ func (s *DiskTileStore) Drain() {
 				s.totalDiskTiles, float64(s.totalDiskBytes)/(1024*1024))
 		}
 	})
+	return s.Err()
 }
 
 // Len returns the total number of stored tiles (uniform + encoded in-memory + disk).

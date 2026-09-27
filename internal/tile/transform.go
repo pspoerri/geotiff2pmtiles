@@ -523,6 +523,10 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 							tr := store.Get(childZ, 2*x+1, 2*y)
 							bl := store.Get(childZ, 2*x, 2*y+1)
 							br := store.Get(childZ, 2*x+1, 2*y+1)
+							if err := store.Err(); err != nil {
+								cancel(err)
+								return
+							}
 							// Substitute nil children with the shared fill tile
 							// so downsample operates on 4 tiles.
 							if fillTileShared != nil {
@@ -578,7 +582,10 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 						}
 
 						if z > cfg.MinZoom {
-							nextStore.Put(z, x, y, td, data)
+							if err := nextStore.Put(z, x, y, td, data); err != nil {
+								cancel(err)
+								return
+							}
 						}
 
 						if td != fillTileShared {
@@ -596,10 +603,13 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 		wg.Wait()
 		pb.Finish()
 
-		nextStore.Drain()
+		drainErr := nextStore.Drain()
 
 		err := context.Cause(ctx)
 		cancel(nil)
+		if err == nil {
+			err = drainErr
+		}
 		if err != nil {
 			nextStore.Close()
 			return Stats{}, err
