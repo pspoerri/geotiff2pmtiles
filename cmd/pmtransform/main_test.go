@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
+	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
 	"github.com/pspoerri/geotiff2pmtiles/internal/pmtiles"
 )
 
@@ -64,6 +65,70 @@ func TestDerivedMetadataKeysCoverTheWriter(t *testing.T) {
 		if !slices.Contains(derivedMetadataKeys, k) {
 			t.Errorf("the writer derives %q, which derivedMetadataKeys lacks", k)
 		}
+	}
+}
+
+// writeArchive writes an archive with the given bounds and a tile at each
+// of the given positions.
+func writeArchive(t *testing.T, bounds cog.Bounds, maxZoom int, tiles ...[3]int) *pmtiles.Reader {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "src.pmtiles")
+	w, err := pmtiles.NewWriter(path, pmtiles.WriterOptions{
+		MaxZoom: maxZoom, TileSize: 256, TileFormat: pmtiles.TileTypePNG, Bounds: bounds,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range tiles {
+		if err := w.WriteTile(p[0], p[1], p[2], []byte{byte(p[1])}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := pmtiles.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close() })
+	return r
+}
+
+// Data across the antimeridian is recorded as -180..180, but fill tiles
+// belong only in the columns around the data, not around the globe.
+func TestFillBounds(t *testing.T) {
+	columns := func(r *pmtiles.Reader) []int {
+		b := fillBounds(r)
+		var cols []int
+		for _, p := range coord.TilesInBounds(3, float64(b[0]), float64(b[1]), float64(b[2]), float64(b[3])) {
+			if !slices.Contains(cols, p[1]) {
+				cols = append(cols, p[1])
+			}
+		}
+		slices.Sort(cols)
+		return cols
+	}
+
+	// 179°E to 179°W at z3: columns 7 and 0.
+	am := writeArchive(t, cog.Bounds{MinLon: 179, MinLat: -17, MaxLon: 181, MaxLat: -16}, 3,
+		[3]int{3, 7, 4}, [3]int{3, 0, 4})
+	if got := columns(am); !slices.Equal(got, []int{0, 7}) {
+		t.Errorf("antimeridian archive: fill columns %v, want [0 7]", got)
+	}
+
+	// A regional archive keeps its bounds.
+	ch := writeArchive(t, cog.Bounds{MinLon: 6, MinLat: 46, MaxLon: 10, MaxLat: 48}, 3, [3]int{3, 4, 2})
+	if got, want := fillBounds(ch), [4]float32{6, 46, 10, 48}; got != want {
+		t.Errorf("regional archive: fill bounds %v, want %v", got, want)
+	}
+
+	// Full-width bounds with data that does not cross the antimeridian (a
+	// sparse global archive) keep the full width.
+	global := writeArchive(t, cog.Bounds{MinLon: -180, MinLat: -60, MaxLon: 180, MaxLat: 60}, 3,
+		[3]int{3, 2, 3}, [3]int{3, 5, 3})
+	if got := columns(global); len(got) != 8 {
+		t.Errorf("global archive: fill columns %v, want all 8", got)
 	}
 }
 
