@@ -102,8 +102,8 @@ func TestHeaderSerialize_Bounds(t *testing.T) {
 	gotMaxLon := readE7(110)
 	gotMaxLat := readE7(114)
 
-	// Bounds pass through float32 and E7 encoding, so allow for precision loss.
-	tol := 1e-4
+	// E7 encoding keeps bounds to 1e-7 degrees.
+	tol := 1e-7
 	if math.Abs(gotMinLon-bounds.MinLon) > tol {
 		t.Errorf("minLon = %v, want ~%v", gotMinLon, bounds.MinLon)
 	}
@@ -229,6 +229,72 @@ func TestLonLatToE7(t *testing.T) {
 		if math.Abs(float64(gotSigned-tt.want)) > 100 {
 			t.Errorf("lonLatToE7(%v) = %d, want ~%d", tt.input, gotSigned, tt.want)
 		}
+	}
+}
+
+// readHeaderE7 returns MinLon, MinLat, MaxLon, MaxLat, CenterLon, CenterLat
+// of a serialized header in E7 units.
+func readHeaderE7(buf []byte) [6]int32 {
+	var e7 [6]int32
+	for i, off := range []int{102, 106, 110, 114, 119, 123} {
+		e7[i] = int32(binary.LittleEndian.Uint32(buf[off : off+4]))
+	}
+	return e7
+}
+
+// Bounds must not pass through float32 (7.6e-6 degree spacing at 64-128)
+// before E7 encoding, and the rounding must keep the data inside the bbox.
+func TestNewHeader_BoundsE7(t *testing.T) {
+	tests := []struct {
+		bounds cog.Bounds
+		want   [6]int32
+	}{
+		{ // Decimal inputs stay exact: no floor/ceil off-by-one.
+			cog.Bounds{MinLon: 5.95, MinLat: 45.82, MaxLon: 10.49, MaxLat: 47.81},
+			[6]int32{59_500_000, 458_200_000, 104_900_000, 478_100_000, 82_200_000, 468_150_000},
+		},
+		{ // float32 turned these into -451234550, 471234550, 1800000000.
+			cog.Bounds{MinLon: -179.9999999, MinLat: -45.1234567, MaxLon: 179.9999999, MaxLat: 47.1234567},
+			[6]int32{-1_799_999_999, -451_234_567, 1_799_999_999, 471_234_567, 0, 10_000_000},
+		},
+		{ // Sub-E7 digits: minimums round down, maximums up, center to nearest.
+			cog.Bounds{MinLon: 5.12345678, MinLat: -5.12345678, MaxLon: 6.12345671, MaxLat: -4.12345671},
+			[6]int32{51_234_567, -51_234_568, 61_234_568, -41_234_567, 56_234_567, -46_234_567},
+		},
+	}
+	for _, tt := range tests {
+		h := NewHeader(WriterOptions{Bounds: tt.bounds})
+		if got := readHeaderE7(h.Serialize()); got != tt.want {
+			t.Errorf("NewHeader(%+v) E7 = %v, want %v", tt.bounds, got, tt.want)
+		}
+	}
+}
+
+// Reading and rewriting a header (pmheader patching the zoom, say) must
+// keep the bounds bit for bit, while a changed field still takes effect.
+func TestHeader_RoundTripKeepsE7(t *testing.T) {
+	want := [6]int32{-1_799_999_999, -451_234_567, 1_799_999_999, 471_234_567, 1_234_567, -851_234_567}
+	src := (&Header{}).Serialize()
+	for i, off := range []int{102, 106, 110, 114, 119, 123} {
+		binary.LittleEndian.PutUint32(src[off:off+4], uint32(want[i]))
+	}
+
+	h, err := DeserializeHeader(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readHeaderE7(h.Serialize()); got != want {
+		t.Errorf("round trip E7 = %v, want %v", got, want)
+	}
+	b := h.Bounds()
+	if b.MinLat != -45.1234567 || b.MaxLat != 47.1234567 || b.MaxLon != 179.9999999 {
+		t.Errorf("Bounds() = %+v, want the exact E7 values", b)
+	}
+
+	h.MaxLat = 50
+	want[3] = 500_000_000
+	if got := readHeaderE7(h.Serialize()); got != want {
+		t.Errorf("after setting MaxLat: E7 = %v, want %v", got, want)
 	}
 }
 

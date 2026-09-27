@@ -55,10 +55,19 @@ type Header struct {
 	MinZoom             uint8
 	MaxZoom             uint8
 	CenterZoom          uint8
+
+	// e7 is MinLon, MinLat, MaxLon, MaxLat, CenterLon, CenterLat in the
+	// file's E7 units, as NewHeader computed them from float64 degrees or
+	// DeserializeHeader read them. float32 cannot hold 1e-7 degree steps
+	// (its spacing is 7.6e-6 degrees between 64 and 128), so Serialize
+	// writes these for every field still equal to e7ToLonLat of its value,
+	// i.e. not changed by the caller since.
+	e7 [6]uint32
 }
 
 // NewHeader creates a header with basic metadata.
 func NewHeader(opts WriterOptions) Header {
+	b := opts.Bounds
 	h := Header{
 		Clustered:           true,
 		InternalCompression: CompressionGzip,
@@ -66,15 +75,44 @@ func NewHeader(opts WriterOptions) Header {
 		TileType:            opts.TileFormat,
 		MinZoom:             uint8(opts.MinZoom),
 		MaxZoom:             uint8(opts.MaxZoom),
-		MinLon:              float32(opts.Bounds.MinLon),
-		MinLat:              float32(opts.Bounds.MinLat),
-		MaxLon:              float32(opts.Bounds.MaxLon),
-		MaxLat:              float32(opts.Bounds.MaxLat),
 		CenterZoom:          uint8((opts.MinZoom + opts.MaxZoom) / 2),
-		CenterLon:           float32((opts.Bounds.MinLon + opts.Bounds.MaxLon) / 2),
-		CenterLat:           float32((opts.Bounds.MinLat + opts.Bounds.MaxLat) / 2),
+		// Minimums round down and maximums up, so the bbox contains the data.
+		e7: [6]uint32{
+			degToE7(b.MinLon, math.Floor), degToE7(b.MinLat, math.Floor),
+			degToE7(b.MaxLon, math.Ceil), degToE7(b.MaxLat, math.Ceil),
+			degToE7((b.MinLon+b.MaxLon)/2, math.Round), degToE7((b.MinLat+b.MaxLat)/2, math.Round),
+		},
 	}
+	h.setLonLatFromE7()
 	return h
+}
+
+// setLonLatFromE7 sets the float32 bounds and center fields from h.e7.
+func (h *Header) setLonLatFromE7() {
+	h.MinLon, h.MinLat = e7ToLonLat(h.e7[0]), e7ToLonLat(h.e7[1])
+	h.MaxLon, h.MaxLat = e7ToLonLat(h.e7[2]), e7ToLonLat(h.e7[3])
+	h.CenterLon, h.CenterLat = e7ToLonLat(h.e7[4]), e7ToLonLat(h.e7[5])
+}
+
+// boundsE7 returns MinLon, MinLat, MaxLon, MaxLat, CenterLon, CenterLat in
+// E7 units: the exact recorded value, or the float32 field's value for a
+// field the caller has changed.
+func (h Header) boundsE7() [6]uint32 {
+	e7 := h.e7
+	for i, v := range [6]float32{h.MinLon, h.MinLat, h.MaxLon, h.MaxLat, h.CenterLon, h.CenterLat} {
+		if e7ToLonLat(e7[i]) != v {
+			e7[i] = lonLatToE7(v)
+		}
+	}
+	return e7
+}
+
+// Bounds returns the bounds at the file format's full 1e-7 degree
+// precision; the float32 fields are off by up to 7.6e-6 degrees (~0.85 m).
+func (h Header) Bounds() cog.Bounds {
+	e7 := h.boundsE7()
+	deg := func(v uint32) float64 { return float64(int32(v)) / 1e7 }
+	return cog.Bounds{MinLon: deg(e7[0]), MinLat: deg(e7[1]), MaxLon: deg(e7[2]), MaxLat: deg(e7[3])}
 }
 
 // Serialize writes the 127-byte header.
@@ -107,14 +145,15 @@ func (h *Header) Serialize() []byte {
 	buf[101] = h.MaxZoom
 
 	// Bounds as E7 (int32 * 1e7) encoded in little-endian
-	binary.LittleEndian.PutUint32(buf[102:106], lonLatToE7(h.MinLon))
-	binary.LittleEndian.PutUint32(buf[106:110], lonLatToE7(h.MinLat))
-	binary.LittleEndian.PutUint32(buf[110:114], lonLatToE7(h.MaxLon))
-	binary.LittleEndian.PutUint32(buf[114:118], lonLatToE7(h.MaxLat))
+	e7 := h.boundsE7()
+	binary.LittleEndian.PutUint32(buf[102:106], e7[0])
+	binary.LittleEndian.PutUint32(buf[106:110], e7[1])
+	binary.LittleEndian.PutUint32(buf[110:114], e7[2])
+	binary.LittleEndian.PutUint32(buf[114:118], e7[3])
 
 	buf[118] = h.CenterZoom
-	binary.LittleEndian.PutUint32(buf[119:123], lonLatToE7(h.CenterLon))
-	binary.LittleEndian.PutUint32(buf[123:127], lonLatToE7(h.CenterLat))
+	binary.LittleEndian.PutUint32(buf[119:123], e7[4])
+	binary.LittleEndian.PutUint32(buf[123:127], e7[5])
 
 	return buf
 }
@@ -150,14 +189,17 @@ func DeserializeHeader(buf []byte) (Header, error) {
 		TileType:            buf[99],
 		MinZoom:             buf[100],
 		MaxZoom:             buf[101],
-		MinLon:              e7ToLonLat(binary.LittleEndian.Uint32(buf[102:106])),
-		MinLat:              e7ToLonLat(binary.LittleEndian.Uint32(buf[106:110])),
-		MaxLon:              e7ToLonLat(binary.LittleEndian.Uint32(buf[110:114])),
-		MaxLat:              e7ToLonLat(binary.LittleEndian.Uint32(buf[114:118])),
 		CenterZoom:          buf[118],
-		CenterLon:           e7ToLonLat(binary.LittleEndian.Uint32(buf[119:123])),
-		CenterLat:           e7ToLonLat(binary.LittleEndian.Uint32(buf[123:127])),
+		e7: [6]uint32{
+			binary.LittleEndian.Uint32(buf[102:106]),
+			binary.LittleEndian.Uint32(buf[106:110]),
+			binary.LittleEndian.Uint32(buf[110:114]),
+			binary.LittleEndian.Uint32(buf[114:118]),
+			binary.LittleEndian.Uint32(buf[119:123]),
+			binary.LittleEndian.Uint32(buf[123:127]),
+		},
 	}
+	h.setLonLatFromE7()
 
 	return h, nil
 }
@@ -184,6 +226,17 @@ func TileTypeString(t uint8) string {
 
 func lonLatToE7(v float32) uint32 {
 	return uint32(int32(math.Round(float64(v) * 1e7)))
+}
+
+// degToE7 converts degrees to E7 units with the given rounding. v*1e7 can
+// land a hair off an integer for decimal input such as 45.82; snapping
+// that first keeps floor/ceil from turning it into 45.8199999/45.8200001.
+func degToE7(v float64, round func(float64) float64) uint32 {
+	e := v * 1e7
+	if r := math.Round(e); math.Abs(e-r) < 1e-3 {
+		e = r
+	}
+	return uint32(int32(round(e)))
 }
 
 func e7ToLonLat(v uint32) float32 {
