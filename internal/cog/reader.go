@@ -1892,7 +1892,9 @@ func (r *Reader) ReadRegion(level, startX, startY, width, height int) (*image.RG
 //
 // Samples come back chunky, as ReadUint16Tile returns them: sample s of pixel
 // i is at samples[i*spp+s], with i counted row-major over the region. Empty
-// tiles leave their part of the region zero.
+// tiles leave their part of the region zero. The region must lie within the
+// image: past its right or bottom edge the samples are whatever the writer
+// put in the tile padding. A region of zero width or height reads nothing.
 func (r *Reader) ReadUint16Region(level, startX, startY, width, height int) ([]uint16, int, error) {
 	if level < 0 || level >= len(r.ifds) {
 		return nil, 0, fmt.Errorf("invalid level %d", level)
@@ -1904,8 +1906,14 @@ func (r *Reader) ReadUint16Region(level, startX, startY, width, height int) ([]u
 	if spp <= 0 {
 		spp = 1
 	}
+	if width < 0 || height < 0 {
+		return nil, 0, fmt.Errorf("invalid region size %dx%d", width, height)
+	}
 
 	dst := make([]uint16, width*height*spp)
+	if len(dst) == 0 {
+		return dst, spp, nil
+	}
 
 	colStart := startX / tw
 	colEnd := (startX + width - 1) / tw
@@ -1914,12 +1922,10 @@ func (r *Reader) ReadUint16Region(level, startX, startY, width, height int) ([]u
 
 	for row := rowStart; row <= rowEnd; row++ {
 		for col := colStart; col <= colEnd; col++ {
-			tile, tileW, _, tileSpp, err := r.ReadUint16Tile(level, col, row)
+			// Same IFD, so the same samples per pixel as spp.
+			tile, tileW, _, _, err := r.ReadUint16Tile(level, col, row)
 			if err != nil {
 				return nil, 0, err
-			}
-			if tileSpp != spp {
-				return nil, 0, fmt.Errorf("tile (%d,%d) has %d samples per pixel, want %d", col, row, tileSpp, spp)
 			}
 			if tile == nil {
 				continue // empty tile: leave the region zero

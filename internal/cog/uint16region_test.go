@@ -118,6 +118,26 @@ func TestReadUint16Region(t *testing.T) {
 	}
 }
 
+// A region read must not panic on a negative size, and must fail on a format
+// it cannot read even when every tile it touches is empty (it returned zeros
+// there, and an error over data, depending on sparsity alone).
+func TestReadUint16RegionErrors(t *testing.T) {
+	r, _ := uint16TiledReader(t, 13, 11, 4, 4, 3, -1)
+	for _, reg := range [][4]int{{0, 0, -1, 1}, {0, 0, 1, -1}} {
+		if _, _, err := r.ReadUint16Region(0, reg[0], reg[1], reg[2], reg[3]); err == nil {
+			t.Errorf("region %v: expected an error", reg)
+		}
+	}
+	if s, _, err := r.ReadUint16Region(0, 5, 0, 0, 1); err != nil || len(s) != 0 {
+		t.Errorf("zero-width region: %v, %v; want no samples", s, err)
+	}
+
+	float := oneTileReader(4, 4, 32, 3, "", nil) // float32, one empty tile
+	if _, _, err := float.ReadUint16Region(0, 0, 0, 4, 4); err == nil {
+		t.Error("float32 region over an empty tile: expected an error")
+	}
+}
+
 // The cache must report a hit with an explicit ok, because nil samples are a
 // legitimate empty tile. Signalling misses by a nil slice, as FloatTileCache
 // does, would make every empty tile miss forever and be re-read per pixel.
