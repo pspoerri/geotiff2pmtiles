@@ -1,6 +1,7 @@
 package tile
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -148,7 +149,9 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		InitialCapacity: 64,
 		TileSize:        cfg.TileSize,
 	})
-	defer store.Close()
+	// A closure, so that it closes the store of the current level rather
+	// than this placeholder when an error returns early.
+	defer func() { store.Close() }()
 
 	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64
 
@@ -234,19 +237,25 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		}
 
 		var wg sync.WaitGroup
-		errCh := make(chan error, nWorkers)
+		// The first worker error cancels the level: the other workers stop
+		// at their next tile and the producer stops feeding batches.
+		ctx, cancel := context.WithCancelCause(context.Background())
 
 		// Feed batches into a channel; workers pull batches on demand.
 		batchCh := make(chan [][3]int, nWorkers*2)
 		go func() {
+			defer close(batchCh)
 			for i := 0; i < nTiles; i += batchSize {
 				end := i + batchSize
 				if end > nTiles {
 					end = nTiles
 				}
-				batchCh <- tiles[i:end]
+				select {
+				case batchCh <- tiles[i:end]:
+				case <-ctx.Done():
+					return
+				}
 			}
-			close(batchCh)
 		}()
 
 		for w := 0; w < nWorkers; w++ {
@@ -256,6 +265,9 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 
 				for batch := range batchCh {
 					for _, t := range batch {
+						if ctx.Err() != nil {
+							return
+						}
 						z, x, y := t[0], t[1], t[2]
 						var td *TileData
 
@@ -326,19 +338,13 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 							var err error
 							data, err = cfg.Encoder.Encode(td.AsImage())
 							if err != nil {
-								select {
-								case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
-								default:
-								}
+								cancel(fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err))
 								return
 							}
 						}
 
 						if err := writer.WriteTile(z, x, y, data); err != nil {
-							select {
-							case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
-							default:
-							}
+							cancel(fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err))
 							return
 						}
 
@@ -366,11 +372,11 @@ func Generate(cfg Config, sources []*cog.Reader, writer TileWriter) (Stats, erro
 		nextStore.Drain()
 
 		// Check for errors.
-		select {
-		case err := <-errCh:
+		err := context.Cause(ctx)
+		cancel(nil)
+		if err != nil {
 			nextStore.Close()
 			return Stats{}, err
-		default:
 		}
 
 		if cfg.Verbose {

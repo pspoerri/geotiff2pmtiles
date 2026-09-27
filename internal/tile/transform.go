@@ -1,6 +1,7 @@
 package tile
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -88,14 +89,18 @@ func transformPassthrough(cfg TransformConfig, reader PMTilesReader, writer Tile
 		}
 
 		var wg sync.WaitGroup
-		errCh := make(chan error, nWorkers)
+		ctx, cancel := context.WithCancelCause(context.Background())
 		tileCh := make(chan [3]int, nWorkers*2)
 
 		go func() {
+			defer close(tileCh)
 			for _, t := range tiles {
-				tileCh <- t
+				select {
+				case tileCh <- t:
+				case <-ctx.Done():
+					return
+				}
 			}
-			close(tileCh)
 		}()
 
 		for w := 0; w < nWorkers; w++ {
@@ -103,13 +108,13 @@ func transformPassthrough(cfg TransformConfig, reader PMTilesReader, writer Tile
 			go func() {
 				defer wg.Done()
 				for t := range tileCh {
+					if ctx.Err() != nil {
+						return
+					}
 					z, x, y := t[0], t[1], t[2]
 					data, err := reader.ReadTile(z, x, y)
 					if err != nil {
-						select {
-						case errCh <- fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
+						cancel(fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err))
 						return
 					}
 					if data == nil {
@@ -119,10 +124,7 @@ func transformPassthrough(cfg TransformConfig, reader PMTilesReader, writer Tile
 					}
 
 					if err := writer.WriteTile(z, x, y, data); err != nil {
-						select {
-						case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
+						cancel(fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err))
 						return
 					}
 
@@ -136,10 +138,10 @@ func transformPassthrough(cfg TransformConfig, reader PMTilesReader, writer Tile
 		wg.Wait()
 		pb.Finish()
 
-		select {
-		case err := <-errCh:
+		err := context.Cause(ctx)
+		cancel(nil)
+		if err != nil {
 			return Stats{}, err
-		default:
 		}
 	}
 
@@ -177,14 +179,18 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 		}
 
 		var wg sync.WaitGroup
-		errCh := make(chan error, nWorkers)
+		ctx, cancel := context.WithCancelCause(context.Background())
 		tileCh := make(chan [3]int, nWorkers*2)
 
 		go func() {
+			defer close(tileCh)
 			for _, t := range tiles {
-				tileCh <- t
+				select {
+				case tileCh <- t:
+				case <-ctx.Done():
+					return
+				}
 			}
-			close(tileCh)
 		}()
 
 		for w := 0; w < nWorkers; w++ {
@@ -192,13 +198,13 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 			go func() {
 				defer wg.Done()
 				for t := range tileCh {
+					if ctx.Err() != nil {
+						return
+					}
 					z, x, y := t[0], t[1], t[2]
 					rawData, err := reader.ReadTile(z, x, y)
 					if err != nil {
-						select {
-						case errCh <- fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
+						cancel(fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err))
 						return
 					}
 					if rawData == nil {
@@ -209,10 +215,7 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 
 					img, err := encode.DecodeImage(rawData, cfg.SourceFormat)
 					if err != nil {
-						select {
-						case errCh <- fmt.Errorf("decoding tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
+						cancel(fmt.Errorf("decoding tile z%d/%d/%d: %w", z, x, y, err))
 						return
 					}
 
@@ -228,18 +231,12 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 					data, err := cfg.Encoder.Encode(td.AsImage())
 					td.Release()
 					if err != nil {
-						select {
-						case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
+						cancel(fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err))
 						return
 					}
 
 					if err := writer.WriteTile(z, x, y, data); err != nil {
-						select {
-						case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
-						default:
-						}
+						cancel(fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err))
 						return
 					}
 
@@ -253,10 +250,10 @@ func transformReencode(cfg TransformConfig, reader PMTilesReader, writer TileWri
 		wg.Wait()
 		pb.Finish()
 
-		select {
-		case err := <-errCh:
+		err := context.Cause(ctx)
+		cancel(nil)
+		if err != nil {
 			return Stats{}, err
-		default:
 		}
 	}
 
@@ -305,7 +302,9 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 		InitialCapacity: 64,
 		TileSize:        cfg.TileSize,
 	})
-	defer store.Close()
+	// A closure, so that it closes the store of the current level rather
+	// than this placeholder when an error returns early.
+	defer func() { store.Close() }()
 
 	var tileCount, emptyCount, uniformCount, grayCount, totalBytes atomic.Int64
 
@@ -459,18 +458,24 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 		}
 
 		var wg sync.WaitGroup
-		errCh := make(chan error, nWorkers)
+		// The first worker error cancels the level: the other workers stop
+		// at their next tile and the producer stops feeding batches.
+		ctx, cancel := context.WithCancelCause(context.Background())
 
 		batchCh := make(chan [][3]int, nWorkers*2)
 		go func() {
+			defer close(batchCh)
 			for i := 0; i < nTiles; i += batchSize {
 				end := i + batchSize
 				if end > nTiles {
 					end = nTiles
 				}
-				batchCh <- realTiles[i:end]
+				select {
+				case batchCh <- realTiles[i:end]:
+				case <-ctx.Done():
+					return
+				}
 			}
-			close(batchCh)
 		}()
 
 		for w := 0; w < nWorkers; w++ {
@@ -480,6 +485,9 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 
 				for batch := range batchCh {
 					for _, t := range batch {
+						if ctx.Err() != nil {
+							return
+						}
 						z, x, y := t[0], t[1], t[2]
 						var td *TileData
 
@@ -490,19 +498,13 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 							if hasSource {
 								rawData, err := reader.ReadTile(z, x, y)
 								if err != nil {
-									select {
-									case errCh <- fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err):
-									default:
-									}
+									cancel(fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err))
 									return
 								}
 								if rawData != nil {
 									img, err := encode.DecodeImage(rawData, cfg.SourceFormat)
 									if err != nil {
-										select {
-										case errCh <- fmt.Errorf("decoding tile z%d/%d/%d: %w", z, x, y, err):
-										default:
-										}
+										cancel(fmt.Errorf("decoding tile z%d/%d/%d: %w", z, x, y, err))
 										return
 									}
 									rgba := imageToRGBA(img)
@@ -565,19 +567,13 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 							var err error
 							data, err = cfg.Encoder.Encode(td.AsImage())
 							if err != nil {
-								select {
-								case errCh <- fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err):
-								default:
-								}
+								cancel(fmt.Errorf("encoding tile z%d/%d/%d: %w", z, x, y, err))
 								return
 							}
 						}
 
 						if err := writer.WriteTile(z, x, y, data); err != nil {
-							select {
-							case errCh <- fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err):
-							default:
-							}
+							cancel(fmt.Errorf("writing tile z%d/%d/%d: %w", z, x, y, err))
 							return
 						}
 
@@ -602,11 +598,11 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 
 		nextStore.Drain()
 
-		select {
-		case err := <-errCh:
+		err := context.Cause(ctx)
+		cancel(nil)
+		if err != nil {
 			nextStore.Close()
 			return Stats{}, err
-		default:
 		}
 
 		if cfg.Verbose {
