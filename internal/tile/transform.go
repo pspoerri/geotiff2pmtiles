@@ -341,6 +341,7 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 	// All-fill parents are written directly with pre-encoded bytes, skipping
 	// the expensive downsample → encode → store pipeline.
 	var realPositions map[[2]int]bool
+	var prevTiles [][3]int // the previous (higher) zoom's tiles, without fill
 
 	for z := effectiveMaxZoom; z >= cfg.MinZoom; z-- {
 		isMaxZoom := (z == effectiveMaxZoom)
@@ -404,11 +405,12 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 				totalBytes.Add(nFillTiles * int64(len(fillEncoded)))
 			}
 		} else {
-			// No fill, lower zoom — enumerate all positions from bounds.
-			realTiles = coord.TilesInBounds(z,
-				float64(cfg.Bounds[0]), float64(cfg.Bounds[1]),
-				float64(cfg.Bounds[2]), float64(cfg.Bounds[3]))
+			// No fill, lower zoom: the parents of the level below. The
+			// bounds can be far wider than the data: an archive crossing
+			// the antimeridian records -180..180.
+			realTiles = parentTiles(prevTiles)
 		}
+		prevTiles = realTiles
 
 		if len(realTiles) == 0 && nFillTiles == 0 {
 			continue
@@ -633,6 +635,19 @@ func transformRebuild(cfg TransformConfig, reader PMTilesReader, writer TileWrit
 		UniformTiles: uniformCount.Load(),
 		TotalBytes:   totalBytes.Load(),
 	}, nil
+}
+
+// parentTiles returns the distinct parents of tiles, one zoom level up.
+func parentTiles(tiles [][3]int) [][3]int {
+	seen := make(map[[2]int]bool, len(tiles)/2)
+	var parents [][3]int
+	for _, t := range tiles {
+		if p := [2]int{t[1] / 2, t[2] / 2}; !seen[p] {
+			seen[p] = true
+			parents = append(parents, [3]int{t[0] - 1, p[0], p[1]})
+		}
+	}
+	return parents
 }
 
 // fillEmptyTiles generates tiles for positions within the bounds that are
