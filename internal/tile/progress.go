@@ -2,6 +2,7 @@ package tile
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -10,11 +11,22 @@ import (
 	"unicode/utf8"
 )
 
+// isTerminal reports whether f is a terminal or console rather than a file
+// or pipe, where every \r redraw would be kept as a separate frame.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
 // progressBar renders an in-place terminal progress bar for a zoom level.
 // It refreshes at a fixed interval and supports concurrent Increment calls
-// from multiple worker goroutines.
+// from multiple worker goroutines. When the output is not a terminal it
+// prints only the final state, one line per zoom level.
 type progressBar struct {
-	done      chan struct{}
+	out       io.Writer
+	live      bool          // redraw in place every 100 ms
+	done      chan struct{} // closed by Finish
+	stopped   chan struct{} // closed when run has returned
 	start     time.Time
 	label     string
 	total     int64
@@ -24,15 +36,28 @@ type progressBar struct {
 	mu        sync.Mutex
 }
 
+// newProgressBar starts a progress bar on stderr, redrawn in place only when
+// stderr is a terminal.
 func newProgressBar(label string, total int64) *progressBar {
+	return startProgressBar(os.Stderr, isTerminal(os.Stderr), label, total)
+}
+
+func startProgressBar(out io.Writer, live bool, label string, total int64) *progressBar {
 	pb := &progressBar{
+		out:      out,
+		live:     live,
 		total:    total,
 		label:    label,
 		barWidth: 30,
 		start:    time.Now(),
 		done:     make(chan struct{}),
+		stopped:  make(chan struct{}),
 	}
-	go pb.run()
+	if pb.live {
+		go pb.run()
+	} else {
+		close(pb.stopped)
+	}
 	return pb
 }
 
@@ -44,11 +69,13 @@ func (pb *progressBar) Increment() {
 // Finish stops the refresh loop and prints the final bar state with a newline.
 func (pb *progressBar) Finish() {
 	close(pb.done)
+	<-pb.stopped // no redraw may follow the final line
 	pb.draw()
-	fmt.Fprint(os.Stderr, "\n")
+	fmt.Fprint(pb.out, "\n")
 }
 
 func (pb *progressBar) run() {
+	defer close(pb.stopped)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -98,6 +125,11 @@ func (pb *progressBar) draw() {
 	line := fmt.Sprintf("%s [%s] %3.0f%%  %d/%d tiles  %.0f/s  %s  ETA %s",
 		pb.label, bar, frac*100, processed, total, rate, formatDuration(elapsed), etaStr)
 
+	if !pb.live {
+		fmt.Fprint(pb.out, line)
+		return
+	}
+
 	// Pad the line out instead of using an ANSI erase-to-end-of-line: Windows
 	// consoles ignore escape sequences unless VT processing is switched on.
 	width := utf8.RuneCountInString(line)
@@ -106,7 +138,7 @@ func (pb *progressBar) draw() {
 	}
 	pb.prevWidth = width
 
-	fmt.Fprintf(os.Stderr, "\r%s", line)
+	fmt.Fprintf(pb.out, "\r%s", line)
 }
 
 // formatDuration formats a duration concisely (e.g. "1m23s", "45s", "0s").
