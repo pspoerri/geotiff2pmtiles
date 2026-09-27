@@ -134,3 +134,84 @@ func TestDecodeRawTilePackedMatchesAligned(t *testing.T) {
 		t.Errorf("rescale endpoints: got %d and %d, want 0 and 255", want.Pix[0], want.Pix[4])
 	}
 }
+
+// BenchmarkUnpackBits sizes the input like the thing that actually matters:
+// one Sentinel-2 512x512 tile of bit-packed 15-bit reflectance.
+func BenchmarkUnpackBits(b *testing.B) {
+	const w, h, bits = 512, 512, 15
+	vals := make([]uint16, w*h)
+	rng := rand.New(rand.NewSource(11))
+	for i := range vals {
+		vals[i] = uint16(rng.Intn(1 << bits))
+	}
+	data := pack(vals, w, h, bits)
+	rowBytes := (w*bits + 7) / 8
+	dst := make([]uint16, w*h)
+
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		unpackBits(dst, data, w, h, bits, rowBytes)
+	}
+}
+
+// unpackBitsReference is the straightforward bit-at-a-time implementation the
+// windowed one replaced. Kept here so the fast path can be checked against it
+// rather than only against a packer: an unpacker and a packer can agree on a
+// shared misreading of the spec, but two independent unpackers agreeing on
+// random data across every depth is much harder to fake.
+func unpackBitsReference(dst []uint16, data []byte, perRow, rows, bits, rowBytes int) {
+	for y := 0; y < rows; y++ {
+		base := y * rowBytes
+		bit := 0
+		for i := 0; i < perRow; i++ {
+			var v uint32
+			for need := bits; need > 0; {
+				idx := base + bit>>3
+				if idx >= len(data) {
+					break
+				}
+				avail := 8 - bit&7
+				take := avail
+				if need < take {
+					take = need
+				}
+				chunk := (data[idx] >> (avail - take)) & byte((1<<take)-1)
+				v = v<<take | uint32(chunk)
+				bit += take
+				need -= take
+			}
+			dst[y*perRow+i] = uint16(v)
+		}
+	}
+}
+
+// The windowed unpacker must produce exactly what the bit-at-a-time one did,
+// for every depth and for dimensions whose rows do not end on byte
+// boundaries. Anything else silently changes the pixels of every band tile.
+func TestUnpackBitsMatchesReference(t *testing.T) {
+	rng := rand.New(rand.NewSource(99))
+	for bits := 1; bits <= 16; bits++ {
+		for _, dims := range [][2]int{{1, 1}, {7, 5}, {8, 3}, {17, 4}, {512, 2}, {13, 11}} {
+			perRow, rows := dims[0], dims[1]
+			vals := make([]uint16, perRow*rows)
+			for i := range vals {
+				vals[i] = uint16(rng.Intn(1 << uint(bits)))
+			}
+			data := pack(vals, perRow, rows, bits)
+			rowBytes := (perRow*bits + 7) / 8
+
+			got := make([]uint16, perRow*rows)
+			want := make([]uint16, perRow*rows)
+			unpackBits(got, data, perRow, rows, bits, rowBytes)
+			unpackBitsReference(want, data, perRow, rows, bits, rowBytes)
+
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("bits %d, %dx%d, sample %d: got %d, reference %d",
+						bits, perRow, rows, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}

@@ -800,28 +800,61 @@ func (r *Reader) ReadUint16Tile(level, col, row int) (samples []uint16, w, h, sp
 // byte boundary, independent of the file's byte order -- that governs whole
 // words, not the bit stream. FillOrder 2 (LSB first) is vanishingly rare and
 // is not handled.
+//
+// A sample of at most 16 bits starting at most 7 bits into a byte spans at
+// most 23 bits, so it always lies inside a 32-bit window read from the byte
+// the sample starts in. That turns the unpack into one big-endian load, one
+// shift and one mask per sample, with no loop over bit groups.
+//
+// This is worth the trouble because of where it sits: Planetary Computer
+// publishes Sentinel-2 reflectance bit-packed at 15 bits, so every sample of
+// every band tile passes through here. Profiling a band-path chunk, the
+// previous bit-at-a-time version was the single hottest function in the
+// program at 17% of total CPU -- more than Deflate.
 func unpackBits(dst []uint16, data []byte, perRow, rows, bits, rowBytes int) {
+	if bits <= 0 || bits > 16 || perRow <= 0 {
+		return
+	}
+	mask := uint32(1)<<uint(bits) - 1
+
 	for y := 0; y < rows; y++ {
 		base := y * rowBytes
-		bit := 0
-		for i := 0; i < perRow; i++ {
-			var v uint32
-			for need := bits; need > 0; {
-				idx := base + bit>>3
-				if idx >= len(data) {
-					break
+		row := dst[y*perRow : y*perRow+perRow : y*perRow+perRow]
+
+		// The window must stay inside data. Everything before this sample
+		// index is safe, which is every sample but the last few of the last
+		// row in practice.
+		safe := perRow
+		if n := ((len(data) - base - 4) * 8) / bits; n < safe {
+			safe = n
+		}
+		if safe < 0 {
+			safe = 0
+		}
+
+		off := 0
+		for i := 0; i < safe; i++ {
+			bo := base + off>>3
+			w := binary.BigEndian.Uint32(data[bo : bo+4])
+			row[i] = uint16((w >> uint(32-bits-off&7)) & mask)
+			off += bits
+		}
+
+		// Tail, where a 32-bit read would run past the buffer: assemble the
+		// window byte by byte, treating anything past the end as zero. The
+		// callers size rows so this only arises on a truncated final strip,
+		// whose samples lie outside the image and are never read.
+		for i := safe; i < perRow; i++ {
+			bo := base + off>>3
+			var w uint32
+			for k := 0; k < 4; k++ {
+				w <<= 8
+				if j := bo + k; j >= 0 && j < len(data) {
+					w |= uint32(data[j])
 				}
-				avail := 8 - bit&7
-				take := avail
-				if need < take {
-					take = need
-				}
-				chunk := (data[idx] >> (avail - take)) & byte((1<<take)-1)
-				v = v<<take | uint32(chunk)
-				bit += take
-				need -= take
 			}
-			dst[y*perRow+i] = uint16(v)
+			row[i] = uint16((w >> uint(32-bits-off&7)) & mask)
+			off += bits
 		}
 	}
 }
