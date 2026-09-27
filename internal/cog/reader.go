@@ -1496,6 +1496,9 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
+	if ifd.Photometric == 3 {
+		return r.expandPalette(ifd, buf, s16, avail, w, h, spp)
+	}
 	pixelBytes := spp * bps
 
 	// Signed 16-bit: samples, nodata and the rescale range all move into the
@@ -1716,6 +1719,65 @@ func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
 			pix[pixIdx+2] = rescale(bV)
 			pix[pixIdx+3] = a
 		}
+	}
+
+	if ifd.whiteIsZero {
+		// WhiteIsZero: the smallest value is white. Nodata and the rescale
+		// work on the stored values, so the rendered gray is inverted after
+		// them, within its range: sub-byte samples without a rescale render
+		// as their raw values.
+		top := uint8(255)
+		if bits < 8 && rescaleMode == RescaleNone {
+			top = uint8(1<<bits - 1)
+		}
+		for i := 0; i < len(pix); i += 4 {
+			if pix[i+3] != 0 {
+				pix[i], pix[i+1], pix[i+2] = top-pix[i], top-pix[i+1], top-pix[i+2]
+			}
+		}
+	}
+	return img, nil
+}
+
+// expandPalette renders a palette tile (Photometric 3) through its ColorMap:
+// the first sample of each pixel indexes 16-bit red, green and blue tables.
+// The band mapping and rescale do not apply to an index; nodata, as in
+// GDAL, is an index.
+func (r *Reader) expandPalette(ifd *IFD, buf []byte, s16 []uint16, avail, w, h, spp int) (image.Image, error) {
+	bits := ifd.bitsPerSample()
+	if bits > 16 {
+		return nil, fmt.Errorf("palette with %d-bit samples is not supported", bits)
+	}
+	n := 1 << bits
+	cmap := ifd.ColorMap
+	if len(cmap) < 3*n {
+		return nil, fmt.Errorf("palette image has %d ColorMap entries, want %d", len(cmap), 3*n)
+	}
+
+	nodata, hasNodata := -1, false
+	if cfg := r.bandCfg; r.floodMask == nil {
+		v, err := strconv.ParseFloat(strings.TrimSpace(r.ifds[0].NoData), 64)
+		if cfg.HasNodata {
+			v, err = cfg.Nodata, nil
+		}
+		if err == nil && v == math.Trunc(v) && v >= 0 && v < float64(n) {
+			nodata, hasNodata = int(v), true
+		}
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for i := 0; i < w*h && (i+1)*spp <= avail; i++ {
+		var idx int
+		if s16 != nil {
+			idx = int(s16[i*spp]) & (n - 1) // signed samples are sign-extended
+		} else {
+			idx = int(buf[i*spp]) & (n - 1)
+		}
+		if hasNodata && idx == nodata {
+			continue // transparent
+		}
+		p := img.Pix[i*4 : i*4+4 : i*4+4]
+		p[0], p[1], p[2], p[3] = uint8(cmap[idx]>>8), uint8(cmap[n+idx]>>8), uint8(cmap[2*n+idx]>>8), 255
 	}
 	return img, nil
 }

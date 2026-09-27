@@ -23,6 +23,7 @@ const (
 	tagRowsPerStrip       = 278
 	tagStripByteCounts    = 279
 	tagPlanarConfig       = 284
+	tagColorMap           = 320
 	tagTileWidth          = 322
 	tagTileLength         = 323
 	tagTileOffsets        = 324
@@ -66,6 +67,7 @@ type IFD struct {
 	NoData          string
 	BitsPerSample   []uint16
 	SampleFormat    []uint16
+	ColorMap        []uint16 // palette (Photometric 3): 2^bits reds, then greens, then blues
 	TileOffsets     []uint64
 	TileByteCounts  []uint64
 	StripOffsets    []uint64
@@ -86,6 +88,11 @@ type IFD struct {
 	Photometric     uint16
 	PlanarConfig    uint16
 	Predictor       uint16
+	// whiteIsZero is Photometric 0 as read from the tag. Photometric's zero
+	// value is WhiteIsZero too, so an IFD without the (required) tag, or one
+	// built in code, would otherwise render inverted; libtiff assumes
+	// BlackIsZero there.
+	whiteIsZero bool
 }
 
 // NewSubfileType bits that mark an IFD as something other than an image or
@@ -440,8 +447,11 @@ func buildIFD(entries []tiffEntry, bo binary.ByteOrder) IFD {
 			ifd.Compression = getUint16Val(e, bo)
 		case tagPhotometric:
 			ifd.Photometric = getUint16Val(e, bo)
+			ifd.whiteIsZero = ifd.Photometric == 0
 		case tagPlanarConfig:
 			ifd.PlanarConfig = getUint16Val(e, bo)
+		case tagColorMap:
+			ifd.ColorMap = getUint16Slice(e, bo)
 		case tagTileOffsets:
 			ifd.TileOffsets = getUint64Slice(e, bo)
 		case tagTileByteCounts:
