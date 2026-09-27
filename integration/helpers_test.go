@@ -544,17 +544,15 @@ func runTransform(t *testing.T, cfg transformConfig) string {
 		nodataColor, fillMissing = cfg.FillColor, cfg.FillColor
 	}
 
-	// Determine mode.
-	formatChanged := format != srcFormat
-	zoomChanged := minZoom < int(srcHeader.MinZoom)
-	mode := tile.TransformPassthrough
-	if cfg.Rebuild || zoomChanged {
-		mode = tile.TransformRebuild
-	} else if formatChanged {
-		mode = tile.TransformReencode
-	} else if nodataColor != nil {
-		mode = tile.TransformReencode
-	}
+	// The same mode choice as pmtransform; tile.Transform adds levels below
+	// the source's min zoom itself.
+	mode, _ := tile.SelectTransformMode(tile.TransformModeOptions{
+		Rebuild:       cfg.Rebuild,
+		FormatChanged: format != srcFormat,
+		NodataColor:   nodataColor != nil,
+		MinZoom:       minZoom,
+		SourceMinZoom: int(srcHeader.MinZoom),
+	})
 
 	bounds := [4]float32{srcHeader.MinLon, srcHeader.MinLat, srcHeader.MaxLon, srcHeader.MaxLat}
 	outputDir := filepath.Dir(outputPath)

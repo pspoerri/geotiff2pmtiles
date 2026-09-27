@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/cli"
@@ -217,22 +216,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Determine transform mode. Levels below the source's min zoom are added by
-	// a separate rebuild pass (see extendDown), so the existing levels can still
-	// be copied as-is.
-	formatChanged := format != srcFormat
 	srcMinZoom := int(srcHeader.MinZoom)
-	extendDown := !rebuild && minZoom < srcMinZoom
-	mode := tile.TransformPassthrough
-
-	if rebuild {
-		mode = tile.TransformRebuild
-	} else if formatChanged {
-		mode = tile.TransformReencode
-	} else if nodataFill != nil {
-		// Recolouring transparent pixels needs the tiles decoded.
-		mode = tile.TransformReencode
-	}
+	mode, extendDown := tile.SelectTransformMode(tile.TransformModeOptions{
+		Rebuild:       rebuild,
+		FormatChanged: format != srcFormat,
+		NodataColor:   nodataFill != nil,
+		MinZoom:       minZoom,
+		SourceMinZoom: srcMinZoom,
+	})
 
 	// Resolve the tile encoder — only re-encode, rebuild and fill tiles need
 	// one, so a passthrough of e.g. a WebP archive still works in a build
@@ -375,26 +366,7 @@ func main() {
 
 	// Run transform.
 	genStart := time.Now()
-	mainCfg := cfg
-	if extendDown {
-		mainCfg.MinZoom = srcMinZoom
-	}
-	stats, err := tile.Transform(mainCfg, reader, writer)
-	if err == nil && extendDown {
-		// Downsample the source's lowest level into the added levels. The
-		// rebuild also re-renders srcMinZoom itself; those tiles were already
-		// written above, so they are dropped here.
-		extCfg := cfg
-		extCfg.Mode = tile.TransformRebuild
-		extCfg.MaxZoom = srcMinZoom
-		capped := &zoomCap{TileWriter: writer, maxZoom: min(srcMinZoom-1, maxZoom)}
-		var ext tile.Stats
-		ext, err = tile.Transform(extCfg, reader, capped)
-		stats.TileCount += ext.TileCount - capped.dropped.Load()
-		stats.UniformTiles += ext.UniformTiles
-		stats.EmptyTiles += ext.EmptyTiles
-		stats.TotalBytes += ext.TotalBytes
-	}
+	stats, err := tile.Transform(cfg, reader, writer)
 	if err != nil {
 		writer.Abort()
 		cleanup()
@@ -510,19 +482,4 @@ func sameFile(a, b string) bool {
 		return false
 	}
 	return os.SameFile(fa, fb)
-}
-
-// zoomCap drops tiles above maxZoom and forwards the rest.
-type zoomCap struct {
-	tile.TileWriter
-	maxZoom int
-	dropped atomic.Int64
-}
-
-func (w *zoomCap) WriteTile(z, x, y int, data []byte) error {
-	if z > w.maxZoom {
-		w.dropped.Add(1)
-		return nil
-	}
-	return w.TileWriter.WriteTile(z, x, y, data)
 }
