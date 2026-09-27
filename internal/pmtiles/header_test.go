@@ -2,6 +2,8 @@ package pmtiles
 
 import (
 	"encoding/binary"
+	"encoding/json"
+	"fmt"
 	"math"
 	"testing"
 
@@ -266,6 +268,59 @@ func TestNewHeader_BoundsE7(t *testing.T) {
 		h := NewHeader(WriterOptions{Bounds: tt.bounds})
 		if got := readHeaderE7(h.Serialize()); got != tt.want {
 			t.Errorf("NewHeader(%+v) E7 = %v, want %v", tt.bounds, got, tt.want)
+		}
+	}
+}
+
+// Data crossing the antimeridian (MaxLon > 180) is recorded as -180..180 in
+// the header and the metadata, since TileJSON bounds must not wrap and
+// MapLibre shows nothing for west > east; the centre stays on the data.
+// Longitudes past ±214.7 used to overflow int32 E7.
+func TestArchiveBounds_Antimeridian(t *testing.T) {
+	tests := []struct {
+		name          string
+		bounds        cog.Bounds
+		wantMinLon    float64
+		wantMaxLon    float64
+		wantCenterLon float64
+	}{
+		{"UTM 60 across 180", cog.Bounds{MinLon: 176.5, MaxLon: 182.1, MinLat: 45, MaxLat: 46}, -180, 180, 179.3},
+		{"centre past 180", cog.Bounds{MinLon: 179, MaxLon: 189, MinLat: 45, MaxLat: 46}, -180, 180, -176},
+		{"Pacific 100..260", cog.Bounds{MinLon: 100, MaxLon: 260, MinLat: -60, MaxLat: 60}, -180, 180, 180},
+		{"not crossing", cog.Bounds{MinLon: 5, MaxLon: 10, MinLat: 45, MaxLat: 48}, 5, 10, 7.5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHeader(WriterOptions{Bounds: tt.bounds})
+			e7 := readHeaderE7(h.Serialize())
+			want := [3]int32{int32(tt.wantMinLon * 1e7), int32(tt.wantMaxLon * 1e7), int32(math.Round(tt.wantCenterLon * 1e7))}
+			if got := [3]int32{e7[0], e7[2], e7[4]}; got != want {
+				t.Errorf("header MinLon, MaxLon, CenterLon E7 = %v, want %v", got, want)
+			}
+			if b := h.Bounds(); b.MinLon != tt.wantMinLon || b.MaxLon != tt.wantMaxLon {
+				t.Errorf("Bounds() = %+v, want lon %v..%v", b, tt.wantMinLon, tt.wantMaxLon)
+			}
+
+			raw, err := (&Writer{opts: WriterOptions{Bounds: tt.bounds, MaxZoom: 4}}).buildMetadata()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var meta map[string]any
+			if err := json.Unmarshal(raw, &meta); err != nil {
+				t.Fatal(err)
+			}
+			b := tt.bounds
+			wantBounds := fmt.Sprintf("%.6f,%.6f,%.6f,%.6f", tt.wantMinLon, b.MinLat, tt.wantMaxLon, b.MaxLat)
+			wantCenter := fmt.Sprintf("%.6f,%.6f,2", tt.wantCenterLon, (b.MinLat+b.MaxLat)/2)
+			if meta["bounds"] != wantBounds || meta["center"] != wantCenter {
+				t.Errorf("metadata bounds %v center %v, want %v and %v", meta["bounds"], meta["center"], wantBounds, wantCenter)
+			}
+		})
+	}
+
+	for _, v := range []float32{260, 360, -300} {
+		if got, want := int32(lonLatToE7(v)), int32(math.Copysign(1_800_000_000, float64(v))); got != want {
+			t.Errorf("lonLatToE7(%v) = %d, want %d (clamped)", v, got, want)
 		}
 	}
 }

@@ -65,9 +65,24 @@ type Header struct {
 	e7 [6]uint32
 }
 
+// archiveBounds returns the bounds and centre longitude an archive records
+// for b, in its header and its metadata alike. Data crossing the
+// antimeridian (MaxLon > 180, see coord.WrapLonRange) is recorded as the
+// full longitude range, because TileJSON 3.0 bounds "MUST NOT wrap around
+// the ante-meridian", and MapLibre clamps east to 180 and finds no tile at
+// all when west > east. The centre stays on the data.
+func archiveBounds(b cog.Bounds) (cog.Bounds, float64) {
+	centerLon := (b.MinLon + b.MaxLon) / 2
+	if b.MaxLon > 180 {
+		b.MinLon, b.MaxLon = -180, 180
+		centerLon = math.Remainder(centerLon, 360)
+	}
+	return b, centerLon
+}
+
 // NewHeader creates a header with basic metadata.
 func NewHeader(opts WriterOptions) Header {
-	b := opts.Bounds
+	b, centerLon := archiveBounds(opts.Bounds)
 	h := Header{
 		Clustered:           true,
 		InternalCompression: CompressionGzip,
@@ -80,7 +95,7 @@ func NewHeader(opts WriterOptions) Header {
 		e7: [6]uint32{
 			degToE7(b.MinLon, math.Floor), degToE7(b.MinLat, math.Floor),
 			degToE7(b.MaxLon, math.Ceil), degToE7(b.MaxLat, math.Ceil),
-			degToE7((b.MinLon+b.MaxLon)/2, math.Round), degToE7((b.MinLat+b.MaxLat)/2, math.Round),
+			degToE7(centerLon, math.Round), degToE7((b.MinLat+b.MaxLat)/2, math.Round),
 		},
 	}
 	h.setLonLatFromE7()
@@ -224,20 +239,25 @@ func TileTypeString(t uint8) string {
 	}
 }
 
+// lonLatToE7 converts degrees to E7 units, clamped to ±180: past ±214.7
+// the product overflows int32, and the conversion is platform-dependent.
 func lonLatToE7(v float32) uint32 {
-	return uint32(int32(math.Round(float64(v) * 1e7)))
+	return uint32(int32(math.Round(clampDeg(float64(v)) * 1e7)))
 }
 
-// degToE7 converts degrees to E7 units with the given rounding. v*1e7 can
-// land a hair off an integer for decimal input such as 45.82; snapping
-// that first keeps floor/ceil from turning it into 45.8199999/45.8200001.
+// degToE7 converts degrees to E7 units with the given rounding, clamped to
+// ±180 as in lonLatToE7. v*1e7 can land a hair off an integer for decimal
+// input such as 45.82; snapping that first keeps floor/ceil from turning it
+// into 45.8199999/45.8200001.
 func degToE7(v float64, round func(float64) float64) uint32 {
-	e := v * 1e7
+	e := clampDeg(v) * 1e7
 	if r := math.Round(e); math.Abs(e-r) < 1e-3 {
 		e = r
 	}
 	return uint32(int32(round(e)))
 }
+
+func clampDeg(v float64) float64 { return max(-180, min(180, v)) }
 
 func e7ToLonLat(v uint32) float32 {
 	return float32(float64(int32(v)) / 1e7)
