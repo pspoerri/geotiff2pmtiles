@@ -405,6 +405,37 @@ func TestTransformRebuild_NoFill(t *testing.T) {
 	}
 }
 
+// Without fill, the lower zooms visit only the parents of the tiles below,
+// not every position in the header bounds: those are -180..180 for data
+// crossing the antimeridian, a full-width band whatever the data covers.
+func TestTransformRebuild_NoFill_VisitsParentsOnly(t *testing.T) {
+	const tileSize = 8
+	reader := &mockPMTilesReader{
+		tiles: map[[3]int][]byte{
+			{6, 63, 20}: encodePNGTile(t, tileSize, color.RGBA{0, 200, 0, 255}),
+			{6, 0, 20}:  encodePNGTile(t, tileSize, color.RGBA{0, 0, 200, 255}),
+		},
+		header: pmtiles.Header{MinZoom: 6, MaxZoom: 6, MinLon: -180, MinLat: -60, MaxLon: 180, MaxLat: 60},
+	}
+	writer := newMockTileWriter()
+	stats, err := Transform(TransformConfig{
+		MinZoom: 0, MaxZoom: 6, TileSize: tileSize, Concurrency: 2,
+		Encoder: testEncoder(t), SourceFormat: "png", Resampling: ResamplingBilinear,
+		Mode: TransformRebuild, Bounds: [4]float32{-180, -60, 180, 60},
+	}, reader, writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for z, want := range []int{1, 2, 2, 2, 2, 2, 2} {
+		if n := writer.tileCountAtZoom(z); n != want {
+			t.Errorf("zoom %d: %d tiles, want %d", z, n, want)
+		}
+	}
+	if stats.EmptyTiles != 0 {
+		t.Errorf("EmptyTiles = %d, want 0: positions without children were visited", stats.EmptyTiles)
+	}
+}
+
 // TestTransformRebuild_FillColor_StatsConsistency verifies that Stats counters
 // are consistent: fill tiles are counted as uniform.
 func TestTransformRebuild_FillColor_StatsConsistency(t *testing.T) {
