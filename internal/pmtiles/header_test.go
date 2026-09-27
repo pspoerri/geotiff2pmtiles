@@ -325,6 +325,27 @@ func TestArchiveBounds_Antimeridian(t *testing.T) {
 	}
 }
 
+// The metadata "format" names every tile type, as TileTypeString does; MVT,
+// AVIF and MLT used to be written as "unknown".
+func TestBuildMetadata_Format(t *testing.T) {
+	for tt, want := range map[uint8]string{
+		TileTypeUnknown: "unknown", TileTypeMVT: "mvt", TileTypePNG: "png", TileTypeJPEG: "jpeg",
+		TileTypeWebP: "webp", TileTypeAVIF: "avif", TileTypeMLT: "mlt",
+	} {
+		raw, err := (&Writer{opts: WriterOptions{TileFormat: tt}}).buildMetadata()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var meta map[string]any
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			t.Fatal(err)
+		}
+		if meta["format"] != want {
+			t.Errorf("tile type %d: format %v, want %q", tt, meta["format"], want)
+		}
+	}
+}
+
 // Reading and rewriting a header (pmheader patching the zoom, say) must
 // keep the bounds bit for bit, while a changed field still takes effect.
 func TestHeader_RoundTripKeepsE7(t *testing.T) {

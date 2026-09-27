@@ -366,16 +366,6 @@ func (w *Writer) Abort() {
 
 // buildMetadata creates the JSON metadata for the PMTiles archive.
 func (w *Writer) buildMetadata() ([]byte, error) {
-	tileFormatStr := "unknown"
-	switch w.opts.TileFormat {
-	case TileTypeJPEG:
-		tileFormatStr = "jpeg"
-	case TileTypePNG:
-		tileFormatStr = "png"
-	case TileTypeWebP:
-		tileFormatStr = "webp"
-	}
-
 	name := w.opts.Name
 	if name == "" {
 		name = "geotiff2pmtiles"
@@ -394,7 +384,7 @@ func (w *Writer) buildMetadata() ([]byte, error) {
 	meta := map[string]interface{}{
 		"name":        name,
 		"description": description,
-		"format":      tileFormatStr,
+		"format":      TileTypeString(w.opts.TileFormat),
 		"type":        layerType,
 		"minzoom":     fmt.Sprintf("%d", w.opts.MinZoom),
 		"maxzoom":     fmt.Sprintf("%d", w.opts.MaxZoom),
