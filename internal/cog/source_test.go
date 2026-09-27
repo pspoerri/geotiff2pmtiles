@@ -206,6 +206,50 @@ func TestRawBytes(t *testing.T) {
 	}
 }
 
+// Every reader gets its own cache ID, however it was opened, so readers
+// sharing a TileCache never get each other's tiles; SetID still overrides it.
+func TestReaderIDsAreUnique(t *testing.T) {
+	dir := t.TempDir()
+	var paths []string
+	for _, name := range []string{"a.tif", "b.tif"} {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, tinyImage(false), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	readers, err := OpenAll(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	more, err := OpenAll(paths[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	readers = append(readers, more...)
+	for _, name := range []string{"c", "d"} {
+		r, err := OpenSource(name, bytesSource(tinyImage(false)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		readers = append(readers, r)
+	}
+
+	seen := make(map[int]int)
+	for i, r := range readers {
+		defer r.Close()
+		if j, dup := seen[r.ID()]; dup {
+			t.Errorf("readers %d and %d share ID %d", j, i, r.ID())
+		}
+		seen[r.ID()] = i
+	}
+
+	readers[0].SetID(-1)
+	if got := readers[0].ID(); got != -1 {
+		t.Errorf("ID() after SetID(-1) = %d", got)
+	}
+}
+
 // closeCounter counts Close calls on a source.
 type closeCounter struct {
 	bytesSource

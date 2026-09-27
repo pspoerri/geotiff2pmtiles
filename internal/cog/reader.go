@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
@@ -103,7 +104,7 @@ type Reader struct {
 	ifds       []IFD
 	geo        GeoInfo
 	bandCfg    BandConfig // band selection and rescaling config (set via SetBandConfig)
-	id         int        // unique numeric ID for fast cache keying (set by OpenAll)
+	id         int        // unique numeric ID for fast cache keying (from nextReaderID, or SetID)
 	floodMaskW int
 	floodMaskH int
 }
@@ -228,8 +229,13 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 		geo:   geo,
 		path:  path,
 		strip: sl,
+		id:    int(nextReaderID.Add(1)),
 	}, nil
 }
+
+// nextReaderID numbers readers across the process, so readers opened
+// separately still have distinct tile cache keys.
+var nextReaderID atomic.Int64
 
 // promoteStripsToTiles converts a strip-based IFD into a virtual tile layout.
 // Small strips are grouped into larger virtual tiles (>= 256 rows) so that
@@ -318,9 +324,11 @@ func (r *Reader) ID() int {
 	return r.id
 }
 
-// SetID assigns the reader's cache key. OpenAll assigns IDs itself; a reader
-// opened any other way -- one at a time through OpenSource, say -- needs a
-// unique one before it can share a TileCache with others.
+// SetID replaces the reader's cache key, e.g. with one that stays stable
+// across re-opens of the same remote file. Every reader already has a unique
+// positive ID, so SetID is optional; an ID set here must not collide with
+// another reader sharing the cache (negative IDs never do). Like
+// SetBandConfig, call it before the reader is shared with other goroutines.
 func (r *Reader) SetID(id int) { r.id = id }
 
 // GeoInfo returns the parsed geographic metadata.
@@ -1801,7 +1809,7 @@ func OpenAll(paths []string) ([]*Reader, error) {
 	}
 
 	readers := make([]*Reader, 0, len(paths))
-	for i, p := range paths {
+	for _, p := range paths {
 		r, err := Open(p)
 		if err != nil {
 			// Close any already-opened readers.
@@ -1810,7 +1818,6 @@ func OpenAll(paths []string) ([]*Reader, error) {
 			}
 			return nil, fmt.Errorf("failed to open %s: %w", p, err)
 		}
-		r.id = i
 		readers = append(readers, r)
 	}
 	return readers, nil
