@@ -823,7 +823,7 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, so
 				}
 			}
 			cfg.Rescale = cog.RescaleLinear
-			minV, maxV, err := resolveRescaleRange(rescaleRange, sources)
+			minV, maxV, err := resolveRescaleRange(rescaleRange, sources, cfg)
 			if err != nil {
 				return cfg, err
 			}
@@ -833,7 +833,7 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, so
 			cfg.Rescale = cog.RescaleNone
 		}
 	case "linear":
-		minV, maxV, err := resolveRescaleRange(rescaleRange, sources)
+		minV, maxV, err := resolveRescaleRange(rescaleRange, sources, cfg)
 		if err != nil {
 			return cfg, err
 		}
@@ -841,7 +841,7 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, so
 		cfg.RescaleMin = minV
 		cfg.RescaleMax = maxV
 	case "log":
-		minV, maxV, err := resolveRescaleRange(rescaleRange, sources)
+		minV, maxV, err := resolveRescaleRange(rescaleRange, sources, cfg)
 		if err != nil {
 			return cfg, err
 		}
@@ -860,7 +860,7 @@ func parseBandConfig(bandsStr, alphaBandStr, rescaleStr, rescaleRange string, so
 // resolveRescaleRange returns the --rescale-range values, or when the flag is
 // unset, the combined value range of all sources (GDAL statistics, else a
 // pixel scan), logging what was selected.
-func resolveRescaleRange(rescaleRange string, sources []*cog.Reader) (float64, float64, error) {
+func resolveRescaleRange(rescaleRange string, sources []*cog.Reader, cfg cog.BandConfig) (float64, float64, error) {
 	if rescaleRange != "" {
 		minV, maxV, err := parseRange(rescaleRange)
 		if err != nil {
@@ -871,7 +871,7 @@ func resolveRescaleRange(rescaleRange string, sources []*cog.Reader) (float64, f
 	minV, maxV := math.Inf(1), math.Inf(-1)
 	origins := map[string]bool{}
 	for _, src := range sources {
-		lo, hi, origin, err := src.ValueRange()
+		lo, hi, origin, err := src.ValueRange(cfg)
 		if err != nil {
 			return 0, 0, fmt.Errorf("auto rescale range: %s: %w\n"+
 				"  Hint: set it explicitly, e.g. --rescale-range 0,5000", src.Path(), err)

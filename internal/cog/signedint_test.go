@@ -94,7 +94,7 @@ func TestSignedInt16RGBRescale(t *testing.T) {
 	for i, v := range vals {
 		samples[i] = uint16(v)
 	}
-	lo, hi, ok := minMaxSamples(samples, 1, 4, 4, 1, signBias16, uint16(int32(-32767)+signBias16), true)
+	lo, hi, ok := minMaxSamples(samples, 1, []int{0}, 4, 4, 1, signBias16, uint16(int32(-32767)+signBias16), true)
 	if !ok || int(lo)-signBias16 != -10000 || int(hi)-signBias16 != 10000 {
 		t.Errorf("signed scan: got [%d, %d], want [-10000, 10000]", int(lo)-signBias16, int(hi)-signBias16)
 	}
