@@ -1,5 +1,7 @@
 package coord
 
+import "github.com/wroge/crs"
+
 // Projection defines the interface for converting between a source CRS and WGS84.
 type Projection interface {
 	// ToWGS84 converts source CRS coordinates to WGS84 longitude/latitude (degrees).
@@ -28,6 +30,35 @@ func ForEPSG(epsg int) Projection {
 		return u
 	}
 	return crsFallbackForEPSG(epsg)
+}
+
+// unitSize returns the length of one coordinate unit of the EPSG code's CRS:
+// in degrees for geographic CRSs, otherwise in meters (0.3048 for feet,
+// 1200/3937 for US survey feet). Codes wroge/crs does not know are taken to
+// be in meters.
+func unitSize(epsg int) (size float64, geographic bool) {
+	switch epsg {
+	case 4326:
+		return 1, true
+	case 2056, 3857:
+		return 1, false
+	}
+	if utmForEPSG(epsg) != nil {
+		return 1, false
+	}
+	c, err := crs.Load(epsg)
+	if err != nil {
+		return 1, false
+	}
+	_, geographic = c.Conversion.(crs.Geographic)
+	switch {
+	case c.Unit.Name == "": // wroge/crs default: degrees or meters
+		return 1, geographic
+	case geographic:
+		return c.Unit.ToSI / crs.Degree.ToSI, true
+	default:
+		return c.Unit.ToSI, false
+	}
 }
 
 // WGS84Identity is a no-op projection for data already in EPSG:4326.

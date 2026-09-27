@@ -262,8 +262,34 @@ func TestPixelSizeInGroundMeters(t *testing.T) {
 	}
 }
 
+// TestPixelSizeInGroundMeters_Units checks CRSs whose unit is not the meter:
+// geographic CRSs other than EPSG:4326 and foot-based projections.
+func TestPixelSizeInGroundMeters_Units(t *testing.T) {
+	degree := EarthCircumference / 360 // ground meters per degree at the equator
+	tests := []struct {
+		name  string
+		epsg  int
+		pixel float64
+		want  float64
+	}{
+		{"NAD83 geographic", 4269, 1, degree},
+		{"ETRS89 geographic", 4258, 1, degree},
+		{"NTF Paris, grads", 4807, 1, 0.9 * degree},
+		{"NAD83 / NY Long Island, US survey ft", 2263, 1, 1200.0 / 3937},
+		{"ETRS89-LAEA, meters", 3035, 1, 1},
+		{"UTM 32N, meters", 32632, 1, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PixelSizeInGroundMeters(tt.pixel, tt.epsg, 0); math.Abs(got-tt.want)/tt.want > 1e-9 {
+				t.Errorf("PixelSizeInGroundMeters(%v, %d, 0) = %v, want %v", tt.pixel, tt.epsg, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMetersToPixelSizeCRS_InverseOfPixelSizeInGroundMeters(t *testing.T) {
-	epsgs := []int{4326, 3857, 2056}
+	epsgs := []int{4326, 3857, 2056, 4269, 4807, 2263}
 	lats := []float64{0, 30, 47, 60}
 	pixelSizes := []float64{1.0, 10.0, 100.0}
 

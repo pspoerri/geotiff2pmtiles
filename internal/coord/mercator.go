@@ -115,37 +115,35 @@ func ResolutionAtLat(lat float64, zoom int, tileSize int) float64 {
 }
 
 // PixelSizeInGroundMeters converts a pixel size from CRS units to ground meters.
-// For geographic CRS (EPSG:4326), the pixel size is in degrees.
+// For geographic CRSs (EPSG:4326, 4269, 4258, ...), the pixel size is in degrees.
 // For Web Mercator (EPSG:3857), it's in projected meters (stretched by 1/cos(lat)).
-// For metric projections (e.g. EPSG:2056), it's already in meters.
+// For other projections, it's in the CRS's linear unit (meters, feet, US survey feet).
 func PixelSizeInGroundMeters(pixelSizeCRS float64, epsg int, lat float64) float64 {
-	switch epsg {
-	case 4326:
-		// Degrees of longitude to ground meters at the given latitude.
-		return pixelSizeCRS * EarthCircumference * math.Cos(lat*math.Pi/180.0) / 360.0
-	case 3857:
+	if epsg == 3857 {
 		// Web Mercator meters to ground meters at the given latitude.
 		return pixelSizeCRS * math.Cos(lat*math.Pi/180.0)
-	default:
-		// Assume metric CRS (e.g. EPSG:2056).
-		return pixelSizeCRS
 	}
+	size, geographic := unitSize(epsg)
+	if geographic {
+		// Degrees of longitude to ground meters at the given latitude.
+		return pixelSizeCRS * size * EarthCircumference * math.Cos(lat*math.Pi/180.0) / 360.0
+	}
+	return pixelSizeCRS * size
 }
 
 // MetersToPixelSizeCRS converts a ground-meter pixel size to CRS units.
 // This is the inverse of PixelSizeInGroundMeters.
 func MetersToPixelSizeCRS(meters float64, epsg int, lat float64) float64 {
-	switch epsg {
-	case 4326:
-		// Ground meters to degrees of longitude at the given latitude.
-		return meters * 360.0 / (EarthCircumference * math.Cos(lat*math.Pi/180.0))
-	case 3857:
+	if epsg == 3857 {
 		// Ground meters to Web Mercator meters at the given latitude.
 		return meters / math.Cos(lat*math.Pi/180.0)
-	default:
-		// Assume metric CRS (e.g. EPSG:2056).
-		return meters
 	}
+	size, geographic := unitSize(epsg)
+	if geographic {
+		// Ground meters to degrees of longitude at the given latitude.
+		return meters * 360.0 / (EarthCircumference * math.Cos(lat*math.Pi/180.0)) / size
+	}
+	return meters / size
 }
 
 // MaxZoomForResolution calculates the maximum zoom level whose ground resolution
