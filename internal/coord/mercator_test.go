@@ -177,6 +177,11 @@ func TestMinZoomForSingleTile(t *testing.T) {
 		{"world", -180, -85.05, 180, 85.05, 0},
 		// Western hemisphere spans 2 tiles at zoom 1, so single-tile zoom is 0.
 		{"western hemisphere", -180, -85.05, 0, 85.05, 0},
+		// Europe straddles the prime meridian, so only zoom 0 holds it whole.
+		{"europe", -25, 34, 45, 72, 0},
+		// Data ending exactly on a tile edge (z2 tile 2/1 spans lon 0–90,
+		// lat 0–66.51) fits that tile; the shared edge is not a second tile.
+		{"tile aligned", 0.001, 0.001, 90, 66.5, 2},
 	}
 
 	for _, tt := range tests {
@@ -187,9 +192,11 @@ func TestMinZoomForSingleTile(t *testing.T) {
 					tt.minLon, tt.maxLon, tt.minLat, tt.maxLat, got, tt.wantZoom)
 			}
 			// Verify the result: bounds must fit in exactly one tile at the returned zoom.
+			// The east/south edges are exclusive, as in MinZoomForSingleTile.
+			eastLon, southLat := tt.maxLon-1e-9, tt.minLat+1e-9
 			if got >= 0 {
 				minTX, minTY := LonLatToTile(tt.minLon, tt.maxLat, got)
-				maxTX, maxTY := LonLatToTile(tt.maxLon, tt.minLat, got)
+				maxTX, maxTY := LonLatToTile(eastLon, southLat, got)
 				if minTX != maxTX || minTY != maxTY {
 					t.Errorf("at zoom %d, bounds span tiles (%d,%d)-(%d,%d), expected single tile",
 						got, minTX, minTY, maxTX, maxTY)
@@ -200,7 +207,7 @@ func TestMinZoomForSingleTile(t *testing.T) {
 			if got < 28 {
 				z1 := got + 1
 				minTX, minTY := LonLatToTile(tt.minLon, tt.maxLat, z1)
-				maxTX, maxTY := LonLatToTile(tt.maxLon, tt.minLat, z1)
+				maxTX, maxTY := LonLatToTile(eastLon, southLat, z1)
 				if minTX == maxTX && minTY == maxTY && tt.wantZoom != 28 {
 					t.Errorf("at zoom %d (one above), bounds still fit in a single tile — MinZoomForSingleTile should have returned %d",
 						z1, z1)
