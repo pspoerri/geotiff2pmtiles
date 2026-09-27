@@ -172,6 +172,16 @@ func MaxZoomForResolution(pixelSizeMeters float64, centerLat float64, tileSize i
 // At this zoom level the entire image can be seen in one tile without panning.
 // Returns 0 if the bounds span multiple tiles even at zoom 1.
 func MinZoomForSingleTile(minLon, minLat, maxLon, maxLat float64) int {
+	// Treat the east/south edges as exclusive: data ending exactly on a tile
+	// boundary (e.g. lon 0–90) does not reach into the next tile. 1e-9° is
+	// far below one z28 tile (~1.3e-6°).
+	const edge = 1e-9
+	if maxLon-minLon > edge {
+		maxLon -= edge
+	}
+	if maxLat-minLat > edge {
+		minLat += edge
+	}
 	for z := 1; z <= 28; z++ {
 		minTX, minTY := LonLatToTile(minLon, maxLat, z)
 		maxTX, maxTY := LonLatToTile(maxLon, minLat, z)
