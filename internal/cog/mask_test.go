@@ -61,14 +61,15 @@ func TestInternalMaskAppliedAsAlpha(t *testing.T) {
 		make([]byte, 32), // level 0 tile (1,1): none valid
 		maskTile(func(x, y int) bool { return y < 8 }), // overview: top half
 	}
-	build := func(overviewMask bool) []byte {
+	build := func(imageMask, overviewMask bool) []byte {
 		return buildTIFF(false, blobs, func(o []uint64) [][]tagEntry {
 			img, m00, m10, m11, ov := o[0], o[1], o[2], o[3], o[4]
 			ifds := [][]tagEntry{
 				imageEntries(32, 32, 16, 16, 8, []uint64{img, img, img, img}, []uint64{256, 256, 256, 256}),
 				imageEntries(16, 16, 16, 16, 8, []uint64{img}, []uint64{256}, entry(tagNewSubfileType, dtLong, 1)),
-				// Tile (0,1) of the mask is sparse.
-				maskEntries(32, 4, []uint64{m00, m10, 0, m11}, []uint64{32, 32, 0, 32}),
+			}
+			if imageMask { // tile (0,1) of it is sparse
+				ifds = append(ifds, maskEntries(32, 4, []uint64{m00, m10, 0, m11}, []uint64{32, 32, 0, 32}))
 			}
 			if overviewMask {
 				ifds = append(ifds, maskEntries(16, 5, []uint64{ov}, []uint64{32}))
@@ -77,7 +78,7 @@ func TestInternalMaskAppliedAsAlpha(t *testing.T) {
 		})
 	}
 
-	r, err := openCrafted(t, "masked.tif", build(true))
+	r, err := openCrafted(t, "masked.tif", build(true, true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,13 +110,28 @@ func TestInternalMaskAppliedAsAlpha(t *testing.T) {
 
 	// An overview without a mask would read the masked area as opaque at
 	// the zooms it serves; it is dropped, so level 0 serves them instead.
-	r2, err := openCrafted(t, "masked-no-overview-mask.tif", build(false))
+	r2, err := openCrafted(t, "masked-no-overview-mask.tif", build(true, false))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r2.Close()
 	if got := r2.IFDCount(); got != 1 {
 		t.Errorf("without an overview mask: IFDCount() = %d, want 1", got)
+	}
+
+	// Without a mask for the full-resolution image, an overview's mask is
+	// ignored too, so that the source is masked alike at every zoom.
+	r3, err := openCrafted(t, "masked-overview-only.tif", build(false, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r3.Close()
+	img, err := r3.ReadTile(1, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := alphaGrid(img), "####/####/####/####/"; r3.IFDCount() != 2 || got != want {
+		t.Errorf("overview mask only: %d levels, overview alpha %s; want 2 levels, %s", r3.IFDCount(), got, want)
 	}
 }
 

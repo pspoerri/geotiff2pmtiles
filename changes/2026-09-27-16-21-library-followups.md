@@ -32,7 +32,8 @@ regression test that failed before the fix.
 - GDAL internal masks (NewSubfileType bit 2 + Photometric 4, one per level, paired by size
   and tiling) are applied as alpha by `ReadTile`, so masked pixels of JPEG COGs are
   transparent and later sources show through. A sparse mask tile is all invalid, as GDAL
-  reads it. When level 0 has a mask, overviews without one are dropped. Checked against
+  reads it. Masks apply only when level 0 has one, and overviews without one are then
+  dropped, so a source is masked alike at every zoom. Checked against
   `gdal_translate -b mask` on GDAL-written COGs: no mismatching pixel at any level.
 - `toRGBA` uses draw's YCbCr path (same bytes, 4x faster); masked JPEG tiles go through it.
 - Unsupported layouts (predictor on bit-packed samples) fail at open with the file name

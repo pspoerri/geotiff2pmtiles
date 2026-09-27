@@ -226,16 +226,18 @@ func (ifd *IFD) usableMask() bool {
 // (a zero IFD if there is none), or nil when the file has no masks at all.
 // GDAL writes one per level, though not always right after its image.
 //
-// Once the full-resolution image has a mask, an overview without one is
-// dropped, filtering levels in place: read unmasked, it would turn the
-// masked area opaque at the zooms it serves, hiding the sources behind it,
-// while the next finer level masks it correctly and costs only speed.
+// Masks apply only when the full-resolution image has one (a striped one
+// cannot be paired), so that a source is masked alike at every zoom. An
+// overview without a mask is then dropped, filtering levels in place: read
+// unmasked, it would turn the masked area opaque at the zooms it serves,
+// hiding the sources behind it, while the next finer level masks it
+// correctly and costs only speed.
 func levelMasks(levels, masks []IFD) ([]IFD, []IFD) {
 	if len(masks) == 0 {
 		return levels, nil
 	}
 	kept, paired := levels[:0], make([]IFD, 0, len(levels))
-	for _, l := range levels {
+	for i, l := range levels {
 		var m IFD
 		for _, c := range masks {
 			if c.Width == l.Width && c.Height == l.Height && c.TileWidth == l.TileWidth && c.TileHeight == l.TileHeight {
@@ -243,7 +245,11 @@ func levelMasks(levels, masks []IFD) ([]IFD, []IFD) {
 				break
 			}
 		}
-		if m.Width == 0 && len(paired) > 0 && paired[0].Width != 0 {
+		switch {
+		case m.Width != 0:
+		case i == 0:
+			return levels, nil // no usable mask for the full-resolution image
+		default:
 			continue // an overview of a masked image, without a mask
 		}
 		kept = append(kept, l)
