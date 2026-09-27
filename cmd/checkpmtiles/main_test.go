@@ -142,6 +142,14 @@ func TestCheck(t *testing.T) {
 		t.Error("an archive with min zoom 5 > max zoom 2 passed")
 	}
 
+	// The writer archive holds z1 tiles only; a header claiming z2-3 would
+	// leave them unreachable.
+	outside := writeArchive(t, 4)
+	patchHeader(t, outside, func(h *pmtiles.Header) { h.MinZoom, h.MaxZoom = 2, 3 })
+	if check(openSource(t, outside)) {
+		t.Error("an archive with tiles outside its zoom range passed")
+	}
+
 	miscounted := writeNestedUncompressed(t)
 	patchHeader(t, miscounted, func(h *pmtiles.Header) { h.NumAddressedTiles = 7 })
 	if check(openSource(t, miscounted)) {

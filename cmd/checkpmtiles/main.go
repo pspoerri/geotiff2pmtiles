@@ -6,7 +6,8 @@
 //
 // It checks header consistency, the 16 KiB root directory budget, every
 // directory (root and leaves, at any depth), the absence of trailing bytes,
-// the zoom range and that the archive addresses tiles. Exits with code 1 on
+// the zoom range (MinZoom <= MaxZoom, and every addressed tile inside it) and
+// that the archive addresses tiles. Exits with code 1 on
 // any error and 2 on a usage error.
 package main
 
@@ -177,6 +178,19 @@ func check(src dataSource) bool {
 	} else if h.NumAddressedTiles != 0 && w.addressed != h.NumAddressedTiles {
 		fail("directories address %d tiles, header says %d", w.addressed, h.NumAddressedTiles)
 	}
+	// Clients only request zooms in the header's range, so tiles outside it
+	// are unreachable.
+	if w.addressed > 0 && h.MinZoom <= h.MaxZoom && h.MaxZoom < 31 {
+		lo := pmtiles.ZXYToTileID(int(h.MinZoom), 0, 0)
+		hi := pmtiles.ZXYToTileID(int(h.MaxZoom)+1, 0, 0)
+		if w.minID < lo || w.maxID >= hi {
+			minZ, _, _ := pmtiles.TileIDToZXY(w.minID)
+			maxZ, _, _ := pmtiles.TileIDToZXY(w.maxID)
+			fail("tiles span zoom %d-%d, outside the header's %d-%d", minZ, maxZ, h.MinZoom, h.MaxZoom)
+		} else {
+			fmt.Printf("  Tiles within zoom range: OK\n")
+		}
+	}
 
 	return !failed
 }
@@ -192,6 +206,8 @@ type dirWalk struct {
 	entries   int
 	trailing  int // directories with trailing bytes
 	addressed uint64
+	minID     uint64 // smallest and largest addressed tile ID
+	maxID     uint64
 }
 
 // dir parses one directory and recurses into its leaves. It returns false
@@ -218,6 +234,10 @@ func (w *dirWalk) dir(name string, data []byte, depth int) bool {
 	}
 	for _, e := range entries {
 		if e.RunLength > 0 {
+			if w.entries == 0 || e.TileID < w.minID {
+				w.minID = e.TileID
+			}
+			w.maxID = max(w.maxID, e.TileID+uint64(e.RunLength)-1)
 			w.entries++
 			w.addressed += uint64(e.RunLength)
 			continue
