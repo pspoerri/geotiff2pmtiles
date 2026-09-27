@@ -2,9 +2,9 @@
 // through a ByteSource, a memory map unless the caller supplies another. It
 // parses the IFDs and GeoTIFF keys (or a .tfw world file), keeps the levels
 // that can serve as overviews, promotes strips to virtual tiles, and decodes
-// samples to straight-alpha RGBA, float32 or raw uint16, applying band
-// mapping, rescaling, nodata and GDAL internal masks. Decoded tiles are
-// shared between workers through sharded LRU caches.
+// samples to float32, raw uint16 or straight-alpha RGBA; the RGBA path
+// applies band mapping, rescaling, nodata and GDAL internal masks. Decoded
+// tiles are shared between workers through sharded LRU caches.
 package cog
 
 import (
