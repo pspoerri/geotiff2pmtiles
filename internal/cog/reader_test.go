@@ -101,6 +101,28 @@ func TestUndoHorizontalDifferencing32Bit(t *testing.T) {
 	}
 }
 
+// Predictor=2 on 64-bit samples (libtiff supports it, e.g. a Float64 DEM)
+// must accumulate whole 64-bit words, not bytes.
+func TestUndoHorizontalDifferencing64Bit(t *testing.T) {
+	bo := binary.LittleEndian
+	want := []float64{112.5, 116, 119.5, 123}
+	data := make([]byte, 8*len(want))
+	prev := uint64(0)
+	for i, v := range want {
+		bits := math.Float64bits(v)
+		bo.PutUint64(data[i*8:], bits-prev) // the difference, mod 2^64
+		prev = bits
+	}
+
+	undoHorizontalDifferencing(data, len(want), 1, 8, bo)
+
+	for i := range want {
+		if got := math.Float64frombits(bo.Uint64(data[i*8:])); got != want[i] {
+			t.Errorf("sample %d: got %v, want %v", i, got, want[i])
+		}
+	}
+}
+
 // encodeFloatPredictor applies TIFF predictor=3 the way libtiff's fpDiff does:
 // byte-shuffle into planes with the most-significant byte plane first
 // (independent of file byte order), then byte-level horizontal differencing

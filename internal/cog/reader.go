@@ -413,6 +413,9 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 	if col < 0 || col >= tilesAcross || row < 0 || row >= tilesDown {
 		return nil, nil, fmt.Errorf("tile (%d,%d) out of range (%dx%d)", col, row, tilesAcross, tilesDown)
 	}
+	if err := r.checkLayout(ifd, level); err != nil {
+		return nil, nil, err
+	}
 
 	// Strip-based: read individual strips and concatenate.
 	if r.strip != nil && level == 0 {
@@ -472,6 +475,24 @@ func (r *Reader) readTileRaw(level, col, row int) ([]byte, *IFD, error) {
 
 	applyPredictor(ifd, decompressed, int(ifd.TileWidth), r.bo)
 	return decompressed, ifd, nil
+}
+
+// checkLayout rejects the sample layouts the decoders cannot handle -- they
+// would loop forever, panic or misread -- so that the first read fails with a
+// clear error. No conformant writer produces them: libtiff refuses a
+// predictor at depths other than 8, 16, 32 and 64, and planar-separate strips
+// of bit-packed samples would have to be unpacked before interleaving.
+func (r *Reader) checkLayout(ifd *IFD, level int) error {
+	bits := ifd.bitsPerSample()
+	switch {
+	case bits%8 == 0:
+		return nil
+	case ifd.Predictor > 1:
+		return fmt.Errorf("predictor %d with %d-bit samples is not supported", ifd.Predictor, bits)
+	case r.strip != nil && level == 0 && r.strip.planes > 1:
+		return fmt.Errorf("planar-separate (PlanarConfiguration=2) strips of %d-bit samples are not supported", bits)
+	}
+	return nil
 }
 
 // readStripTileRaw reads the strips that compose a virtual tile row and
@@ -658,7 +679,21 @@ func applyPredictor(ifd *IFD, data []byte, width int, bo binary.ByteOrder) {
 // For multi-byte data, deltas are accumulated at the sample width.
 func undoHorizontalDifferencing(data []byte, width, samplesPerPixel, bytesPerSample int, bo binary.ByteOrder) {
 	rowBytes := width * samplesPerPixel * bytesPerSample
+	if rowBytes <= 0 {
+		return // no whole-byte samples (checkLayout rejects a predictor there)
+	}
 	switch bytesPerSample {
+	case 8:
+		for off := 0; off+rowBytes <= len(data); off += rowBytes {
+			row := data[off : off+rowBytes]
+			for x := samplesPerPixel; x < width*samplesPerPixel; x++ {
+				byteOff := x * 8
+				prevOff := (x - samplesPerPixel) * 8
+				cur := bo.Uint64(row[byteOff : byteOff+8])
+				prev := bo.Uint64(row[prevOff : prevOff+8])
+				bo.PutUint64(row[byteOff:byteOff+8], cur+prev)
+			}
+		}
 	case 4:
 		for off := 0; off+rowBytes <= len(data); off += rowBytes {
 			row := data[off : off+rowBytes]
@@ -701,6 +736,9 @@ func undoHorizontalDifferencing(data []byte, width, samplesPerPixel, bytesPerSam
 // file's byte order so downstream decoding with the file's ByteOrder works.
 func undoFloatingPointPredictor(data []byte, width, samplesPerPixel, bytesPerSample int, bo binary.ByteOrder) {
 	rowBytes := width * samplesPerPixel * bytesPerSample
+	if rowBytes <= 0 {
+		return // no whole-byte samples (checkLayout rejects a predictor there)
+	}
 	tmp := make([]byte, rowBytes)
 
 	for off := 0; off+rowBytes <= len(data); off += rowBytes {
@@ -1063,6 +1101,9 @@ func (r *Reader) readTileDecoded(level, col, row int) (image.Image, error) {
 
 	if col < 0 || col >= tilesAcross || row < 0 || row >= tilesDown {
 		return nil, fmt.Errorf("tile (%d,%d) out of range (%dx%d)", col, row, tilesAcross, tilesDown)
+	}
+	if err := r.checkLayout(ifd, level); err != nil {
+		return nil, err
 	}
 
 	// Strip-based: compose virtual tile from individual strips.
