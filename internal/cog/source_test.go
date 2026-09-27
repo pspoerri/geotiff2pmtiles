@@ -3,6 +3,8 @@ package cog
 import (
 	"bytes"
 	"errors"
+	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"testing"
@@ -247,6 +249,88 @@ func TestReaderIDsAreUnique(t *testing.T) {
 	readers[0].SetID(-1)
 	if got := readers[0].ID(); got != -1 {
 		t.Errorf("ID() after SetID(-1) = %d", got)
+	}
+}
+
+// sourceReadSeeker behaves like bytes.Reader under io.ReadFull and Seek,
+// across read-ahead block boundaries, past EOF and for bad seeks.
+func TestSourceReadSeekerMatchesBytesReader(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	data := make([]byte, 3*readAhead+123)
+	for i := range data {
+		data[i] = byte(rng.IntN(256))
+	}
+	got := &sourceReadSeeker{src: bytesSource(data)}
+	want := bytes.NewReader(data)
+	size := int64(len(data))
+	for i := 0; i < 5000; i++ {
+		if rng.IntN(3) == 0 {
+			whence := rng.IntN(4) // 3 is invalid
+			off := rng.Int64N(2*size) - size/2
+			gp, gerr := got.Seek(off, whence)
+			wp, werr := want.Seek(off, whence)
+			if (gerr != nil) != (werr != nil) || gp != wp && werr == nil {
+				t.Fatalf("op %d: Seek(%d, %d) = %d, %v; bytes.Reader: %d, %v", i, off, whence, gp, gerr, wp, werr)
+			}
+			continue
+		}
+		n := rng.IntN(readAhead + 100)
+		if rng.IntN(4) == 0 {
+			n = rng.IntN(16) // parser-sized reads, including 0
+		}
+		gb, wb := make([]byte, n), make([]byte, n)
+		gn, gerr := io.ReadFull(got, gb)
+		wn, werr := io.ReadFull(want, wb)
+		if gn != wn || gerr != werr || !bytes.Equal(gb[:gn], wb[:wn]) {
+			t.Fatalf("op %d: ReadFull(%d) = %d, %v; bytes.Reader: %d, %v", i, n, gn, gerr, wn, werr)
+		}
+	}
+}
+
+// countingSource counts Slice calls.
+type countingSource struct {
+	bytesSource
+	calls *int
+}
+
+func (c countingSource) Slice(off, end uint64) ([]byte, error) {
+	*c.calls++
+	return c.bytesSource.Slice(off, end)
+}
+
+// Opening a COG reads its header and IFDs in one Slice call rather than one
+// per directory entry: over HTTP each call is a round trip.
+func TestOpenSourceBatchesHeaderReads(t *testing.T) {
+	const tile = 16 * 16
+	geo := []tagEntry{
+		doubles(tagModelPixelScaleTag, 10, 10, 0),
+		doubles(tagModelTiepointTag, 0, 0, 0, 500000, 5300000, 0),
+		entry(tagGeoKeyDirectoryTag, dtShort, 1, 1, 0, 1, gkProjectedCSTypeGeoKey, 0, 1, 32632),
+	}
+	data := buildTIFF(false, [][]byte{make([]byte, tile)}, func(offs []uint64) [][]tagEntry {
+		var ifds [][]tagEntry
+		for w := 128; w >= 16; w /= 2 {
+			n := (w / 16) * (w / 16)
+			tileOffs, tileCounts := make([]uint64, n), make([]uint64, n)
+			for i := range tileOffs {
+				tileOffs[i], tileCounts[i] = offs[0], tile
+			}
+			ifds = append(ifds, imageEntries(w, w, 16, 16, 8, tileOffs, tileCounts, geo...))
+		}
+		return ifds
+	})
+
+	var calls int
+	r, err := OpenSource("cog.tif", countingSource{bytesSource(data), &calls})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if r.IFDCount() != 4 {
+		t.Fatalf("IFDCount() = %d, want 4", r.IFDCount())
+	}
+	if calls > 1 {
+		t.Errorf("OpenSource made %d Slice calls for a %d-byte file, want 1", calls, len(data))
 	}
 }
 

@@ -12,7 +12,8 @@ import (
 // local files. Reading COGs straight out of object storage needs the same
 // reader over HTTP range requests, so every byte access goes through this
 // interface instead. mmapSource keeps the local path zero-copy, so nothing
-// regresses for on-disk inputs.
+// regresses for on-disk inputs. OpenSource reads the header and IFDs in
+// 64 KiB blocks; after that, each tile or strip read is one Slice call.
 type ByteSource interface {
 	// Size reports the total length of the source in bytes.
 	Size() int64
@@ -72,12 +73,19 @@ func (m mmapSource) Close() error {
 	return munmapFile(m)
 }
 
+// readAhead is the block size sourceReadSeeker fetches per Slice call.
+const readAhead = 64 << 10
+
 // sourceReadSeeker adapts a ByteSource to the io.ReadSeeker that parseTIFF
-// wants. Only the header and IFD chain are read through it, so the naive
-// per-call slicing costs nothing measurable.
+// wants. The parser reads a few bytes per directory entry, about 150 reads
+// for a typical COG; over a remote source each Slice is a round trip, so
+// reads are served from a read-ahead block instead. GDAL COGs keep the
+// header and all IFDs in the first few KiB, so opening one takes one Slice.
 type sourceReadSeeker struct {
-	src ByteSource
-	pos int64
+	src    ByteSource
+	pos    int64
+	buf    []byte // read-ahead block starting at bufOff
+	bufOff int64
 }
 
 func (s *sourceReadSeeker) Read(p []byte) (int, error) {
@@ -85,15 +93,21 @@ func (s *sourceReadSeeker) Read(p []byte) (int, error) {
 	if s.pos >= size {
 		return 0, io.EOF
 	}
-	end := s.pos + int64(len(p))
-	if end > size {
-		end = size
+	if s.pos < s.bufOff || s.pos >= s.bufOff+int64(len(s.buf)) {
+		n := int64(len(p))
+		if n < readAhead {
+			n = readAhead
+		}
+		if n > size-s.pos {
+			n = size - s.pos
+		}
+		b, err := s.src.Slice(uint64(s.pos), uint64(s.pos+n))
+		if err != nil {
+			return 0, err
+		}
+		s.buf, s.bufOff = b, s.pos
 	}
-	b, err := s.src.Slice(uint64(s.pos), uint64(end))
-	if err != nil {
-		return 0, err
-	}
-	n := copy(p, b)
+	n := copy(p, s.buf[s.pos-s.bufOff:])
 	s.pos += int64(n)
 	return n, nil
 }
