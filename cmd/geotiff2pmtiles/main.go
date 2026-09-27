@@ -74,7 +74,7 @@ func main() {
 	flag.BoolVar(&verbose, "verbose", false, "Verbose progress output")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	profiles := cli.RegisterProfileFlags(flag.CommandLine)
-	flag.IntVar(&memLimitMB, "mem-limit", 0, "MB of encoded tiles allowed to queue for the spill file before workers pause (0 = auto: 90% of RAM minus 2 GB; spilling is off if that is under 512 MB)")
+	flag.IntVar(&memLimitMB, "mem-limit", 0, "MB of encoded tiles allowed to queue for the spill file before workers pause (0 = auto: 90% of RAM, or of the cgroup limit on Linux, minus current usage minus 2 GB, never below 256 MB; spilling is always on unless --no-spill)")
 	flag.BoolVar(&noSpill, "no-spill", false, "Disable disk spilling (keep all tiles in memory)")
 	flag.StringVar(&tmpDirFlag, "tmp-dir", "", "Directory for temporary files, about 2x the output size at peak (default: the output file's directory)")
 	flag.StringVar(&nodataColor, "nodata-color", "none", "RGBA color, e.g. \"0,0,0,255\" or \"#000000ff\", that replaces transparent/nodata pixels; none = keep them transparent")
@@ -467,9 +467,9 @@ func main() {
 	if noSpill {
 		fmt.Printf("  %-14s disabled (all in memory)\n", "Disk spill:")
 	} else if memLimitMB > 0 {
-		fmt.Printf("  %-14s %d MB\n", "Mem limit:", memLimitMB)
+		fmt.Printf("  %-14s %d MB\n", "Spill queue:", memLimitMB)
 	} else {
-		fmt.Printf("  %-14s auto (~90%% of RAM)\n", "Mem limit:")
+		fmt.Printf("  %-14s %d MB (auto)\n", "Spill queue:", tile.ComputeMemoryLimit(tile.DefaultMemoryPressurePercent, false)>>20)
 	}
 	if bandCfg.Bands != ([3]int{1, 2, 3}) || bandCfg.AlphaBand != 0 || bandCfg.Rescale != cog.RescaleNone {
 		fmt.Printf("  %-14s %d,%d,%d\n", "Bands:", bandCfg.Bands[0], bandCfg.Bands[1], bandCfg.Bands[2])
