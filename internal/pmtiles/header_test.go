@@ -325,6 +325,33 @@ func TestArchiveBounds_Antimeridian(t *testing.T) {
 	}
 }
 
+// Bounds alone cannot give back the centre of data across the antimeridian,
+// recorded as -180..180, so a copy passes the source's Center through
+// WriterOptions.Center; header and metadata both keep it.
+func TestWriterOptions_Center(t *testing.T) {
+	src := NewHeader(WriterOptions{Bounds: cog.Bounds{MinLon: 179, MaxLon: 181, MinLat: -17, MaxLat: -16}, MaxZoom: 9})
+	c := src.Center()
+	if c != (Center{Lon: 180, Lat: -16.5, Zoom: 4}) {
+		t.Fatalf("Center() = %+v, want lon 180, lat -16.5, zoom 4", c)
+	}
+
+	opts := WriterOptions{Bounds: src.Bounds(), Center: &c, MinZoom: 2, MaxZoom: 9}
+	if got := NewHeader(opts).Center(); got != c {
+		t.Errorf("header centre %+v, want %+v", got, c)
+	}
+	raw, err := (&Writer{opts: opts}).buildMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta["center"] != "180.000000,-16.500000,4" {
+		t.Errorf("metadata centre %v, want 180.000000,-16.500000,4", meta["center"])
+	}
+}
+
 // The metadata "format" names every tile type, as TileTypeString does; MVT,
 // AVIF and MLT used to be written as "unknown".
 func TestBuildMetadata_Format(t *testing.T) {

@@ -411,7 +411,8 @@ func (w *Writer) buildMetadata() ([]byte, error) {
 		layerType = "baselayer"
 	}
 
-	b, centerLon := archiveBounds(w.opts.Bounds)
+	b, _ := archiveBounds(w.opts.Bounds)
+	c := archiveCenter(w.opts)
 	meta := map[string]interface{}{
 		"name":        name,
 		"description": description,
@@ -420,8 +421,7 @@ func (w *Writer) buildMetadata() ([]byte, error) {
 		"minzoom":     fmt.Sprintf("%d", w.opts.MinZoom),
 		"maxzoom":     fmt.Sprintf("%d", w.opts.MaxZoom),
 		"bounds":      fmt.Sprintf("%.6f,%.6f,%.6f,%.6f", b.MinLon, b.MinLat, b.MaxLon, b.MaxLat),
-		"center": fmt.Sprintf("%.6f,%.6f,%d",
-			centerLon, (b.MinLat+b.MaxLat)/2, (w.opts.MinZoom+w.opts.MaxZoom)/2),
+		"center":      fmt.Sprintf("%.6f,%.6f,%d", c.Lon, c.Lat, c.Zoom),
 	}
 
 	if w.opts.Attribution != "" {

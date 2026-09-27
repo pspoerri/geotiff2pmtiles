@@ -80,9 +80,21 @@ func archiveBounds(b cog.Bounds) (cog.Bounds, float64) {
 	return b, centerLon
 }
 
+// archiveCenter returns the centre an archive records for opts, in its
+// header and its metadata alike: opts.Center, or else the middle of the
+// bounds (see archiveBounds) and of the zoom range.
+func archiveCenter(opts WriterOptions) Center {
+	if opts.Center != nil {
+		return *opts.Center
+	}
+	b, centerLon := archiveBounds(opts.Bounds)
+	return Center{Lon: centerLon, Lat: (b.MinLat + b.MaxLat) / 2, Zoom: (opts.MinZoom + opts.MaxZoom) / 2}
+}
+
 // NewHeader creates a header with basic metadata.
 func NewHeader(opts WriterOptions) Header {
-	b, centerLon := archiveBounds(opts.Bounds)
+	b, _ := archiveBounds(opts.Bounds)
+	c := archiveCenter(opts)
 	h := Header{
 		Clustered:           true,
 		InternalCompression: CompressionGzip,
@@ -90,12 +102,12 @@ func NewHeader(opts WriterOptions) Header {
 		TileType:            opts.TileFormat,
 		MinZoom:             uint8(opts.MinZoom),
 		MaxZoom:             uint8(opts.MaxZoom),
-		CenterZoom:          uint8((opts.MinZoom + opts.MaxZoom) / 2),
+		CenterZoom:          uint8(c.Zoom),
 		// Minimums round down and maximums up, so the bbox contains the data.
 		e7: [6]uint32{
 			degToE7(b.MinLon, math.Floor), degToE7(b.MinLat, math.Floor),
 			degToE7(b.MaxLon, math.Ceil), degToE7(b.MaxLat, math.Ceil),
-			degToE7(centerLon, math.Round), degToE7((b.MinLat+b.MaxLat)/2, math.Round),
+			degToE7(c.Lon, math.Round), degToE7(c.Lat, math.Round),
 		},
 	}
 	h.setLonLatFromE7()
@@ -126,9 +138,17 @@ func (h Header) boundsE7() [6]uint32 {
 // precision; the float32 fields are off by up to 7.6e-6 degrees (~0.85 m).
 func (h Header) Bounds() cog.Bounds {
 	e7 := h.boundsE7()
-	deg := func(v uint32) float64 { return float64(int32(v)) / 1e7 }
-	return cog.Bounds{MinLon: deg(e7[0]), MinLat: deg(e7[1]), MaxLon: deg(e7[2]), MaxLat: deg(e7[3])}
+	return cog.Bounds{MinLon: e7ToDeg(e7[0]), MinLat: e7ToDeg(e7[1]), MaxLon: e7ToDeg(e7[2]), MaxLat: e7ToDeg(e7[3])}
 }
+
+// Center returns the centre at the file format's full precision, as Bounds
+// does the bounds.
+func (h Header) Center() Center {
+	e7 := h.boundsE7()
+	return Center{Lon: e7ToDeg(e7[4]), Lat: e7ToDeg(e7[5]), Zoom: int(h.CenterZoom)}
+}
+
+func e7ToDeg(v uint32) float64 { return float64(int32(v)) / 1e7 }
 
 // Serialize writes the 127-byte header.
 func (h *Header) Serialize() []byte {
@@ -263,6 +283,12 @@ func e7ToLonLat(v uint32) float32 {
 	return float32(float64(int32(v)) / 1e7)
 }
 
+// Center is the position and zoom a viewer opens an archive at.
+type Center struct {
+	Lon, Lat float64
+	Zoom     int
+}
+
 // WriterOptions holds configuration for the PMTiles writer.
 type WriterOptions struct {
 	// TempDir is the directory for temporary tile data files.
@@ -288,6 +314,11 @@ type WriterOptions struct {
 	TileSize   int
 	Bounds     cog.Bounds
 	TileFormat uint8
+	// Center, when set, is the centre recorded instead of the one derived
+	// from Bounds and the zoom range. A copy of an archive passes its
+	// source's Header.Center: the recorded bounds of data crossing the
+	// antimeridian are -180..180 (see archiveBounds), whose middle is 0.
+	Center *Center
 	// Extra is merged into the metadata JSON, overriding the derived keys.
 	// It is for what the fixed keys have no room for -- a provenance record
 	// of the sources behind the archive, say.

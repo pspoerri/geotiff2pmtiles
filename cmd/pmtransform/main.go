@@ -276,7 +276,12 @@ func main() {
 		memoryLimitBytes = int64(memLimitMB) * 1024 * 1024
 	}
 
-	bounds := [4]float32{srcHeader.MinLon, srcHeader.MinLat, srcHeader.MaxLon, srcHeader.MaxLat}
+	// Only fill tiles use the bounds, and working them out can list every
+	// max zoom tile.
+	var bounds [4]float32
+	if missingFill != nil {
+		bounds = fillBounds(reader)
+	}
 
 	// Print settings summary.
 	modeStr := "passthrough"
@@ -356,10 +361,15 @@ func main() {
 	if terrarium {
 		encoding = "terrarium"
 	}
+	// Keep the source's centre: its recorded bounds are -180..180 for data
+	// across the antimeridian, whose middle is not on the data.
+	center := srcHeader.Center()
+	center.Zoom = min(max(center.Zoom, minZoom), maxZoom)
 	writer, err := pmtiles.NewWriter(outputPath, pmtiles.WriterOptions{
 		MinZoom:     minZoom,
 		MaxZoom:     maxZoom,
 		Bounds:      srcHeader.Bounds(),
+		Center:      &center,
 		TileFormat:  tileFormat,
 		TileSize:    tileSize,
 		TempDir:     tmpDir,
@@ -406,6 +416,48 @@ func main() {
 func jpegAlphaWarning(flagName string, c *color.RGBA) string {
 	return fmt.Sprintf("WARNING: %s alpha %d cannot be stored in jpeg; those areas will be opaque rgb(%d,%d,%d)",
 		flagName, c.A, c.R, c.G, c.B)
+}
+
+// fillBounds returns the bounds inside which --fill-missing writes tiles:
+// the source's, except for data across the antimeridian, which archives
+// record as -180..180 (see pmtiles.archiveBounds). Its longitudes come from
+// the max zoom columns the data occupies instead: the shortest run around
+// the globe that holds them all, with MaxLon past 180 as
+// coord.TilesInBounds takes it. Full-width bounds whose data does not
+// cross the antimeridian stay full width.
+func fillBounds(r *pmtiles.Reader) [4]float32 {
+	h := r.Header()
+	b := [4]float32{h.MinLon, h.MinLat, h.MaxLon, h.MaxLat}
+	if h.MinLon > -180 || h.MaxLon < 180 {
+		return b
+	}
+	var cols []int
+	for _, t := range r.TilesAtZoom(int(h.MaxZoom)) {
+		cols = append(cols, t[1])
+	}
+	if len(cols) == 0 {
+		return b
+	}
+	slices.Sort(cols)
+	cols = slices.Compact(cols)
+
+	// The data's run starts after the widest gap between occupied columns.
+	// The gap across the antimeridian, from the last column round to the
+	// first, leaves a run that does not cross it.
+	n := 1 << h.MaxZoom
+	west, east, gap := cols[0], cols[len(cols)-1], cols[0]+n-cols[len(cols)-1]-1
+	for i := 1; i < len(cols); i++ {
+		if g := cols[i] - cols[i-1] - 1; g > gap {
+			west, east, gap = cols[i], cols[i-1]+n, g
+		}
+	}
+	if east < n {
+		return b
+	}
+	// Column centres, which float32 rounding cannot move into a neighbour.
+	lon := func(col int) float32 { return float32((float64(col)+0.5)/float64(n)*360 - 180) }
+	b[0], b[2] = lon(west), lon(east)
+	return b
 }
 
 // discoverSourceTileSize reads and decodes one tile to infer the source tile size.
