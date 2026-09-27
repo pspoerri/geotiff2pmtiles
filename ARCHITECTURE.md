@@ -258,8 +258,8 @@ format, type, minzoom, maxzoom, bounds, center, attribution, encoding) are passe
 
 - Nodata pixels (all bands within `--nodata-tolerance` of the nodata value) are decoded as
   transparent (alpha=0) on every decode path. The value is auto-detected from GDAL_NODATA
-  and overridable with `--nodata`. With nodata active and `--format auto`, output is `webp`
-  instead of `jpeg` so transparency survives encoding. Terrarium takes `--nodata` as a
+  and overridable with `--nodata`. With nodata or a GDAL internal mask active and
+  `--format auto`, output is `webp` instead of `jpeg` so transparency survives encoding. Terrarium takes `--nodata` as a
   float (`tile.Config.FloatNodata`) that overrides every source's tag.
 - GDAL internal masks make masked pixels transparent (see Reading sources).
 - `--nodata-flood` builds a per-source bitmap (1 bit per pixel) by flood-filling from the

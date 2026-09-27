@@ -2530,6 +2530,10 @@ func (r *Reader) IsFloat() bool {
 	return ifd.SampleFormat[0] == 3 || ifd.SampleFormat[0] == 2 // 3 = IEEE float, 2 = signed int
 }
 
+// HasMask reports whether the file carries a GDAL internal mask, which
+// ReadTile applies as alpha.
+func (r *Reader) HasMask() bool { return len(r.masks) > 0 }
+
 // IsIEEEFloat reports whether the samples are IEEE floating point
 // (SampleFormat 3), as opposed to signed integers.
 func (r *Reader) IsIEEEFloat() bool {

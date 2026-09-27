@@ -71,7 +71,7 @@ func main() {
 		sourceEPSG      int
 	)
 
-	flag.StringVar(&format, "format", "auto", "Tile encoding: auto, jpeg, png, webp, terrarium (auto: terrarium for float/signed-int elevation data, webp when nodata is active, else jpeg)")
+	flag.StringVar(&format, "format", "auto", "Tile encoding: auto, jpeg, png, webp, terrarium (auto: terrarium for float/signed-int elevation data, webp when nodata or an internal mask is active, else jpeg)")
 	flag.IntVar(&quality, "quality", 85, "JPEG/WebP quality 1-100 (ignored for png/terrarium; WebP is lossless-only in builds without libwebp)")
 	flag.IntVar(&minZoom, "min-zoom", -1, "Minimum zoom level; -1 = auto: the highest zoom at which the whole extent fits in one tile")
 	flag.IntVar(&maxZoom, "max-zoom", -1, "Maximum zoom level (0-30); -1 = auto from the source resolution")
@@ -317,17 +317,18 @@ func main() {
 	// If nodata is active but the output format can't carry transparency,
 	// switch to WebP automatically (when the user didn't pick --format),
 	// or warn if they explicitly chose jpeg.
+	masked := slices.ContainsFunc(sources, (*cog.Reader).HasMask)
 	if format == "auto" {
 		format = "jpeg"
-		if bandCfg.HasNodata {
+		if bandCfg.HasNodata || masked {
 			format = "webp"
-			log.Printf("Nodata is active; using webp so transparency is preserved (override with --format=jpeg).")
+			log.Printf("Nodata or an internal mask is active; using webp so transparency is preserved (override with --format=jpeg).")
 			if !encode.WebPLossy {
 				log.Printf("WARNING: this build has no lossy WebP encoder (built without libwebp); tiles will be lossless WebP, which is much larger for imagery. Use a libwebp build or --format png.")
 			}
 		}
-	} else if bandCfg.HasNodata && format == "jpeg" {
-		log.Printf("WARNING: --nodata is set but --format=jpeg cannot carry transparency; nodata pixels will be encoded as black. Use --format=webp or --format=png for true transparency.")
+	} else if (bandCfg.HasNodata || masked) && format == "jpeg" {
+		log.Printf("WARNING: nodata or an internal mask is active but --format=jpeg cannot carry transparency; those pixels will be encoded as black. Use --format=webp or --format=png for true transparency.")
 	}
 	enc, err := encode.NewEncoder(format, quality)
 	if err != nil {
