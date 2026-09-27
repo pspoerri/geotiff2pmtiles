@@ -84,6 +84,32 @@ for the stdlib ones that decodes ~20–25% faster with far fewer allocations.
 LZW keeps the in-tree TIFF-variant decoder (`lzw.go`); klauspost/compress has
 no LZW.
 
+### Bit-packed sample depths
+
+TIFF packs samples that are not a whole number of bytes (e.g. 12 or 15 bits) MSB-first,
+restarting each row on a byte boundary. The reader used to assume whole-byte samples, so
+a 15-bit raster decoded as noise without an error. Planetary Computer publishes
+Sentinel-2 L2A reflectance exactly like that (a 512×512 tile is 512·512·15/8 bytes), so
+`decodeRawTile` now indexes samples rather than bytes and unpacks packed tiles once up
+front. Because the tag does not say whether 9-15 bit samples are packed or padded to 16
+bits, the tile length decides. Unpacking reads a 32-bit big-endian window per sample
+(a ≤16-bit sample starting ≤7 bits into a byte spans ≤23 bits): the bit-at-a-time
+version was the hottest function of a Sentinel-2 composite (17% of CPU). The CLI treats
+every 9-16 bit input as "16-bit" for rescaling, so 15-bit input gets the same auto range
+as 16-bit.
+
+### Raw integer reads and the ByteSource seam
+
+`ReadUint16Tile`/`ReadUint16Region` return samples without the rescale to 8 bits that
+`ReadRegion` (an `*image.RGBA`) applies, for callers that composite 16-bit bands
+themselves. `Uint16TileCache` mirrors `FloatTileCache` with one difference: a hit is an
+explicit `ok`, because an empty tile is a legitimate `nil` and must not miss forever
+along a satellite datastrip's empty edge. All byte access goes through a `ByteSource`
+(`Size`/`Slice`/`Close`); `Open` wraps the memory map in one, and `OpenSource` accepts any
+other implementation, e.g. HTTP range reads. Slice is called once per tile, not per sample,
+so the interface costs ~2 ns per tile read. These APIs serve library callers (the
+satcomposite project); no CLI flag uses them yet.
+
 ### BandConfig: band reordering, alpha, and rescaling
 
 Multi-band GeoTIFFs (e.g. 4-band RGBNIR uint16) need band selection, alpha handling,
@@ -206,6 +232,13 @@ logs a note when the fallback is active.
 
 `cog.MergedBoundsWGS84` used to carry its own copy of the EPSG switch and silently
 treated unknown codes as lon/lat; it now uses `coord.ForEPSG` too.
+
+### One CRS per run
+
+The generator builds one projection from the first source's EPSG code and uses it for
+every source. Mixed inputs (e.g. Sentinel-2 tiles from neighbouring UTM zones) would be
+placed silently in the wrong location, so the CLI rejects inputs whose EPSG codes differ
+and points at `gdalwarp`. A projection per source would lift this restriction.
 
 ### EPSG inference from coordinates
 
@@ -378,6 +411,13 @@ Empty tiles and transparent/nodata pixels should be modeled as a **color transfo
   downsample code receives 4 tiles and operates normally. No transform in the
   downsample path.
 
+- **Defaults**: `geotiff2pmtiles` fills with transparent (`0,0,0,0`) by default, so areas
+  without data render transparent rather than as the viewer's background. JPEG cannot
+  store transparency and would turn every uncovered tile position black, so the default
+  fill is dropped for `jpeg` output (an explicit `--fill-color` is kept, with a warning).
+  `pmtransform` defaults to no fill: any fill forces re-encoding, and a non-empty default
+  made the passthrough mode unreachable, so every run re-encoded lossily.
+
 ## Resampling and downsampling
 
 ### Bicubic kernel LUT
@@ -477,6 +517,17 @@ view pins the tile for the duration of the render anyway).
 the available DEM test set is too small to show contention, so that half is
 verified for identical output only, not for speed.
 
+### Temporary files in a per-run directory
+
+The writer's tile file, the disk store's spill files and the clustering file all go
+into one `os.MkdirTemp` directory under `--tmp-dir` (default: next to the output, the
+volume that must hold the archive anyway, and where the final copy is fastest). The CLI
+removes that directory on exit, on errors and on SIGINT/SIGTERM. Before that, interrupted
+runs left multi-gigabyte `pmtiles-*.tmp` files beside the output; removing one directory
+is simpler and more robust than making every component clean up its own files. A crash or
+SIGKILL still leaves it behind. All argument validation runs before the directory
+and the writer are created, so a bad flag cannot strand files.
+
 ### Disk tile store memory accounting
 
 The disk tile store tracks memory usage to enforce the configured limit. Three fixes:
@@ -572,6 +623,26 @@ at all.
 
 ## PMTiles output
 
+### Minimum zoom: whole extent in one tile
+
+The auto minimum zoom is the highest zoom at which the whole data extent fits in a single
+tile: the whole world or Europe (which straddles the prime meridian) → 0, Switzerland → 6.
+Every archive then has a one-tile overview, and no level is spent on tiles that each show
+a sliver of the data. The east and south edges are exclusive, so data ending exactly on a
+tile boundary (lon 0–90) counts as one tile, not two. `pmtransform` applies the same rule
+to the source bounds and only ever extends downward.
+
+### CLI defaults and validation
+
+`--format` defaults to `auto` rather than `jpeg`: Go's `flag` package cannot tell an
+explicit `--format jpeg` from the default, so auto-detection used to override a user
+who asked for JPEG. Now `auto` is resolved once (terrarium for elevation, webp with
+nodata, else jpeg) and any explicit value is final. The same applies to `--bands auto`,
+where the default `1,2,3` used to be invalid for 2-band input. Flag values are validated
+up front (quality, power-of-two tile size, zoom range, band numbers against each file's
+band count, float input only as terrarium), so mistakes fail in milliseconds instead of
+producing an empty or noisy archive with exit code 0.
+
 ### Root directory 16 KiB budget
 
 The PMTiles v3 spec requires the header (127 bytes) plus root directory to fit within
@@ -590,6 +661,14 @@ guarantees compatibility with all PMTiles v3 readers regardless of dataset size.
 For very large datasets (e.g. 60M+ tiles), the initial 4,096-entry leaves can produce
 ~15,000 leaf pointers whose compressed root directory exceeds 16 KiB. The iterative
 growth resolves this by using larger leaves (fewer root entries) until the root fits.
+
+### Caller-supplied metadata keys
+
+`WriterOptions.Extra` is merged into the metadata JSON after the derived keys, so an
+archive assembled from many sources can record them (e.g. the scenes behind a composite).
+A caller's value wins on a clash, by design. `NewWriter` rejects an `Extra` that cannot be
+JSON-encoded: the error would otherwise surface in `Finalize`, after every tile had been
+written, and before the fix it was ignored and the archive shipped with empty metadata.
 
 ### Description metadata provenance
 
@@ -622,9 +701,20 @@ clear: `geotiff2pmtiles` for initial conversion, `pmtransform` for post-processi
 
 ### Passthrough fast path
 
-When no format change or resampling is needed (e.g. just removing zoom levels), raw tile
+When no format change or fill is needed (e.g. just removing zoom levels), raw tile
 bytes are copied from the source archive to the output without decoding or re-encoding.
-This avoids lossy re-compression artifacts and is significantly faster.
+This avoids lossy re-compression artifacts and is significantly faster (150 ms instead of
+820 ms for the Natural Earth example).
+
+### Adding lower zoom levels without a rebuild
+
+Levels below the source's min zoom are produced by a second `Transform` call in rebuild
+mode anchored at the source's min zoom, after the main pass has copied or re-encoded the
+existing levels. Routing that case through a full rebuild (as before) decoded and
+re-encoded every level, with generation loss, just to add a few small ones. The rebuild
+pass also re-renders the anchor level; a writer wrapper (`zoomCap`) drops those tiles.
+`--max-zoom` above the source max is rejected: there is no detail to add, and the old
+behaviour wrote fill-only levels that rendered black for JPEG.
 
 ### Max-zoom anchored rebuild
 
@@ -657,7 +747,9 @@ The PMTiles v3 header does not store tile size (only format via `TileType`). Whe
 size by reading and decoding one tile from the max zoom level and using its image
 dimensions. If no tile can be decoded (e.g. all empty), it falls back to 256. This
 ensures 512px archives stay 512px when rebuilding with `--resampling lanczos` instead
-of inadvertently reducing to 256.
+of inadvertently reducing to 256. An explicit `--tile-size` must match the discovered
+size: no code path resizes source tiles, and a mismatch produced archives with mixed
+tile sizes (re-encode) or panicked (rebuild).
 
 ### Sparse fill optimization
 

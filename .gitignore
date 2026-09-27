@@ -6,3 +6,9 @@ integration/testdata/**/*.tif
 integration/testdata/**/*.tfw
 integration/testdata/**/*.zip
 *.exe
+# Temporary files of interrupted runs and root-level outputs
+*.tmp
+.geotiff2pmtiles-tmp-*/
+.pmtransform-tmp-*/
+/*.pmtiles
+/*.zip

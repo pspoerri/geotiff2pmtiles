@@ -16,11 +16,12 @@ cmd/
   debug/main.go                     Low-level COG debug utility
 internal/
   cog/
-    reader.go                       COG/GeoTIFF tile-level reader (memory-mapped, nodata-aware, 8/16/32-bit, predictor 2+3, band reorder/rescale, preset auto-detection)
+    reader.go                       COG/GeoTIFF tile-level reader (memory-mapped, nodata-aware, 8/16/32-bit and bit-packed 1-16 bit, predictor 2+3, band reorder/rescale, preset auto-detection, raw uint16 tile/region reads)
     ifd.go                          TIFF IFD parser (incl. GDAL_METADATA XML tag 42112)
     geotags.go                      GeoTIFF metadata extraction
     tfw.go                          TFW (TIFF World File) parser + EPSG inference
-    tilecache.go                    LRU tile cache for decoded source tiles
+    tilecache.go                    Sharded LRU caches for source tiles: RGBA, float32 and raw uint16 (with hit/miss stats)
+    source.go                       ByteSource: all byte access (mmap-backed via Open; OpenSource for e.g. HTTP range reads)
     valuerange.go                   Auto rescale range (GDAL statistics, else bounded pixel scan)
     flood.go                        Source-level nodata flood mask (--nodata-flood)
     lzw.go                          LZW decompression (ZSTD via klauspost/compress in reader.go)
@@ -43,7 +44,6 @@ internal/
     memlimit.go                     Auto memory limit (~90% of RAM)
     tiledata.go                     Compact tile representation (uniform / gray / RGBA)
     rgbapool.go                     sync.Pool for *image.RGBA reuse (keyed by dimensions)
-    zoom.go                         Zoom level auto-calculation
     progress.go                     Progress reporting
     sysinfo_linux.go                Total RAM via sysinfo (linux)
     sysinfo_darwin.go               Total RAM via sysctl HW_MEMSIZE (darwin)
@@ -91,14 +91,21 @@ integration/
 `pmtransform` reads an existing PMTiles archive and produces a new one with modifications.
 The original file is never touched. Three processing modes are selected automatically:
 
-1. **Passthrough**: No format or zoom change — raw tile bytes are copied directly (fastest)
-2. **Re-encode**: Format changes (e.g. WebP → PNG) — each tile is decoded and re-encoded
-3. **Rebuild pyramid**: Zoom range extension or `--rebuild` flag — max-zoom tiles are decoded,
-   then the entire lower-zoom pyramid is rebuilt via downsampling with the chosen resampling method.
-   When `--tile-size` is omitted, the source tile size is discovered by decoding one tile.
+1. **Passthrough**: No format change and no `--fill-color` — raw tile bytes are copied directly (fastest)
+2. **Re-encode**: Format change (e.g. WebP → PNG) or `--fill-color` — each tile is decoded and re-encoded
+3. **Rebuild pyramid**: `--rebuild` — max-zoom tiles are decoded, then the entire lower-zoom
+   pyramid is rebuilt via downsampling with the chosen resampling method.
+   The source tile size is discovered by decoding one tile; `--tile-size` must match it.
    Terrarium archives (detected via the `encoding` metadata key, or forced with `--terrarium`)
    are downsampled in elevation space — per-channel RGBA averaging would corrupt elevations
    at the 256 m channel boundaries.
+
+Levels below the source's min zoom (requested with `--min-zoom`, or by default down to the
+zoom where all data fits in one tile) are added without forcing a full rebuild: the chosen
+mode runs over the source's own levels, then a second `Transform` call in rebuild mode
+starts from the source's min zoom and downsamples from there. `cmd/pmtransform`'s
+`zoomCap` writer drops that second pass's re-render of the source's min zoom, which the
+first pass already wrote.
 
 Empty tile filling (`--fill-color`) uses a color transformation model: transparent/
 nodata pixels are substituted with the target color rather than resampled. During
@@ -114,20 +121,25 @@ skipping DiskTileStore overhead entirely.
 ## Memory Efficiency
 
 - Memory-mapped file access (no full-image decode)
-- Sharded LRU tile cache prevents redundant reads (~256 tiles, configurable): Get promotes entries on a per-shard recency list; eviction removes the least-recently-used entry. `renderTile` / `renderTileTerrarium` read through a goroutine-local view (`TileCache.Local()` / `FloatTileCache.Local()`) that memoizes the last 2×2 source tiles, keeping per-pixel lookups off the shard locks
+- Sharded LRU tile cache prevents redundant reads (max(256, 128 × concurrency) tiles): Get promotes entries on a per-shard recency list; eviction removes the least-recently-used entry. `renderTile` / `renderTileTerrarium` read through a goroutine-local view (`TileCache.Local()` / `FloatTileCache.Local()`) that memoizes the last 2×2 source tiles, keeping per-pixel lookups off the shard locks
 - Tiles stored as encoded bytes (PNG/WebP/JPEG) in memory: 5-25x smaller than raw pixels
-- Continuous disk spilling via dedicated I/O goroutine with configurable memory backpressure (auto ~90% of RAM)
+- Continuous disk spilling via dedicated I/O goroutine: every non-uniform tile is streamed to the spill file as it is produced; `--mem-limit` only caps the encoded bytes queued for that goroutine before workers pause (auto: 90% of RAM minus current usage minus 2 GB; below 512 MB spilling is turned off)
 - Uniform tiles (single color) stored as 4 bytes, never spilled to disk
 - `sync.Pool` for `*image.RGBA` buffers: render, downsample, and decode paths reuse 256 KB buffers instead of allocating/GC'ing per tile
 - PMTiles writer uses temp file for tile data (only directory entries in memory)
+- All temporary files (`pmtiles-tiles-*.tmp` from the writer, `pmtiles-tilestore-*.tmp`
+  spill files, `pmtiles-clustered-*.tmp` while finalizing) go into one per-run directory
+  (`.geotiff2pmtiles-tmp-*` / `.pmtransform-tmp-*`) under `--tmp-dir` or the output
+  directory. The CLI removes it on exit, on errors and on SIGINT/SIGTERM. Peak disk use is
+  about 2× the final archive
 - Pyramid downsampling avoids redundant source reads for lower zoom levels
 
 ## Nodata and Transparency
 
 - Nodata pixels (all bands within `--nodata-tolerance` of the nodata value) are decoded as
   transparent (alpha=0) on every decode path. The value is auto-detected from GDAL_NODATA
-  and overridable with `--nodata`. With nodata active and `--format` left at its default,
-  output switches `jpeg` → `webp` so transparency survives encoding.
+  and overridable with `--nodata`. With nodata active and `--format auto`, output is `webp`
+  instead of `jpeg` so transparency survives encoding.
 - `--nodata-flood` builds a per-source bitmap (1 bit per pixel) by flood-filling from the
   image edge through near-nodata pixels (`cog.Reader.BuildFloodMask`, parallel decode, up
   to 4 sources at once). Only edge-connected pixels become transparent; `ReadTile` applies
