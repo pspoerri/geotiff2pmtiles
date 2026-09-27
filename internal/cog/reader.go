@@ -203,6 +203,19 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 		src.Close()
 		return nil, fmt.Errorf("%s: unsupported compression type %d", path, first.Compression)
 	}
+	if first.tileSamples() > maxTileSamples {
+		src.Close()
+		return nil, fmt.Errorf("%s: %dx%d-pixel tiles of %d samples per pixel are too large to decode",
+			path, first.TileWidth, first.TileHeight, first.SamplesPerPixel)
+	}
+
+	r := &Reader{src: src, bo: bo, ifds: ifds, masks: masks, path: path, strip: sl}
+	for level := range ifds {
+		if err := r.checkLayout(&ifds[level], level); err != nil {
+			src.Close()
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+	}
 
 	geo := parseGeoInfo(first)
 
@@ -229,16 +242,9 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 		log.Printf("WARNING: %s has no CRS in its GeoTIFF keys; guessed EPSG:%d from the coordinate ranges. If that is wrong, set the source CRS (--source-epsg)", path, geo.EPSG)
 	}
 
-	return &Reader{
-		src:   src,
-		bo:    bo,
-		ifds:  ifds,
-		masks: masks,
-		geo:   geo,
-		path:  path,
-		strip: sl,
-		id:    int(nextReaderID.Add(1)),
-	}, nil
+	r.geo = geo
+	r.id = int(nextReaderID.Add(1))
+	return r, nil
 }
 
 // nextReaderID numbers readers across the process, so readers opened

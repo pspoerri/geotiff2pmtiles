@@ -83,6 +83,18 @@ func TestOpenSourceMalformed(t *testing.T) {
 			entry(tagCompression, dtShort, 1),
 			entry(tagStripOffsets, dtLong, 8),
 			entry(tagStripByteCounts, dtLong, 0))},
+		// Tile buffers sized by the tags: 2^31 x 16 pixels, 2^32 rows of
+		// one strip. The first read would ask for 128 GiB and 16 TiB.
+		{"huge-tile-width.tif", tinyImage(false, entry(tagTileWidth, dtLong, 1<<31))},
+		{"huge-strip.tif", stripped(false,
+			entry(tagImageWidth, dtLong, 1<<20),
+			entry(tagImageLength, dtLong, 1<<12),
+			entry(tagCompression, dtShort, 1),
+			entry(tagStripOffsets, dtLong, 8),
+			entry(tagStripByteCounts, dtLong, 1))},
+		// A layout the decoders reject fails at open, not at the first read.
+		{"predictor-on-4-bit.tif", tinyImage(false,
+			entry(tagBitsPerSample, dtShort, 4), entry(tagPredictor, dtShort, 2))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -173,6 +185,9 @@ func TestOpenSourceKeepsOnlyOverviewIFDs(t *testing.T) {
 		}, 1},
 		{"unsupported-compression", func(offs []uint64) []tagEntry {
 			return withEntries(overview(16, offs, subfile(1)), entry(tagCompression, dtShort, 6))
+		}, 1},
+		{"huge-tiles", func(offs []uint64) []tagEntry {
+			return withEntries(overview(16, offs, subfile(1)), entry(tagTileWidth, dtLong, 1<<30))
 		}, 1},
 		{"striped-overview", func(offs []uint64) []tagEntry {
 			return []tagEntry{

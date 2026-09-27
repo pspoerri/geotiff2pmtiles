@@ -186,11 +186,25 @@ func imageIFDs(ifds []IFD) (levels, masks []IFD) {
 		case ifd.Width == 0 || ifd.Height == 0 || ifd.Width > first.Width || ifd.Height > first.Height: // not a reduced image
 		case ifd.SamplesPerPixel != first.SamplesPerPixel || ifd.bitsPerSample() != first.bitsPerSample(): // thumbnail
 		case !supportedCompression(ifd.Compression):
+		case ifd.tileSamples() > maxTileSamples:
 		default:
 			kept = append(kept, ifd)
 		}
 	}
 	return levelMasks(kept, masks)
+}
+
+// maxTileSamples bounds the samples in one tile, the size the decoders
+// allocate from the tags before reading any data: at most 1 GiB of RGBA for
+// a single band. Real tiles hold 2^16..2^24 per band, and a strip TIFF's
+// virtual tiles (the full width, 256 rows or more) stay below it up to
+// ~350,000 RGB pixels across. Garbage tags would otherwise ask for
+// terabytes at the first read.
+const maxTileSamples = 1 << 28
+
+// tileSamples returns the number of samples in one tile.
+func (ifd *IFD) tileSamples() uint64 {
+	return uint64(ifd.TileWidth) * uint64(ifd.TileHeight) * uint64(max(int(ifd.SamplesPerPixel), 1))
 }
 
 // usableMask reports whether ifd is a transparency mask the reader can
