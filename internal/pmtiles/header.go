@@ -25,6 +25,8 @@ const (
 	TileTypePNG     = 2
 	TileTypeJPEG    = 3
 	TileTypeWebP    = 4
+	TileTypeAVIF    = 5
+	TileTypeMLT     = 6 // MapLibre Tile (vector)
 )
 
 // Header represents the PMTiles v3 header (127 bytes).
@@ -171,6 +173,10 @@ func TileTypeString(t uint8) string {
 		return "jpeg"
 	case TileTypeWebP:
 		return "webp"
+	case TileTypeAVIF:
+		return "avif"
+	case TileTypeMLT:
+		return "mlt"
 	default:
 		return "unknown"
 	}

@@ -231,3 +231,11 @@ func TestLonLatToE7(t *testing.T) {
 		}
 	}
 }
+
+func TestTileTypeString(t *testing.T) {
+	for tileType, want := range []string{"unknown", "mvt", "png", "jpeg", "webp", "avif", "mlt", "unknown"} {
+		if got := TileTypeString(uint8(tileType)); got != want {
+			t.Errorf("TileTypeString(%d) = %q, want %q", tileType, got, want)
+		}
+	}
+}
