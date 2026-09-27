@@ -23,12 +23,14 @@ type dedupEntry struct {
 // Pass 1: tiles are appended to a temporary file, entries are collected in memory.
 // Pass 2: directories are built and the final PMTiles file is assembled.
 //
-// Identical tile data is automatically deduplicated: when multiple tiles produce
-// the same encoded bytes (e.g. uniform single-color tiles), the data is written
-// to disk only once and all entries share the same offset.
+// Identical small tiles are automatically deduplicated: when multiple tiles
+// produce the same encoded bytes (e.g. uniform single-color tiles), the data
+// is written to disk only once and all entries share the same offset.
 type Writer struct {
 	tmpFile    *os.File
-	dedup      map[uint64]dedupEntry // FNV-64a hash → first occurrence (for dedup)
+	dedup      map[uint64]dedupEntry // FNV-64a hash → first occurrence (tiles up to dedupMax bytes)
+	dedupMax   int                   // largest tile considered for dedup
+	cmpBuf     []byte                // scratch for comparing dedup candidates
 	outputPath string
 	tmpDir     string // directory for temp files
 	entries    []Entry
@@ -57,6 +59,16 @@ func NewWriter(outputPath string, opts WriterOptions) (*Writer, error) {
 		return nil, fmt.Errorf("creating temp file: %w", err)
 	}
 
+	// Repeated tiles are in practice uniform or fill tiles, whose encodings
+	// are small (a uniform 256 px PNG is ~1.1 KB, JPEG ~1.6 KB; ~19 KB and
+	// ~17 KB at 1024 px). Only tiles up to tileSize²/16 bytes (4 KiB at
+	// 256 px, 64 KiB at 1024 px) are hashed, so the dedup map holds those
+	// rather than one entry for every tile of a large run.
+	tileSize := opts.TileSize
+	if tileSize <= 0 {
+		tileSize = 256
+	}
+
 	return &Writer{
 		outputPath: outputPath,
 		opts:       opts,
@@ -65,11 +77,13 @@ func NewWriter(outputPath string, opts WriterOptions) (*Writer, error) {
 		tmpDir:     tmpDir,
 		entries:    make([]Entry, 0, 65536),
 		dedup:      make(map[uint64]dedupEntry),
+		dedupMax:   tileSize * tileSize / 16,
 	}, nil
 }
 
 // tileHash computes a FNV-64a hash of tile data for deduplication.
-func tileHash(data []byte) uint64 {
+// A variable so that tests can force collisions.
+var tileHash = func(data []byte) uint64 {
 	h := fnv.New64a()
 	h.Write(data)
 	return h.Sum64()
@@ -77,8 +91,8 @@ func tileHash(data []byte) uint64 {
 
 // WriteTile writes a single tile. Safe for concurrent use.
 //
-// Identical tile data is deduplicated: if a tile with the same content has
-// already been written, the new entry reuses the existing offset on disk.
+// Identical small tiles are deduplicated: if a tile with the same content
+// has already been written, the new entry reuses the existing offset on disk.
 // This dramatically reduces temp file size for datasets with many uniform tiles.
 func (w *Writer) WriteTile(z, x, y int, data []byte) error {
 	if len(data) == 0 {
@@ -86,21 +100,37 @@ func (w *Writer) WriteTile(z, x, y int, data []byte) error {
 	}
 
 	tileID := ZXYToTileID(z, x, y)
-	hash := tileHash(data)
+	dedup := len(data) <= w.dedupMax
+	var hash uint64
+	if dedup {
+		hash = tileHash(data)
+	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// Check for a dedup hit: reuse the existing data on disk.
-	if de, ok := w.dedup[hash]; ok && de.length == uint32(len(data)) {
-		w.entries = append(w.entries, Entry{
-			TileID:    tileID,
-			Offset:    de.offset,
-			Length:    de.length,
-			RunLength: 1,
-		})
-		w.dedupHits++
-		return nil
+	if w.tmpFile == nil {
+		return fmt.Errorf("writing tile data: writer already finalized or aborted")
+	}
+
+	// Check for a dedup hit: reuse the existing data on disk. The bytes are
+	// compared as well, so that a hash collision cannot make two different
+	// tiles share one image.
+	if de, ok := w.dedup[hash]; dedup && ok && de.length == uint32(len(data)) {
+		same, err := w.tmpHolds(de.offset, data)
+		if err != nil {
+			return err
+		}
+		if same {
+			w.entries = append(w.entries, Entry{
+				TileID:    tileID,
+				Offset:    de.offset,
+				Length:    de.length,
+				RunLength: 1,
+			})
+			w.dedupHits++
+			return nil
+		}
 	}
 
 	// New unique tile: write to temp file.
@@ -111,7 +141,9 @@ func (w *Writer) WriteTile(z, x, y int, data []byte) error {
 	}
 	w.tmpOffset += uint64(n)
 
-	w.dedup[hash] = dedupEntry{offset: offset, length: uint32(n)}
+	if dedup {
+		w.dedup[hash] = dedupEntry{offset: offset, length: uint32(n)}
+	}
 
 	w.entries = append(w.entries, Entry{
 		TileID:    tileID,
@@ -121,6 +153,19 @@ func (w *Writer) WriteTile(z, x, y int, data []byte) error {
 	})
 
 	return nil
+}
+
+// tmpHolds reports whether the temp file holds data at offset. The caller
+// holds w.mu and len(data) <= w.dedupMax.
+func (w *Writer) tmpHolds(offset uint64, data []byte) (bool, error) {
+	if w.cmpBuf == nil {
+		w.cmpBuf = make([]byte, w.dedupMax)
+	}
+	buf := w.cmpBuf[:len(data)]
+	if _, err := w.tmpFile.ReadAt(buf, int64(offset)); err != nil {
+		return false, fmt.Errorf("reading tile data for dedup: %w", err)
+	}
+	return bytes.Equal(buf, data), nil
 }
 
 // Finalize builds the directory, metadata, and writes the final PMTiles file.

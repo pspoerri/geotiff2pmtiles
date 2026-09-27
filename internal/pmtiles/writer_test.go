@@ -1,6 +1,7 @@
 package pmtiles
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -311,5 +312,68 @@ func TestWriter_ConcurrentWrites(t *testing.T) {
 	numAddressed := binary.LittleEndian.Uint64(data[72:80])
 	if numAddressed != uint64(totalTiles) {
 		t.Errorf("NumAddressedTiles = %d, want %d", numAddressed, totalTiles)
+	}
+}
+
+// writeArchive writes tiles (keyed by z/x/y) to path and finalizes it.
+func writeArchive(t *testing.T, path string, tiles map[[3]int][]byte) {
+	t.Helper()
+	w, err := NewWriter(path, WriterOptions{MinZoom: 0, MaxZoom: 3, TileSize: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, data := range tiles {
+		if err := w.WriteTile(k[0], k[1], k[2], data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Two different tiles with the same hash and length must not share data.
+func TestWriter_DedupHashCollision(t *testing.T) {
+	defer func(h func([]byte) uint64) { tileHash = h }(tileHash)
+	tileHash = func([]byte) uint64 { return 42 }
+
+	path := filepath.Join(t.TempDir(), "collide.pmtiles")
+	a, b := []byte("tile-data-AAAA"), []byte("tile-data-BBBB")
+	tiles := map[[3]int][]byte{{1, 0, 0}: a, {1, 1, 0}: b, {1, 0, 1}: a, {1, 1, 1}: b}
+	writeArchive(t, path, tiles)
+
+	r, err := OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	for k, want := range tiles {
+		got, err := r.ReadTile(k[0], k[1], k[2])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("tile %v = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// Only tiles up to the dedup threshold are hashed and kept in the dedup
+// map, which bounds its memory on runs with millions of unique tiles.
+func TestWriter_DedupOnlySmallTiles(t *testing.T) {
+	w, err := NewWriter(filepath.Join(t.TempDir(), "big.pmtiles"), WriterOptions{TileSize: 256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Abort()
+
+	big := bytes.Repeat([]byte{7}, 256*256/16+1)
+	for x := 0; x < 3; x++ {
+		if err := w.WriteTile(2, x, 0, big); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(w.dedup) != 0 || w.dedupHits != 0 {
+		t.Errorf("dedup map has %d entries and %d hits for tiles above the threshold, want 0 and 0", len(w.dedup), w.dedupHits)
 	}
 }
