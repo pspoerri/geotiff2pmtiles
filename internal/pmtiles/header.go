@@ -209,4 +209,8 @@ type WriterOptions struct {
 	TileSize   int
 	Bounds     cog.Bounds
 	TileFormat uint8
+	// Extra is merged into the metadata JSON, overriding the derived keys.
+	// It is for what the fixed keys have no room for -- a provenance record
+	// of the sources behind the archive, say.
+	Extra map[string]any
 }
