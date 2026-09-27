@@ -203,6 +203,18 @@ func main() {
 			s.Close()
 		}
 	}()
+	if sourceEPSG == 0 {
+		var guessed []*cog.Reader
+		for _, s := range sources {
+			if s.EPSGGuessed() {
+				guessed = append(guessed, s)
+			}
+		}
+		if len(guessed) > 0 {
+			log.Printf("WARNING: %d file(s) have no CRS in their GeoTIFF keys, so it was guessed from the coordinate ranges (%s: EPSG:%d). If that is wrong, set the source CRS (--source-epsg)",
+				len(guessed), guessed[0].Path(), guessed[0].EPSG())
+		}
+	}
 
 	if verbose {
 		log.Printf("Opened %d COG(s) in %v", len(sources), time.Since(start).Round(time.Millisecond))

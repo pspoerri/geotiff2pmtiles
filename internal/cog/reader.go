@@ -18,7 +18,6 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"io"
-	"log"
 	"math"
 	"os"
 	"regexp"
@@ -114,6 +113,7 @@ type Reader struct {
 	ifds       []IFD
 	masks      []IFD // GDAL internal mask of each level; nil unless level 0 has one (see levelMasks)
 	geo        GeoInfo
+	guessed    bool       // geo.EPSG was inferred from the coordinate ranges
 	bandCfg    BandConfig // band selection and rescaling config (set via SetBandConfig)
 	id         int        // unique numeric ID for fast cache keying (from nextReaderID, or SetID)
 	floodMaskW int
@@ -241,12 +241,11 @@ func OpenSource(name string, src ByteSource) (*Reader, error) {
 		}
 	}
 
-	// Infer EPSG when GeoKeys didn't provide one. The guess can be badly
-	// wrong (any metric grid outside Switzerland reads as Web Mercator), so
-	// say so.
+	// Infer EPSG when GeoKeys didn't provide one, and record that it is a
+	// guess (see EPSGGuessed): the caller warns, once for all files.
 	if geo.EPSG == 0 && geo.PixelSizeX > 0 {
 		geo.EPSG = inferEPSG(geo, first.Width, first.Height)
-		log.Printf("WARNING: %s has no CRS in its GeoTIFF keys; guessed EPSG:%d from the coordinate ranges. If that is wrong, set the source CRS (--source-epsg)", path, geo.EPSG)
+		r.guessed = true
 	}
 
 	r.geo = geo
@@ -443,11 +442,20 @@ func (r *Reader) EPSG() int {
 	return r.geo.EPSG
 }
 
+// EPSGGuessed reports whether EPSG was guessed from a world file's
+// coordinate ranges, the file having no CRS in its GeoKeys, and not set by
+// SetEPSG since. The guess can be badly wrong (any metric grid outside
+// Switzerland reads as Web Mercator), so callers should say so.
+func (r *Reader) EPSGGuessed() bool {
+	return r.guessed
+}
+
 // SetEPSG overrides the source CRS, e.g. when the file carries none and the
 // guess from its coordinate ranges is wrong. Like SetBandConfig, call it
 // before the reader is shared with other goroutines.
 func (r *Reader) SetEPSG(epsg int) {
 	r.geo.EPSG = epsg
+	r.guessed = false
 }
 
 // readTileRaw reads and decompresses raw tile bytes at the given column and row.
