@@ -2,16 +2,19 @@
 //
 // Usage:
 //
-//	checkpmtiles <file.pmtiles | https://...>
+//	checkpmtiles [flags] <file.pmtiles | https://...>
 //
-// It checks header consistency, the 16 KiB root directory budget, directory
-// deserialization, and absence of trailing bytes. Exits with code 1 on any error.
+// It checks header consistency, the 16 KiB root directory budget, every
+// directory (root and leaves, at any depth), the absence of trailing bytes,
+// the zoom range and that the archive addresses tiles. Exits with code 1 on
+// any error and 2 on a usage error.
 package main
 
 import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,12 +24,31 @@ import (
 	"github.com/pspoerri/geotiff2pmtiles/internal/pmtiles"
 )
 
+// Set via -ldflags at build time.
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
 func main() {
-	if len(os.Args) != 2 || strings.HasPrefix(os.Args[1], "-") {
-		fmt.Fprintf(os.Stderr, "Usage: checkpmtiles <file.pmtiles | https://...>\n")
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: checkpmtiles [flags] <file.pmtiles | https://...>\n\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Validate a PMTiles v3 archive: header, directories and zoom range.\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Exits 1 if a check fails.\n\nFlags:\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if *showVersion {
+		fmt.Printf("checkpmtiles %s (commit %s, built %s)\n", version, commit, buildDate)
+		return
+	}
+	if flag.NArg() != 1 {
+		flag.Usage()
 		os.Exit(2)
 	}
-	target := os.Args[1]
+	target := flag.Arg(0)
 
 	var src dataSource
 	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
@@ -45,9 +67,18 @@ func main() {
 		}
 		src = &fileSource{f: f, size: fi.Size()}
 	}
+	if !check(src) {
+		fmt.Fprintf(os.Stderr, "\nValidation FAILED\n")
+		os.Exit(1)
+	}
+	fmt.Printf("\nAll checks passed.\n")
+}
 
+// check prints the header and the results of every check, and reports
+// whether all of them passed.
+func check(src dataSource) bool {
 	var failed bool
-	fail := func(format string, args ...interface{}) {
+	fail := func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, "FAIL: "+format+"\n", args...)
 		failed = true
 	}
@@ -57,7 +88,7 @@ func main() {
 	h, err := pmtiles.DeserializeHeader(headerBuf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "parse header: %v\n", err)
-		os.Exit(1)
+		return false
 	}
 
 	fmt.Printf("Header:\n")
@@ -98,6 +129,11 @@ func main() {
 	} else {
 		fmt.Printf("  LeafDir end -> TileDataOffset: OK\n")
 	}
+	if h.MinZoom > h.MaxZoom {
+		fail("min zoom %d is greater than max zoom %d", h.MinZoom, h.MaxZoom)
+	} else {
+		fmt.Printf("  Zoom range %d-%d: OK\n", h.MinZoom, h.MaxZoom)
+	}
 
 	// File size check (local files only).
 	expectedSize := h.TileDataOffset + h.TileDataLength
@@ -119,70 +155,88 @@ func main() {
 		fmt.Printf("  Header + RootDir: %d bytes (budget: 16384): OK\n", initialFetch)
 	}
 
-	// Root directory.
-	rootDirBuf := src.readRange(h.RootDirOffset, h.RootDirLength)
-	fmt.Printf("\nRoot directory: %d bytes compressed\n", len(rootDirBuf))
-
-	entries, err := pmtiles.DeserializeDirectory(rootDirBuf)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "parse root dir: %v\n", err)
-		os.Exit(1)
+	// Directories. The leaf section is read in one range request and every
+	// leaf pointer followed, to any depth.
+	w := &dirWalk{h: h, fail: fail, seen: map[uint64]bool{}}
+	if h.LeafDirLength > 0 {
+		w.leaves = src.readRange(h.LeafDirOffset, h.LeafDirLength)
 	}
-	fmt.Printf("  Entries: %d\n", len(entries))
-	if len(entries) > 0 {
+	rootDirBuf := src.readRange(h.RootDirOffset, h.RootDirLength)
+	fmt.Printf("\nRoot directory: %d bytes\n", len(rootDirBuf))
+	if !w.dir("root directory", rootDirBuf, 0) {
+		return false
+	}
+	fmt.Printf("\nDirectories: root + %d leaves (depth %d)\n", w.leafDirs, w.depth)
+	fmt.Printf("  Tile entries:    %d\n", w.entries)
+	fmt.Printf("  Addressed tiles: %d\n", w.addressed)
+	if w.trailing == 0 {
+		fmt.Printf("  Trailing bytes:  none\n")
+	}
+	if w.addressed == 0 {
+		fail("the archive addresses no tiles")
+	} else if h.NumAddressedTiles != 0 && w.addressed != h.NumAddressedTiles {
+		fail("directories address %d tiles, header says %d", w.addressed, h.NumAddressedTiles)
+	}
+
+	return !failed
+}
+
+// dirWalk parses a directory and the leaf directories it points to.
+type dirWalk struct {
+	h         pmtiles.Header
+	leaves    []byte          // the leaf directory section
+	seen      map[uint64]bool // leaf offsets visited, against pointer loops
+	fail      func(format string, args ...any)
+	leafDirs  int
+	depth     int
+	entries   int
+	trailing  int // directories with trailing bytes
+	addressed uint64
+}
+
+// dir parses one directory and recurses into its leaves. It returns false
+// when the directory cannot be parsed at all.
+func (w *dirWalk) dir(name string, data []byte, depth int) bool {
+	w.depth = max(w.depth, depth)
+	entries, err := pmtiles.DeserializeDirectoryCompressed(data, w.h.InternalCompression)
+	if err != nil {
+		w.fail("parse %s: %v", name, err)
+		return false
+	}
+	if depth == 0 && len(entries) > 0 {
+		fmt.Printf("  Entries: %d\n", len(entries))
 		fmt.Printf("  First: TileID=%d Offset=%d Length=%d RL=%d\n",
 			entries[0].TileID, entries[0].Offset, entries[0].Length, entries[0].RunLength)
-		fmt.Printf("  Last:  TileID=%d Offset=%d Length=%d RL=%d\n",
-			entries[len(entries)-1].TileID, entries[len(entries)-1].Offset, entries[len(entries)-1].Length, entries[len(entries)-1].RunLength)
+		last := entries[len(entries)-1]
+		fmt.Printf("  Last:  TileID=%d Offset=%d Length=%d RL=%d\n", last.TileID, last.Offset, last.Length, last.RunLength)
 	}
-
-	allLeaf := true
+	if n, err := trailingBytes(data, w.h.InternalCompression); err != nil {
+		w.fail("%s: %v", name, err)
+	} else if n > 0 {
+		w.fail("%s has %d trailing bytes", name, n)
+		w.trailing++
+	}
 	for _, e := range entries {
-		if e.RunLength != 0 {
-			allLeaf = false
-			break
+		if e.RunLength > 0 {
+			w.entries++
+			w.addressed += uint64(e.RunLength)
+			continue
+		}
+		// Leaf directory pointer: offset/length within the leaf section.
+		leafName := fmt.Sprintf("leaf directory at offset %d", e.Offset)
+		end := e.Offset + uint64(e.Length)
+		switch {
+		case w.seen[e.Offset]:
+			w.fail("%s is referenced more than once", leafName)
+		case end < e.Offset || end > uint64(len(w.leaves)):
+			w.fail("%s (%d bytes) lies outside the %d-byte leaf section", leafName, e.Length, len(w.leaves))
+		default:
+			w.seen[e.Offset] = true
+			w.leafDirs++
+			w.dir(leafName, w.leaves[e.Offset:end], depth+1)
 		}
 	}
-	if allLeaf && len(entries) > 0 {
-		fmt.Printf("  Type: leaf pointers (%d leaves)\n", len(entries))
-	} else {
-		fmt.Printf("  Type: tile entries\n")
-	}
-
-	trailing := checkTrailingBytes(rootDirBuf)
-	if trailing > 0 {
-		fail("root directory has %d trailing bytes", trailing)
-	}
-
-	// First leaf directory (if applicable).
-	if allLeaf && len(entries) > 0 {
-		leafStart := h.LeafDirOffset + entries[0].Offset
-		leafBuf := src.readRange(leafStart, uint64(entries[0].Length))
-
-		leafEntries, err := pmtiles.DeserializeDirectory(leafBuf)
-		if err != nil {
-			fail("parse first leaf: %v", err)
-		} else {
-			fmt.Printf("\nFirst leaf directory:\n")
-			fmt.Printf("  Entries: %d\n", len(leafEntries))
-			if len(leafEntries) > 0 {
-				fmt.Printf("  First: TileID=%d Offset=%d Length=%d RL=%d\n",
-					leafEntries[0].TileID, leafEntries[0].Offset, leafEntries[0].Length, leafEntries[0].RunLength)
-				fmt.Printf("  Last:  TileID=%d Offset=%d Length=%d RL=%d\n",
-					leafEntries[len(leafEntries)-1].TileID, leafEntries[len(leafEntries)-1].Offset, leafEntries[len(leafEntries)-1].Length, leafEntries[len(leafEntries)-1].RunLength)
-			}
-			trailing = checkTrailingBytes(leafBuf)
-			if trailing > 0 {
-				fail("first leaf directory has %d trailing bytes", trailing)
-			}
-		}
-	}
-
-	if failed {
-		fmt.Fprintf(os.Stderr, "\nValidation FAILED\n")
-		os.Exit(1)
-	}
-	fmt.Printf("\nAll checks passed.\n")
+	return true
 }
 
 // dataSource abstracts reading byte ranges from a local file or HTTP URL.
@@ -223,58 +277,35 @@ func (hs *httpSource) readRange(offset, length uint64) []byte {
 	return data
 }
 
-// checkTrailingBytes decompresses a gzip directory and returns the number
-// of bytes remaining after parsing all declared entries. Returns 0 if clean.
-func checkTrailingBytes(gzipData []byte) int {
-	gr, err := gzip.NewReader(bytes.NewReader(gzipData))
-	if err != nil {
-		fmt.Printf("  gzip error: %v\n", err)
-		return -1
-	}
-	raw, err := io.ReadAll(gr)
-	gr.Close()
-	if err != nil {
-		fmt.Printf("  decompress error: %v\n", err)
-		return -1
+// trailingBytes returns the number of bytes left in a directory after all
+// the entries it declares.
+func trailingBytes(data []byte, compression uint8) (int, error) {
+	switch compression {
+	case pmtiles.CompressionNone, pmtiles.CompressionUnknown:
+	case pmtiles.CompressionGzip:
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return 0, err
+		}
+		data, err = io.ReadAll(gr)
+		gr.Close()
+		if err != nil {
+			return 0, err
+		}
+	default:
+		return 0, fmt.Errorf("internal compression %d is not supported", compression)
 	}
 
-	r := bytes.NewReader(raw)
+	r := bytes.NewReader(data)
 	n, err := binary.ReadUvarint(r)
 	if err != nil {
-		fmt.Printf("  error reading entry count: %v\n", err)
-		return -1
+		return 0, fmt.Errorf("reading entry count: %w", err)
 	}
-
-	for i := uint64(0); i < n; i++ {
+	// Tile ID deltas, run lengths, lengths and offsets.
+	for i := uint64(0); i < 4*n; i++ {
 		if _, err := binary.ReadUvarint(r); err != nil {
-			fmt.Printf("  error reading tile ID delta %d: %v\n", i, err)
-			return -1
+			return 0, fmt.Errorf("reading entry field %d: %w", i, err)
 		}
 	}
-	for i := uint64(0); i < n; i++ {
-		if _, err := binary.ReadUvarint(r); err != nil {
-			fmt.Printf("  error reading run length %d: %v\n", i, err)
-			return -1
-		}
-	}
-	for i := uint64(0); i < n; i++ {
-		if _, err := binary.ReadUvarint(r); err != nil {
-			fmt.Printf("  error reading length %d: %v\n", i, err)
-			return -1
-		}
-	}
-	for i := uint64(0); i < n; i++ {
-		if _, err := binary.ReadUvarint(r); err != nil {
-			fmt.Printf("  error reading offset %d: %v\n", i, err)
-			return -1
-		}
-	}
-
-	remaining := r.Len()
-	if remaining > 0 {
-		fmt.Printf("  Trailing bytes: %d\n", remaining)
-	} else {
-		fmt.Printf("  Directory: clean (no trailing bytes)\n")
-	}
-	return remaining
+	return r.Len(), nil
 }
