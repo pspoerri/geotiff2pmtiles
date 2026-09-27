@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"testing"
 
+	"github.com/pspoerri/geotiff2pmtiles/internal/cog"
 	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
 
@@ -55,6 +56,37 @@ func TestDownsampleTile_AlphaWeighted(t *testing.T) {
 			// An interior pixel, clear of the tile edges.
 			assertRGBANear(t, "pixel", td.RGBAAt(4, 4), color.RGBA{254, 0, 1, 128}, 1)
 		})
+	}
+}
+
+// The max-zoom samplers weight RGB by alpha, as the pyramid downsample does,
+// so a source with continuous alpha (--alpha-band) is resampled like its
+// premultiplied colours. Halfway between opaque red and blue at alpha 51,
+// the result is mostly red; with a >0 mask it was 100,0,100.
+func TestSamplers_AlphaWeighted(t *testing.T) {
+	path := writeTestGeoTIFF(t, testGeoTIFF{W: 16, H: 16, Scale: 1, TieY: 16,
+		GeoKeys: []uint16{1024, 2, 2048, 4326},
+		RGBA: func(x, y int) [4]uint8 {
+			if x < 8 {
+				return [4]uint8{200, 0, 0, 255}
+			}
+			return [4]uint8{0, 0, 200, 51}
+		}})
+	src := openTestSources(t, path)[0]
+	want := color.RGBA{167, 0, 33, 153} // (200*255, 200*51) / 306, alpha 306/2
+	for _, s := range []struct {
+		name   string
+		sample func(*cog.Reader, int, float64, float64, int, int, int, int, *cog.TileCache, *gammaLUTs) (uint8, uint8, uint8, uint8, error)
+	}{
+		{"bilinear", bilinearSampleCached},
+		{"bicubic", bicubicSampleCached},
+		{"lanczos", lanczosSampleCached},
+	} {
+		r, g, b, a, err := s.sample(src, 0, 7.5, 8, 16, 16, 16, 16, cog.NewTileCache(4), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRGBANear(t, s.name, color.RGBA{r, g, b, a}, want, 1)
 	}
 }
 

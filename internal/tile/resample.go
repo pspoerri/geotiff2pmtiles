@@ -360,9 +360,9 @@ func nearestSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 }
 
 // bilinearSampleCached performs bilinear interpolation using the tile cache.
-// Pixels with alpha == 0 are treated as nodata and excluded from RGB
-// interpolation so they don't bleed dark colors into the result.  Alpha is
-// interpolated with the standard bilinear weights so edges fade smoothly.
+// RGB is weighted by alpha (see alphaWeighted), so pixels with alpha == 0,
+// nodata, don't bleed dark colors into the result. Alpha is interpolated
+// with the standard bilinear weights so edges fade smoothly.
 //
 // Optimized to do at most 2 cache lookups (instead of 4): pixels in the same
 // source tile are extracted directly from the already-fetched image.
@@ -455,45 +455,43 @@ func bilinearSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH
 	w01 := (1 - dx) * dy
 	w11 := dx * dy
 
-	// Alpha: standard bilinear interpolation (nodata pixels naturally
-	// contribute 0, giving a smooth fade at data edges).
-	aVal := w00*float64(p00[3]) + w10*float64(p10[3]) + w01*float64(p01[3]) + w11*float64(p11[3])
+	// RGB is weighted by alpha, so nodata neighbours (alpha 0) do not bleed
+	// black or garbage into the result; alpha fades smoothly at data edges.
+	var rSum, gSum, bSum, aSum float64
+	for _, n := range [4]struct {
+		p [4]uint8
+		w float64
+	}{{p00, w00}, {p10, w10}, {p01, w01}, {p11, w11}} {
+		aw := float64(n.p[3]) * n.w
+		aSum += aw
+		rSum += float64(n.p[0]) * aw
+		gSum += float64(n.p[1]) * aw
+		bSum += float64(n.p[2]) * aw
+	}
+	return alphaWeighted(rSum, gSum, bSum, aSum, 1, luts)
+}
 
-	// For RGB, zero out weights for alpha == 0 (nodata) neighbors so they
-	// don't bleed black/garbage color values into the result.
-	if p00[3] == 0 {
-		w00 = 0
-	}
-	if p10[3] == 0 {
-		w10 = 0
-	}
-	if p01[3] == 0 {
-		w01 = 0
-	}
-	if p11[3] == 0 {
-		w11 = 0
-	}
-
-	wSum := w00 + w10 + w01 + w11
-	if wSum == 0 {
-		// All four neighbors are nodata.
+// alphaWeighted finishes a kernel sum weighted by straight alpha, as the
+// pyramid downsample does: RGB is sum(c*a*w) / sum(a*w) and alpha
+// sum(a*w) / sum(w). A pixel whose alpha rounds to 0 is 0,0,0,0.
+func alphaWeighted(rSum, gSum, bSum, aSum, wTotal float64, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
+	if wTotal == 0 {
 		return 0, 0, 0, 0, nil
 	}
-
-	rVal := (w00*float64(p00[0]) + w10*float64(p10[0]) + w01*float64(p01[0]) + w11*float64(p11[0])) / wSum
-	gVal := (w00*float64(p00[1]) + w10*float64(p10[1]) + w01*float64(p01[1]) + w11*float64(p11[1])) / wSum
-	bVal := (w00*float64(p00[2]) + w10*float64(p10[2]) + w01*float64(p01[2]) + w11*float64(p11[2])) / wSum
-
-	if luts != nil {
-		return luts.encode(rVal), luts.encode(gVal), luts.encode(bVal), clampByte(aVal), nil
+	a := clampByte(aSum / wTotal)
+	if a == 0 { // a ≥ 1 implies aSum > 0, so the RGB division is safe
+		return 0, 0, 0, 0, nil
 	}
-	return clampByte(rVal), clampByte(gVal), clampByte(bVal), clampByte(aVal), nil
+	if luts != nil {
+		return luts.encode(rSum / aSum), luts.encode(gSum / aSum), luts.encode(bSum / aSum), a, nil
+	}
+	return clampByte(rSum / aSum), clampByte(gSum / aSum), clampByte(bSum / aSum), a, nil
 }
 
 // lanczosSampleCached performs Lanczos-3 interpolation using the tile cache.
 // Uses a 6×6 pixel neighborhood for high-quality resampling with sharp detail
-// preservation. Pixels with alpha == 0 are excluded from RGB interpolation
-// so they don't bleed dark colors into the result. Alpha is interpolated
+// preservation. RGB is weighted by alpha (see alphaWeighted), so pixels with
+// alpha == 0 don't bleed dark colors into the result. Alpha is interpolated
 // with the full kernel weights for smooth edge transitions.
 //
 // Optimized to batch tile fetches: the 6×6 neighborhood spans at most 4 source
@@ -584,7 +582,7 @@ func lanczosSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 		tileRowIdx[k] = pyArr[k]/th - rowMin
 	}
 
-	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+	var rSum, gSum, bSum, aSum, wTotal float64
 
 	for ky := 0; ky < n; ky++ {
 		wyVal := wyArr[ky]
@@ -607,25 +605,18 @@ func lanczosSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 
 			p := pixelFromImage(tiles[tr][tc], localX[kx], ly)
 
-			aSum += float64(p[3]) * wt
+			aw := float64(p[3]) * wt
+			aSum += aw
 			wTotal += wt
 			if p[3] > 0 {
-				rSum += float64(p[0]) * wt
-				gSum += float64(p[1]) * wt
-				bSum += float64(p[2]) * wt
-				wRGB += wt
+				rSum += float64(p[0]) * aw
+				gSum += float64(p[1]) * aw
+				bSum += float64(p[2]) * aw
 			}
 		}
 	}
 
-	if wRGB == 0 {
-		return 0, 0, 0, 0, nil
-	}
-
-	if luts != nil {
-		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
-	}
-	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+	return alphaWeighted(rSum, gSum, bSum, aSum, wTotal, luts)
 }
 
 // fastChroma reports whether the YCbCr/NYCbCrA fast paths, which index chroma
@@ -735,7 +726,7 @@ func lanczosAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [6]float64, lx, ly [6]
 	crData := img.Cr
 	aData := img.A
 
-	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+	var rSum, gSum, bSum, aSum, wTotal float64
 
 	for ky := 0; ky < 6; ky++ {
 		wyVal := wyArr[ky]
@@ -775,7 +766,8 @@ func lanczosAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [6]float64, lx, ly [6]
 			}
 
 			alpha := aData[ai]
-			aSum += float64(alpha) * wt
+			aw := float64(alpha) * wt
+			aSum += aw
 			wTotal += wt
 
 			if alpha > 0 {
@@ -801,22 +793,14 @@ func lanczosAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [6]float64, lx, ly [6]
 					b = 0xFF0000
 				}
 
-				rSum += float64(r>>16) * wt
-				gSum += float64(g>>16) * wt
-				bSum += float64(b>>16) * wt
-				wRGB += wt
+				rSum += float64(r>>16) * aw
+				gSum += float64(g>>16) * aw
+				bSum += float64(b>>16) * aw
 			}
 		}
 	}
 
-	if wRGB == 0 {
-		return 0, 0, 0, 0, nil
-	}
-
-	if luts != nil {
-		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
-	}
-	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+	return alphaWeighted(rSum, gSum, bSum, aSum, wTotal, luts)
 }
 
 // lanczosAccumRGBA is the hot inner loop for Lanczos-3 on RGBA tiles.
@@ -824,7 +808,7 @@ func lanczosAccumRGBA(img *image.RGBA, wxArr, wyArr [6]float64, lx, ly [6]int, l
 	pix := img.Pix
 	stride := img.Stride
 
-	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+	var rSum, gSum, bSum, aSum, wTotal float64
 
 	for ky := 0; ky < 6; ky++ {
 		wyVal := wyArr[ky]
@@ -841,30 +825,23 @@ func lanczosAccumRGBA(img *image.RGBA, wxArr, wyArr [6]float64, lx, ly [6]int, l
 
 			off := rowOff + lx[kx]*4
 			alpha := pix[off+3]
-			aSum += float64(alpha) * wt
+			aw := float64(alpha) * wt
+			aSum += aw
 			wTotal += wt
 			if alpha > 0 {
-				rSum += float64(pix[off+0]) * wt
-				gSum += float64(pix[off+1]) * wt
-				bSum += float64(pix[off+2]) * wt
-				wRGB += wt
+				rSum += float64(pix[off+0]) * aw
+				gSum += float64(pix[off+1]) * aw
+				bSum += float64(pix[off+2]) * aw
 			}
 		}
 	}
 
-	if wRGB == 0 {
-		return 0, 0, 0, 0, nil
-	}
-
-	if luts != nil {
-		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
-	}
-	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+	return alphaWeighted(rSum, gSum, bSum, aSum, wTotal, luts)
 }
 
 // lanczosAccumGeneric is a fallback for rare tile types using the image.Image interface.
 func lanczosAccumGeneric(tile image.Image, wxArr, wyArr [6]float64, lx, ly [6]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
-	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+	var rSum, gSum, bSum, aSum, wTotal float64
 
 	for ky := 0; ky < 6; ky++ {
 		wyVal := wyArr[ky]
@@ -878,31 +855,24 @@ func lanczosAccumGeneric(tile image.Image, wxArr, wyArr [6]float64, lx, ly [6]in
 			}
 			p := pixelFromImage(tile, lx[kx], ly[ky])
 
-			aSum += float64(p[3]) * wt
+			aw := float64(p[3]) * wt
+			aSum += aw
 			wTotal += wt
 			if p[3] > 0 {
-				rSum += float64(p[0]) * wt
-				gSum += float64(p[1]) * wt
-				bSum += float64(p[2]) * wt
-				wRGB += wt
+				rSum += float64(p[0]) * aw
+				gSum += float64(p[1]) * aw
+				bSum += float64(p[2]) * aw
 			}
 		}
 	}
 
-	if wRGB == 0 {
-		return 0, 0, 0, 0, nil
-	}
-
-	if luts != nil {
-		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
-	}
-	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+	return alphaWeighted(rSum, gSum, bSum, aSum, wTotal, luts)
 }
 
 // bicubicSampleCached performs Catmull-Rom bicubic interpolation using the
 // tile cache. Uses a 4×4 pixel neighborhood — sharper than bilinear with less
-// ringing than Lanczos-3. Pixels with alpha == 0 are excluded from RGB
-// interpolation. Optimized with batched tile fetches: the 4×4 neighborhood
+// ringing than Lanczos-3. RGB is weighted by alpha (see alphaWeighted).
+// Optimized with batched tile fetches: the 4×4 neighborhood
 // spans at most 2×2 source tiles.
 func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH, tw, th int, cache *cog.TileCache, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
 	const n = 4
@@ -967,7 +937,7 @@ func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 		tileRowIdx[k] = pyArr[k]/th - rowMin
 	}
 
-	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+	var rSum, gSum, bSum, aSum, wTotal float64
 
 	for ky := 0; ky < n; ky++ {
 		wyVal := wyArr[ky]
@@ -988,25 +958,18 @@ func bicubicSampleCached(src *cog.Reader, level int, fx, fy float64, imgW, imgH,
 			}
 			p := pixelFromImage(tiles[tr][tc], localX[kx], ly)
 
-			aSum += float64(p[3]) * wt
+			aw := float64(p[3]) * wt
+			aSum += aw
 			wTotal += wt
 			if p[3] > 0 {
-				rSum += float64(p[0]) * wt
-				gSum += float64(p[1]) * wt
-				bSum += float64(p[2]) * wt
-				wRGB += wt
+				rSum += float64(p[0]) * aw
+				gSum += float64(p[1]) * aw
+				bSum += float64(p[2]) * aw
 			}
 		}
 	}
 
-	if wRGB == 0 {
-		return 0, 0, 0, 0, nil
-	}
-
-	if luts != nil {
-		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
-	}
-	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+	return alphaWeighted(rSum, gSum, bSum, aSum, wTotal, luts)
 }
 
 // bicubicAccumYCbCr is the inner loop for bicubic on YCbCr tiles.
@@ -1105,7 +1068,7 @@ func bicubicAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [4]float64, lx, ly [4]
 	crData := img.Cr
 	aData := img.A
 
-	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+	var rSum, gSum, bSum, aSum, wTotal float64
 
 	for ky := 0; ky < 4; ky++ {
 		wyVal := wyArr[ky]
@@ -1145,7 +1108,8 @@ func bicubicAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [4]float64, lx, ly [4]
 			}
 
 			alpha := aData[ai]
-			aSum += float64(alpha) * wt
+			aw := float64(alpha) * wt
+			aSum += aw
 			wTotal += wt
 
 			if alpha > 0 {
@@ -1171,22 +1135,14 @@ func bicubicAccumNYCbCrA(img *image.NYCbCrA, wxArr, wyArr [4]float64, lx, ly [4]
 					b = 0xFF0000
 				}
 
-				rSum += float64(r>>16) * wt
-				gSum += float64(g>>16) * wt
-				bSum += float64(b>>16) * wt
-				wRGB += wt
+				rSum += float64(r>>16) * aw
+				gSum += float64(g>>16) * aw
+				bSum += float64(b>>16) * aw
 			}
 		}
 	}
 
-	if wRGB == 0 {
-		return 0, 0, 0, 0, nil
-	}
-
-	if luts != nil {
-		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
-	}
-	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+	return alphaWeighted(rSum, gSum, bSum, aSum, wTotal, luts)
 }
 
 // bicubicAccumRGBA is the inner loop for bicubic on RGBA tiles.
@@ -1194,7 +1150,7 @@ func bicubicAccumRGBA(img *image.RGBA, wxArr, wyArr [4]float64, lx, ly [4]int, l
 	pix := img.Pix
 	stride := img.Stride
 
-	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+	var rSum, gSum, bSum, aSum, wTotal float64
 
 	for ky := 0; ky < 4; ky++ {
 		wyVal := wyArr[ky]
@@ -1211,30 +1167,23 @@ func bicubicAccumRGBA(img *image.RGBA, wxArr, wyArr [4]float64, lx, ly [4]int, l
 
 			off := rowOff + lx[kx]*4
 			alpha := pix[off+3]
-			aSum += float64(alpha) * wt
+			aw := float64(alpha) * wt
+			aSum += aw
 			wTotal += wt
 			if alpha > 0 {
-				rSum += float64(pix[off+0]) * wt
-				gSum += float64(pix[off+1]) * wt
-				bSum += float64(pix[off+2]) * wt
-				wRGB += wt
+				rSum += float64(pix[off+0]) * aw
+				gSum += float64(pix[off+1]) * aw
+				bSum += float64(pix[off+2]) * aw
 			}
 		}
 	}
 
-	if wRGB == 0 {
-		return 0, 0, 0, 0, nil
-	}
-
-	if luts != nil {
-		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
-	}
-	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+	return alphaWeighted(rSum, gSum, bSum, aSum, wTotal, luts)
 }
 
 // bicubicAccumGeneric is a fallback for rare tile types using the image.Image interface.
 func bicubicAccumGeneric(tile image.Image, wxArr, wyArr [4]float64, lx, ly [4]int, luts *gammaLUTs) (uint8, uint8, uint8, uint8, error) {
-	var rSum, gSum, bSum, aSum, wTotal, wRGB float64
+	var rSum, gSum, bSum, aSum, wTotal float64
 
 	for ky := 0; ky < 4; ky++ {
 		wyVal := wyArr[ky]
@@ -1248,25 +1197,18 @@ func bicubicAccumGeneric(tile image.Image, wxArr, wyArr [4]float64, lx, ly [4]in
 			}
 			p := pixelFromImage(tile, lx[kx], ly[ky])
 
-			aSum += float64(p[3]) * wt
+			aw := float64(p[3]) * wt
+			aSum += aw
 			wTotal += wt
 			if p[3] > 0 {
-				rSum += float64(p[0]) * wt
-				gSum += float64(p[1]) * wt
-				bSum += float64(p[2]) * wt
-				wRGB += wt
+				rSum += float64(p[0]) * aw
+				gSum += float64(p[1]) * aw
+				bSum += float64(p[2]) * aw
 			}
 		}
 	}
 
-	if wRGB == 0 {
-		return 0, 0, 0, 0, nil
-	}
-
-	if luts != nil {
-		return luts.encode(rSum / wRGB), luts.encode(gSum / wRGB), luts.encode(bSum / wRGB), clampByte(aSum / wTotal), nil
-	}
-	return clampByte(rSum / wRGB), clampByte(gSum / wRGB), clampByte(bSum / wRGB), clampByte(aSum / wTotal), nil
+	return alphaWeighted(rSum, gSum, bSum, aSum, wTotal, luts)
 }
 
 // fetchTileCached retrieves a decoded tile image using the cache.

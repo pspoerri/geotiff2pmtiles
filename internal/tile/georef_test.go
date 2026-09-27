@@ -15,10 +15,11 @@ import (
 )
 
 // testGeoTIFF describes a single-tile, uncompressed GeoTIFF: 3-band uint8
-// when RGB is set, 1-band float32 otherwise.
+// when RGB is set, 4-band uint8 when RGBA is, 1-band float32 otherwise.
 type testGeoTIFF struct {
 	W, H       int // multiples of 16
 	RGB        func(x, y int) [3]uint8
+	RGBA       func(x, y int) [4]uint8
 	Float      func(x, y int) float32
 	TieX, TieY float64  // model coordinate of raster pixel (0,0)
 	Scale      float64  // pixel size in CRS units
@@ -47,12 +48,17 @@ func writeTestGeoTIFF(t *testing.T, g testGeoTIFF) string {
 	spp, bits, format, photometric := uint16(1), uint16(32), uint16(3), uint16(1)
 	if g.RGB != nil {
 		spp, bits, format, photometric = 3, 8, 1, 2
+	} else if g.RGBA != nil {
+		spp, bits, format, photometric = 4, 8, 1, 2
 	}
 	var pix []byte
 	for y := 0; y < g.H; y++ {
 		for x := 0; x < g.W; x++ {
 			if g.RGB != nil {
 				c := g.RGB(x, y)
+				pix = append(pix, c[:]...)
+			} else if g.RGBA != nil {
+				c := g.RGBA(x, y)
 				pix = append(pix, c[:]...)
 			} else {
 				pix = bo.AppendUint32(pix, math.Float32bits(g.Float(x, y)))
