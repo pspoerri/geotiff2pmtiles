@@ -127,6 +127,22 @@ func TestOpenSourceMalformed(t *testing.T) {
 		// A layout the decoders reject fails at open, not at the first read.
 		{"predictor-on-4-bit.tif", tinyImage(false,
 			entry(tagBitsPerSample, dtShort, 4), entry(tagPredictor, dtShort, 2))},
+		// Band-interleaved (PlanarConfiguration=2) tiles other than JPEG,
+		// and JPEG strips, as gdal_translate -co INTERLEAVE=BAND writes.
+		{"planar-lzw-tiles.tif", tinyImage(false,
+			entry(tagCompression, dtShort, 5),
+			entry(tagSamplesPerPixel, dtShort, 3),
+			entry(tagPlanarConfig, dtShort, 2),
+			entry(tagTileOffsets, dtLong, 8, 8, 8),
+			entry(tagTileByteCounts, dtLong, 256, 256, 256))},
+		{"planar-jpeg-strips.tif", stripped(false,
+			entry(tagImageWidth, dtLong, 16),
+			entry(tagImageLength, dtLong, 16),
+			entry(tagCompression, dtShort, 7),
+			entry(tagSamplesPerPixel, dtShort, 3),
+			entry(tagPlanarConfig, dtShort, 2),
+			entry(tagStripOffsets, dtLong, 8, 8, 8),
+			entry(tagStripByteCounts, dtLong, 1, 1, 1))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
