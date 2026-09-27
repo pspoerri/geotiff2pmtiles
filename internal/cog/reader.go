@@ -539,13 +539,22 @@ func (r *Reader) readTileBytes(ifd *IFD, tileIdx int) ([]byte, error) {
 }
 
 // checkLayout rejects the sample layouts the decoders cannot handle -- they
-// would loop forever, panic or misread -- so that the first read fails with a
-// clear error. No conformant writer produces them: libtiff refuses a
-// predictor at depths other than 8, 16, 32 and 64, and planar-separate strips
-// of bit-packed samples would have to be unpacked before interleaving.
+// would loop forever, panic or misread -- so that opening the file, and any
+// read, fails with a clear error. Band-interleaved (planar-separate) data is
+// read as JPEG tiles or as strips of other compressions, which is what GDAL
+// writes for INTERLEAVE=BAND. The rest no conformant writer produces:
+// libtiff refuses a predictor at depths other than 8, 16, 32 and 64, and
+// planar-separate strips of bit-packed samples would have to be unpacked
+// before interleaving.
 func (r *Reader) checkLayout(ifd *IFD, level int) error {
 	bits := ifd.bitsPerSample()
+	strips := r.strip != nil && level == 0
+	planar := ifd.PlanarConfig == 2 && ifd.SamplesPerPixel > 1
 	switch {
+	case planar && !strips && ifd.Compression != 7:
+		return fmt.Errorf("planar-separate (PlanarConfiguration=2) is only supported for JPEG-compressed COGs; got compression %d; rewrite the file with gdal_translate -co INTERLEAVE=PIXEL", ifd.Compression)
+	case planar && strips && ifd.Compression == 7:
+		return fmt.Errorf("planar-separate (PlanarConfiguration=2) strip TIFFs with JPEG compression are not supported; rewrite the file with gdal_translate -co INTERLEAVE=PIXEL")
 	case bits%8 == 0:
 		return nil
 	case ifd.Predictor > 1:
@@ -580,10 +589,8 @@ func (r *Reader) readStripTileRaw(ifd *IFD, tileRow int) ([]byte, *IFD, error) {
 	}
 
 	// Planar-separate: read each plane's strips for this tile row, then
-	// interleave samples. JPEG strips cannot be byte-interleaved.
-	if ifd.Compression == 7 {
-		return nil, nil, fmt.Errorf("planar-separate (PlanarConfiguration=2) strip TIFFs with JPEG compression are not supported")
-	}
+	// interleave samples. JPEG strips cannot be byte-interleaved, and
+	// checkLayout rejects them.
 	bps := ifd.bytesPerSample()
 	planeBufs := make([][]byte, sl.planes)
 	planeLen := 0
@@ -1230,10 +1237,8 @@ func (r *Reader) readTileDecoded(level, col, row int) (image.Image, error) {
 	// Planar-separate layout: each band is stored in its own per-tile blob,
 	// with offsets/byte-counts laid out plane-major. The chunked layout
 	// requires special handling, so dispatch before the standard tile lookup.
+	// checkLayout has made sure the tiles are JPEG.
 	if ifd.PlanarConfig == 2 && ifd.SamplesPerPixel > 1 {
-		if ifd.Compression != 7 {
-			return nil, fmt.Errorf("planar-separate (PlanarConfiguration=2) is only supported for JPEG-compressed COGs; got compression %d", ifd.Compression)
-		}
 		return r.decodePlanarSeparateJPEG(ifd, col, row, tilesAcross, tilesDown)
 	}
 
@@ -1358,12 +1363,10 @@ func (r *Reader) decodeJPEGTile(ifd *IFD, data []byte) (image.Image, error) {
 // Every strip is a JPEG stream of its own (abbreviated when JPEGTables is
 // set), so the strips are decoded one by one and stacked rather than
 // concatenated. Sparse strips stay transparent, rows past the image too, and
-// nodata is applied as decodeJPEGTile applies it.
+// nodata is applied as decodeJPEGTile applies it. The strips are chunky:
+// checkLayout rejects planar-separate ones.
 func (r *Reader) decodeJPEGStripTile(ifd *IFD, tileRow int) (image.Image, error) {
 	sl := r.strip
-	if sl.planes > 1 {
-		return nil, fmt.Errorf("planar-separate (PlanarConfiguration=2) strip TIFFs with JPEG compression are not supported")
-	}
 	w := int(ifd.TileWidth)
 	out := image.NewRGBA(image.Rect(0, 0, w, int(ifd.TileHeight)))
 	start := tileRow * sl.stripsPerTile
