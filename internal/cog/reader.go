@@ -1479,8 +1479,9 @@ func grayBytes(img image.Image, tw, th int) []uint8 {
 }
 
 // decodeRawTile decodes an uncompressed tile.
-// Supports 1..16-bit samples (bit-packed below 8 bits and at 9..15, see samples16), band
-// reordering, alpha band selection, and rescaling via the reader's BandConfig. For single-band data, pixels matching the GDAL nodata value
+// Supports 1..16-bit samples (bit-packed below 8 bits and at 9..15, see samples16),
+// palette and WhiteIsZero images, band reordering, alpha band selection, and rescaling
+// via the reader's BandConfig. For single-band data, pixels matching the GDAL nodata value
 // are set to alpha=0 (transparent) so downstream code treats them as empty.
 // Zero-value BandConfig produces identical behavior to the legacy code path.
 func (r *Reader) decodeRawTile(ifd *IFD, data []byte) (image.Image, error) {
@@ -1759,6 +1760,7 @@ func (r *Reader) expandPalette(ifd *IFD, buf []byte, s16 []uint16, avail, w, h, 
 	if len(cmap) < 3*n {
 		return nil, fmt.Errorf("palette image has %d ColorMap entries, want %d", len(cmap), 3*n)
 	}
+	spp = max(1, spp)
 
 	nodata, hasNodata := -1, false
 	if cfg := r.bandCfg; r.floodMask == nil {

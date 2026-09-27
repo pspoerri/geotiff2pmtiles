@@ -118,7 +118,7 @@ const signBias16 = 0x8000
 //
 // Keyed on the declared depth rather than on bytesPerSample, so that a
 // bit-packed signed depth such as 15 is recognised; bytesPerSample truncates
-// that to 1 and would report no bias. Depths above 16 keep 0, as before.
+// that to 1 and would report no bias. Depths above 16 get 0.
 func (ifd *IFD) sampleBias() int {
 	if b := ifd.bitsPerSample(); b > 8 && b <= 16 && len(ifd.SampleFormat) > 0 && ifd.SampleFormat[0] == 2 {
 		return signBias16
@@ -138,8 +138,8 @@ func (ifd *IFD) bitsPerSample() int {
 //
 // Note that this is only meaningful for depths that are a multiple of eight.
 // A depth such as 15 may be bit-packed on disk, in which case no whole number
-// of bytes describes a sample; ReadUint16Tile determines the real layout from
-// the tile length instead of asking this.
+// of bytes describes a sample; samples16 determines the real layout from the
+// tile length instead of asking this.
 func (ifd *IFD) bytesPerSample() int {
 	if len(ifd.BitsPerSample) > 0 {
 		return int(ifd.BitsPerSample[0]) / 8
