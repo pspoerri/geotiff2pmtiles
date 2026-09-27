@@ -11,7 +11,7 @@ Memory-efficient Go toolset for converting GeoTIFF/COG files to PMTiles v3 archi
 ```bash
 make build              # Build geotiff2pmtiles (requires CGO_ENABLED=1 + libwebp; CGO=0 to skip)
 make build-transform    # Build pmtransform
-make build-all          # Both binaries
+make build-all          # geotiff2pmtiles, pmtransform, checkpmtiles, pmheader
 make test               # Run all tests
 make test-race          # Tests with race detector (used in CI)
 make bench              # Run benchmarks
@@ -20,19 +20,21 @@ make vet                # go vet
 make check              # fmt + vet + test
 ```
 
-Run a single test: `go test ./internal/coord/ -run TestMercator`
+Run a single test: `go test ./internal/coord/ -run TestLonLatToTile`
 
 Run a single benchmark: `go test ./internal/tile/ -bench=BenchmarkDownsample -benchmem`
 
 ## Architecture
 
-Two CLI tools in `cmd/`:
+Two main CLI tools in `cmd/`:
 - **geotiff2pmtiles** — COG → PMTiles conversion
 - **pmtransform** — PMTiles → PMTiles transformation (passthrough / re-encode / rebuild pyramid)
 
+Plus utilities: **pmheader** (patch header/metadata), **checkpmtiles** (validate an archive), **coginfo** (COG metadata), **debug** (low-level IFD dump).
+
 Core packages in `internal/`:
-- **cog/** — Memory-mapped TIFF/COG reader, IFD parsing, GeoTIFF tags, TFW sidecar, LRU tile cache, strip-to-tile promotion
-- **coord/** — Projection interface + native implementations (UTM, Swiss LV95, WGS84, Web Mercator), wroge/crs fallback for other EPSG codes, Hilbert curve ordering, EPSG inference from coordinate ranges
+- **cog/** — Memory-mapped TIFF/COG reader, IFD parsing, GeoTIFF tags, TFW sidecar (with EPSG inference from coordinate ranges), LRU tile cache, strip-to-tile promotion
+- **coord/** — Projection interface + native implementations (UTM, Swiss LV95, WGS84, Web Mercator), wroge/crs fallback for other EPSG codes, Hilbert curve ordering
 - **encode/** — Encoder interface + JPEG/PNG/WebP/Terrarium implementations. WebP uses CGo (`webp.go`) with a stub fallback (`webp_stub.go`) for `CGO_ENABLED=0` builds
 - **tile/** — Tile generation pipeline: `generator.go` (parallel COG→tile), `transform.go` (PMTiles→PMTiles), `resample.go` (Lanczos-3/bicubic/bilinear/nearest/mode with LUT acceleration), `downsample.go` (pyramid building with gray fast path), `diskstore.go` (disk-backed store with memory backpressure), `tiledata.go` (compact uniform/gray/RGBA representation), `rgbapool.go` (sync.Pool buffer reuse)
 - **pmtiles/** — PMTiles v3 reader/writer. Two-pass writer: collect entries → sort by Hilbert ID → cluster tile data. FNV-64a deduplication.
