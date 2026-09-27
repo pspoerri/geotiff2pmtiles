@@ -243,13 +243,13 @@ func (w *Writer) Finalize() error {
 // order) and the archive is "clustered" per the PMTiles v3 spec. Entries that
 // share data (deduplicated tiles) keep sharing one new offset.
 //
-// It returns the temp file offset of every unique tile in archive order,
+// It returns the temp file location of every unique tile in archive order,
 // and the total length of the tile data.
-func (w *Writer) clusterOffsets() (src []uint64, length uint64) {
+func (w *Writer) clusterOffsets() (src []dedupEntry, length uint64) {
 	// Only tiles small enough to be deduplicated can share an offset, so
 	// only those need to be remembered.
 	seen := make(map[uint64]uint64) // old offset → new offset
-	src = make([]uint64, 0, len(w.entries)-int(w.dedupHits))
+	src = make([]dedupEntry, 0, len(w.entries)-int(w.dedupHits))
 	for i := range w.entries {
 		e := &w.entries[i]
 		if int(e.Length) <= w.dedupMax {
@@ -259,7 +259,7 @@ func (w *Writer) clusterOffsets() (src []uint64, length uint64) {
 			}
 			seen[e.Offset] = length
 		}
-		src = append(src, e.Offset)
+		src = append(src, dedupEntry{offset: e.Offset, length: e.Length})
 		e.Offset = length
 		length += uint64(e.Length)
 	}
@@ -272,7 +272,7 @@ func (w *Writer) clusterOffsets() (src []uint64, length uint64) {
 //
 // The partial file lives next to the output rather than in the temp
 // directory, which may be on another file system, where a rename fails.
-func (w *Writer) writeArchive(rootDir, metadata, leafDirs []byte, src []uint64) (err error) {
+func (w *Writer) writeArchive(rootDir, metadata, leafDirs []byte, src []dedupEntry) (err error) {
 	partial := w.outputPath + ".partial"
 	f, err := os.OpenFile(partial, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
@@ -328,30 +328,20 @@ func (w *Writer) writeArchive(rootDir, metadata, leafDirs []byte, src []uint64) 
 	return nil
 }
 
-// copyTileData streams each unique tile from the temp file into out, in the
-// order clusterOffsets gave them. An entry holds the first copy of its data
-// exactly when its new offset is the current write position; entries that
-// share data point back to an earlier offset and are skipped.
-func (w *Writer) copyTileData(out io.Writer, src []uint64) error {
+// copyTileData streams the unique tiles at src from the temp file into out.
+func (w *Writer) copyTileData(out io.Writer, src []dedupEntry) error {
 	buf := make([]byte, 256*1024)
-	var pos uint64
-	for _, e := range w.entries {
-		if e.Offset != pos {
-			continue
-		}
-		tileLen := int(e.Length)
+	for _, t := range src {
+		tileLen := int(t.length)
 		if tileLen > len(buf) {
 			buf = make([]byte, tileLen)
 		}
-		oldOffset := src[0]
-		src = src[1:]
-		if _, err := w.tmpFile.ReadAt(buf[:tileLen], int64(oldOffset)); err != nil {
-			return fmt.Errorf("reading tile at offset %d: %w", oldOffset, err)
+		if _, err := w.tmpFile.ReadAt(buf[:tileLen], int64(t.offset)); err != nil {
+			return fmt.Errorf("reading tile at offset %d: %w", t.offset, err)
 		}
 		if _, err := out.Write(buf[:tileLen]); err != nil {
 			return fmt.Errorf("writing tile data: %w", err)
 		}
-		pos += uint64(tileLen)
 	}
 	return nil
 }
