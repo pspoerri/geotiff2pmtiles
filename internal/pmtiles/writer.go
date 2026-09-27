@@ -43,6 +43,10 @@ type Writer struct {
 
 // NewWriter creates a new PMTiles writer.
 func NewWriter(outputPath string, opts WriterOptions) (*Writer, error) {
+	// Fail now rather than in Finalize, after every tile has been written.
+	if _, err := json.Marshal(opts.Extra); err != nil {
+		return nil, fmt.Errorf("metadata Extra is not JSON-encodable: %w", err)
+	}
 	tmpDir := opts.TempDir
 	if tmpDir == "" {
 		tmpDir = filepath.Dir(outputPath)
@@ -148,7 +152,10 @@ func (w *Writer) Finalize() error {
 	}
 
 	// Build metadata JSON.
-	metadata := w.buildMetadata()
+	metadata, err := w.buildMetadata()
+	if err != nil {
+		return fmt.Errorf("encoding metadata: %w", err)
+	}
 	metadataBytes, err := compressGzip(metadata)
 	if err != nil {
 		return fmt.Errorf("compressing metadata: %w", err)
@@ -300,7 +307,7 @@ func (w *Writer) Abort() {
 }
 
 // buildMetadata creates the JSON metadata for the PMTiles archive.
-func (w *Writer) buildMetadata() []byte {
+func (w *Writer) buildMetadata() ([]byte, error) {
 	tileFormatStr := "unknown"
 	switch w.opts.TileFormat {
 	case TileTypeJPEG:
@@ -353,8 +360,7 @@ func (w *Writer) buildMetadata() []byte {
 		meta[k] = v
 	}
 
-	data, _ := json.Marshal(meta)
-	return data
+	return json.Marshal(meta)
 }
 
 func compressGzip(data []byte) ([]byte, error) {

@@ -763,7 +763,7 @@ func (r *Reader) ReadUint16Tile(level, col, row int) (samples []uint16, w, h, sp
 	if ifd.Compression == 7 {
 		return nil, 0, 0, 0, fmt.Errorf("JPEG-compressed tiles have no raw integer samples")
 	}
-	if ifd.PlanarConfig == 2 && r.strip == nil {
+	if ifd.PlanarConfig == 2 && r.strip == nil && spp > 1 {
 		return nil, 0, 0, 0, fmt.Errorf("planar-separate (PlanarConfiguration=2) tiles are not supported")
 	}
 
@@ -785,32 +785,36 @@ func (r *Reader) ReadUint16Tile(level, col, row int) (samples []uint16, w, h, sp
 	packed := rowBytes * h
 	padded := count * ((bits + 7) / 8)
 
+	// A strip TIFF's last virtual tile is legitimately short when the height
+	// is not a multiple of the tile height; the missing rows are outside the
+	// image and are never sampled.
+	if len(data) < min(packed, padded) && r.strip == nil {
+		return nil, 0, 0, 0, fmt.Errorf("tile data too short: got %d, need %d", len(data), min(packed, padded))
+	}
+
 	switch {
-	case bits%8 == 0 && len(data) >= padded:
+	case bits%8 == 0:
+		// Whole-byte samples in the file's byte order (never a bit stream).
 		bps := bits / 8
-		if bps == 1 {
-			for i := 0; i < count; i++ {
+		n := min(count, len(data)/bps)
+		for i := 0; i < n; i++ {
+			if bps == 1 {
 				samples[i] = uint16(data[i])
-			}
-		} else {
-			for i := 0; i < count; i++ {
+			} else {
 				samples[i] = r.bo.Uint16(data[i*2 : i*2+2])
 			}
 		}
-	case len(data) >= padded:
-		// Not a byte multiple, but long enough to be padded rather than packed.
+	case bits > 8 && len(data) >= padded && padded > packed:
+		// 9-15 bits, but long enough to be padded to 16 rather than packed.
+		// A tie (narrow rows) goes to packed, as the spec requires; sub-byte
+		// depths are always packed.
 		for i := 0; i < count; i++ {
 			samples[i] = r.bo.Uint16(data[i*2 : i*2+2])
 		}
 	case len(data) >= packed:
 		unpackBits(samples, data, w*spp, h, bits, rowBytes)
 	default:
-		// A strip TIFF's last virtual tile is legitimately short when the
-		// height is not a multiple of the tile height; the missing rows are
-		// outside the image and are never sampled.
-		if r.strip == nil {
-			return nil, 0, 0, 0, fmt.Errorf("tile data too short: got %d, need %d", len(data), min(packed, padded))
-		}
+		// Short last strip tile, packed.
 		rows := len(data) / rowBytes
 		unpackBits(samples, data, w*spp, rows, bits, rowBytes)
 	}
@@ -2107,6 +2111,13 @@ func (r *Reader) IsFloat() bool {
 		return false
 	}
 	return ifd.SampleFormat[0] == 3 || ifd.SampleFormat[0] == 2 // 3 = IEEE float, 2 = signed int
+}
+
+// IsIEEEFloat reports whether the samples are IEEE floating point
+// (SampleFormat 3), as opposed to signed integers.
+func (r *Reader) IsIEEEFloat() bool {
+	sf := r.ifds[0].SampleFormat
+	return len(sf) > 0 && sf[0] == 3
 }
 
 // NoData returns the GDAL nodata string, or "" if not set.
