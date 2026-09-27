@@ -3,8 +3,10 @@ package tile
 import (
 	"image/color"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/encode"
 )
@@ -294,5 +296,56 @@ func TestDiskTileStore_MultipleUniforms_SeparateKeys(t *testing.T) {
 		if got.Color() != want {
 			t.Errorf("tile (0,%d,0): color=%v want=%v", i, got.Color(), want)
 		}
+	}
+}
+
+// --- Backpressure ---
+
+// TestDiskTileStore_BackpressureNoDeadlock drives the memory-limit wait with
+// many producers against a 1-byte limit, so nearly every Put waits for the
+// I/O goroutine to release bytes. A wakeup lost between a waiter's check and
+// its Wait parks that producer for good once the I/O goroutine runs out of
+// work, which is exactly what happens at the end of a zoom level.
+func TestDiskTileStore_BackpressureNoDeadlock(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(2))
+
+	td := newTileData(grayCheckerImage(4, 30, 200), 4)
+	encoded := encodePNG(t, td)
+	dir := t.TempDir()
+
+	const producers, puts = 64, 3
+	rounds := 1000
+	if testing.Short() {
+		rounds = 100
+	}
+	for r := 0; r < rounds; r++ {
+		store := NewDiskTileStore(DiskTileStoreConfig{
+			TileSize:         4,
+			TempDir:          dir,
+			MemoryLimitBytes: 1,
+			Format:           "png",
+		})
+		var wg sync.WaitGroup
+		for p := 0; p < producers; p++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 0; i < puts; i++ {
+					store.Put(3, p, i, td, encoded)
+				}
+			}()
+		}
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("round %d: Put stuck in the backpressure wait (memBytes=%d)", r, store.memBytes.Load())
+		}
+		store.Drain()
+		if n := store.Len(); n != producers*puts {
+			t.Fatalf("round %d: Len = %d, want %d", r, n, producers*puts)
+		}
+		store.Close()
 	}
 }

@@ -82,7 +82,7 @@ type DiskTileStore struct {
 	memBytes    atomic.Int64 // estimated bytes of in-memory encoded tile data
 	mapOverhead atomic.Int64 // estimated bytes for map entry overhead (uniforms + index)
 	memoryLimit int64        // max total memory before blocking Put(); 0 = no limit
-	spillMu     sync.Mutex   // protects memCond waits (separate from mu to avoid contention)
+	spillMu     sync.Mutex   // guards memCond waits and memBytes decrements (separate from mu to avoid contention)
 
 	// Dedicated I/O goroutine.
 	ioWg      sync.WaitGroup // for Drain()
@@ -336,15 +336,18 @@ func (s *DiskTileStore) ioLoop() {
 		s.mu.Unlock()
 
 		fileOff += int64(n)
-		s.memBytes.Add(-req.memBytes)
 		s.mapOverhead.Add(mapOverheadIndex)
 		s.totalDiskTiles++
 		s.totalDiskBytes += int64(n)
 
-		// Wake blocked Put() calls now that memory has been freed.
-		if s.memCond != nil {
-			s.memCond.Broadcast()
-		}
+		// Release the bytes and wake blocked Put() calls. The decrement
+		// happens under spillMu: a Put() that has just seen memBytes over
+		// the limit holds spillMu until Wait has registered it, so the
+		// Broadcast cannot fall between its check and its Wait and be lost.
+		s.spillMu.Lock()
+		s.memBytes.Add(-req.memBytes)
+		s.spillMu.Unlock()
+		s.memCond.Broadcast()
 	}
 }
 
