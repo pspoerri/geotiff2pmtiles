@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"math"
+	"slices"
 	"testing"
 	"time"
 )
@@ -159,6 +160,44 @@ func TestOptimizeRunLengths_DifferentLengths(t *testing.T) {
 	result := optimizeRunLengths(entries)
 	if len(result) != 2 {
 		t.Fatalf("expected 2 entries (different lengths), got %d", len(result))
+	}
+}
+
+// Entries that already are runs -- a directory read back for pmheader
+// --rebuild-dirs, or runs merged while writing -- keep their lengths, and
+// adjacent runs of one blob add up. They used to be cut to one tile each.
+// The merge reuses the entries' storage: a copy of a full global z13 index
+// is another ~2 GB at Finalize.
+func TestOptimizeRunLengths_ExistingRuns(t *testing.T) {
+	entries := []Entry{
+		{TileID: 0, Offset: 0, Length: 10, RunLength: 5},
+		{TileID: 5, Offset: 0, Length: 10, RunLength: 3},
+		{TileID: 8, Offset: 10, Length: 20, RunLength: 1},
+		{TileID: 9, Offset: 30, Length: 20, RunLength: 100},
+	}
+	want := []Entry{
+		{TileID: 0, Offset: 0, Length: 10, RunLength: 8},
+		{TileID: 8, Offset: 10, Length: 20, RunLength: 1},
+		{TileID: 9, Offset: 30, Length: 20, RunLength: 100},
+	}
+	if got := optimizeRunLengths(slices.Clone(entries)); !slices.Equal(got, want) {
+		t.Errorf("optimizeRunLengths = %v, want %v", got, want)
+	}
+
+	root, _, n, err := BuildDirectory(slices.Clone(entries))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DeserializeDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(want) || !slices.Equal(got, want) {
+		t.Errorf("BuildDirectory root = %v (%d entries), want %v", got, n, want)
+	}
+
+	if allocs := testing.AllocsPerRun(10, func() { optimizeRunLengths(slices.Clone(entries)[:4:4]) }); allocs > 1 {
+		t.Errorf("optimizeRunLengths allocates (%v allocations besides the clone)", allocs-1)
 	}
 }
 
