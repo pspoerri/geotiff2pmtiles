@@ -255,7 +255,7 @@ func main() {
 			c    *color.RGBA
 		}{{"--nodata-color", nodataFill}, {"--fill-missing", missingFill}} {
 			if f.c != nil && f.c.A < 255 {
-				log.Printf("WARNING: %s alpha %d cannot be stored in jpeg; those areas will be black", f.name, f.c.A)
+				log.Print(jpegAlphaWarning(f.name, f.c))
 			}
 		}
 	}
@@ -399,6 +399,13 @@ func main() {
 	elapsed := time.Since(start).Round(time.Millisecond)
 	fi, _ := os.Stat(outputPath)
 	fmt.Printf("Done: %d tiles, %s, %v → %s\n", stats.TileCount, cli.HumanSize(fi.Size()), elapsed, outputPath)
+}
+
+// jpegAlphaWarning is the warning for a colour flag whose alpha jpeg cannot
+// store: the encoder drops the alpha and writes the colour's RGB, opaque.
+func jpegAlphaWarning(flagName string, c *color.RGBA) string {
+	return fmt.Sprintf("WARNING: %s alpha %d cannot be stored in jpeg; those areas will be opaque rgb(%d,%d,%d)",
+		flagName, c.A, c.R, c.G, c.B)
 }
 
 // discoverSourceTileSize reads and decodes one tile to infer the source tile size.

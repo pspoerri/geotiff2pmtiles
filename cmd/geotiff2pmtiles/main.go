@@ -352,13 +352,13 @@ func main() {
 		explicit := cli.IsFlagSet(flag.CommandLine, "fill-missing") || cli.IsFlagSet(flag.CommandLine, "fill-color")
 		if missingFill != nil && missingFill.A < 255 {
 			if explicit {
-				log.Printf("WARNING: --fill-missing alpha %d cannot be stored in jpeg; filled tiles will be black", missingFill.A)
+				log.Print(jpegAlphaWarning("--fill-missing", missingFill))
 			} else {
 				missingFill = nil
 			}
 		}
 		if nodataFill != nil && nodataFill.A < 255 {
-			log.Printf("WARNING: --nodata-color alpha %d cannot be stored in jpeg; nodata areas will be black", nodataFill.A)
+			log.Print(jpegAlphaWarning("--nodata-color", nodataFill))
 		}
 	}
 
@@ -628,6 +628,13 @@ func collectTIFFs(paths []string) ([]string, error) {
 		}
 	}
 	return result, nil
+}
+
+// jpegAlphaWarning is the warning for a colour flag whose alpha jpeg cannot
+// store: the encoder drops the alpha and writes the colour's RGB, opaque.
+func jpegAlphaWarning(flagName string, c *color.RGBA) string {
+	return fmt.Sprintf("WARNING: %s alpha %d cannot be stored in jpeg; those areas will be opaque rgb(%d,%d,%d)",
+		flagName, c.A, c.R, c.G, c.B)
 }
 
 func isTIFF(name string) bool {
