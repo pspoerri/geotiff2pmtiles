@@ -72,10 +72,11 @@ func (c *CRSFallback) ToWGS84(x, y float64) (lon, lat float64) {
 	if err != nil {
 		return math.Inf(1), math.Inf(1)
 	}
-	// The shift is a function of the WGS84 position, but it changes by far
-	// less than a millimeter over its own size, so evaluating it at the
-	// source-datum position is exact enough.
+	// The shift is a function of the WGS84 position; one fixed-point step
+	// from the source-datum position gets there, even for the 2.3° prime
+	// meridian offset of a Paris-based datum.
 	dLon, dLat := c.shiftAt(lon, lat)
+	dLon, dLat = c.shiftAt(lon-dLon, lat-dLat)
 	return lon - dLon, lat - dLat
 }
 

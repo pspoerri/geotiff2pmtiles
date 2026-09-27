@@ -41,6 +41,26 @@ func TestCRSFallback_OutsideAreaOfUse(t *testing.T) {
 	}
 }
 
+// TestCRSFallback_InverseShift checks ToWGS84 against FromWGS84 for datums
+// with large shifts to 1e-7° (~1 cm): the inverse must evaluate the shift at
+// the WGS84 point, not at the source-datum point 2.3° away for NTF (Paris).
+func TestCRSFallback_InverseShift(t *testing.T) {
+	for _, tc := range []struct {
+		epsg     int
+		lon, lat float64
+	}{
+		{4807, 2.3522, 48.8566},   // NTF (Paris) in grads, 2.3° prime meridian offset
+		{27700, -0.1276, 51.5072}, // OSGB36, ~100 m
+		{23030, -3.7038, 40.4168}, // ED50, ~150 m
+	} {
+		p := ForEPSG(tc.epsg)
+		lon, lat := p.ToWGS84(p.FromWGS84(tc.lon, tc.lat))
+		if math.Abs(lon-tc.lon) > 1e-7 || math.Abs(lat-tc.lat) > 1e-7 {
+			t.Errorf("EPSG:%d round trip (%v, %v) = (%v, %v)", tc.epsg, tc.lon, tc.lat, lon, lat)
+		}
+	}
+}
+
 // TestCRSFallback_ReferenceShift checks that a point no datum transformation
 // covers still gets a datum shift. ED50 is ~150 m off WGS84, so a zero shift
 // would misplace the pixel by that much.
