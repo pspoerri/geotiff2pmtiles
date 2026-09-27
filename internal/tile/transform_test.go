@@ -521,3 +521,73 @@ func TestTransformReencode_NodataColor_ReplacesTransparentPixels(t *testing.T) {
 		t.Errorf("pixel = %v, want fill %v", got, fill)
 	}
 }
+
+func TestSelectTransformMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       TransformModeOptions
+		wantMode   TransformMode
+		wantExtend bool
+	}{
+		{"default flags", TransformModeOptions{MinZoom: 5, SourceMinZoom: 5}, TransformPassthrough, false},
+		{"min zoom below the source", TransformModeOptions{MinZoom: 2, SourceMinZoom: 5}, TransformPassthrough, true},
+		{"min zoom above the source", TransformModeOptions{MinZoom: 7, SourceMinZoom: 5}, TransformPassthrough, false},
+		// --fill-missing is not an input: it never forces decoding.
+		{"fill-missing alone", TransformModeOptions{MinZoom: 5, SourceMinZoom: 5}, TransformPassthrough, false},
+		{"nodata-color", TransformModeOptions{NodataColor: true, MinZoom: 5, SourceMinZoom: 5}, TransformReencode, false},
+		{"format change", TransformModeOptions{FormatChanged: true, MinZoom: 5, SourceMinZoom: 5}, TransformReencode, false},
+		{"format change and added levels", TransformModeOptions{FormatChanged: true, MinZoom: 0, SourceMinZoom: 5}, TransformReencode, true},
+		{"rebuild", TransformModeOptions{Rebuild: true, MinZoom: 5, SourceMinZoom: 5}, TransformRebuild, false},
+		{"rebuild below the source", TransformModeOptions{Rebuild: true, NodataColor: true, MinZoom: 0, SourceMinZoom: 5}, TransformRebuild, false},
+	}
+	for _, tt := range tests {
+		mode, extend := SelectTransformMode(tt.opts)
+		if mode != tt.wantMode || extend != tt.wantExtend {
+			t.Errorf("%s: got mode %d, extendDown %v; want %d, %v", tt.name, mode, extend, tt.wantMode, tt.wantExtend)
+		}
+	}
+}
+
+// Passthrough to a min zoom below the source's copies the source levels
+// byte for byte and downsamples the lowest one into the added levels.
+func TestTransformPassthrough_AddsLowerLevels(t *testing.T) {
+	const tileSize = 8
+	bounds := testBounds()
+	red := encodePNGTile(t, tileSize, color.RGBA{255, 0, 0, 255})
+	reader := &mockPMTilesReader{
+		tiles: map[[3]int][]byte{
+			{2, 2, 1}: red, {2, 3, 1}: red, {2, 2, 2}: red,
+		},
+		header: pmtiles.Header{MinZoom: 2, MaxZoom: 2,
+			MinLon: bounds[0], MinLat: bounds[1], MaxLon: bounds[2], MaxLat: bounds[3]},
+	}
+	for _, maxZoom := range []int{2, 1} {
+		writer := newMockTileWriter()
+		cfg := TransformConfig{
+			MinZoom: 0, MaxZoom: maxZoom, TileSize: tileSize, Concurrency: 2,
+			Encoder: testEncoder(t), SourceFormat: "png", Resampling: ResamplingBilinear,
+			Mode: TransformPassthrough, Bounds: bounds, MemoryLimitBytes: -1, OutputDir: t.TempDir(),
+		}
+		stats, err := Transform(cfg, reader, writer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[int]int{0: 1, 1: 2, 2: 3}
+		if maxZoom < 2 {
+			want[2] = 0 // capped: the rebuild's z2 is dropped, not written
+		}
+		total := 0
+		for z, n := range want {
+			if got := writer.tileCountAtZoom(z); got != n {
+				t.Errorf("max zoom %d: %d tiles at z%d, want %d", maxZoom, got, z, n)
+			}
+			total += n
+		}
+		if stats.TileCount != int64(total) {
+			t.Errorf("max zoom %d: stats count %d tiles, want %d", maxZoom, stats.TileCount, total)
+		}
+		if maxZoom == 2 && !bytes.Equal(writer.tiles[[3]int{2, 2, 1}], red) {
+			t.Error("the source level was not copied as-is")
+		}
+	}
+}

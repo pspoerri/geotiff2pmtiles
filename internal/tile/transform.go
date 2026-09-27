@@ -65,9 +65,85 @@ type PMTilesReader interface {
 	Header() pmtiles.Header
 }
 
+// TransformModeOptions are the choices that decide how an archive is
+// transformed; see SelectTransformMode.
+type TransformModeOptions struct {
+	Rebuild       bool // rebuild every level below the max zoom by downsampling
+	FormatChanged bool // the target encoding differs from the source's
+	NodataColor   bool // transparent pixels are recoloured, which needs decoding
+	MinZoom       int  // the output's min zoom
+	SourceMinZoom int
+}
+
+// SelectTransformMode returns the cheapest mode that honours o, and whether
+// levels below the source's min zoom are added (extendDown). Transform adds
+// them in a separate rebuild pass from the source's lowest level, so the
+// existing levels can still be copied as they are. Filling missing tiles
+// needs no decoding and never forces a re-encode.
+func SelectTransformMode(o TransformModeOptions) (mode TransformMode, extendDown bool) {
+	switch {
+	case o.Rebuild:
+		return TransformRebuild, false
+	case o.FormatChanged || o.NodataColor:
+		mode = TransformReencode
+	default:
+		mode = TransformPassthrough
+	}
+	return mode, o.MinZoom < o.SourceMinZoom
+}
+
 // Transform reads tiles from an existing PMTiles archive, applies the
 // configured transformations, and writes the result via the TileWriter.
+//
+// In passthrough and re-encode mode, levels below the source's min zoom
+// are added by downsampling the source's lowest level, as a rebuild would;
+// the source's own levels are still copied or re-encoded.
 func Transform(cfg TransformConfig, reader PMTilesReader, writer TileWriter) (Stats, error) {
+	srcMinZoom := int(reader.Header().MinZoom)
+	if cfg.Mode == TransformRebuild || cfg.MinZoom >= srcMinZoom {
+		return transformLevels(cfg, reader, writer)
+	}
+
+	mainCfg := cfg
+	mainCfg.MinZoom = srcMinZoom
+	stats, err := transformLevels(mainCfg, reader, writer)
+	if err != nil {
+		return Stats{}, err
+	}
+	// The rebuild also renders srcMinZoom itself, which the pass above
+	// already wrote, so the cap drops those tiles.
+	extCfg := cfg
+	extCfg.Mode = TransformRebuild
+	extCfg.MaxZoom = srcMinZoom
+	capped := &zoomCap{TileWriter: writer, maxZoom: min(srcMinZoom-1, cfg.MaxZoom)}
+	ext, err := transformRebuild(extCfg, reader, capped)
+	if err != nil {
+		return Stats{}, err
+	}
+	stats.TileCount += ext.TileCount - capped.dropped.Load()
+	stats.UniformTiles += ext.UniformTiles
+	stats.EmptyTiles += ext.EmptyTiles
+	stats.TotalBytes += ext.TotalBytes
+	return stats, nil
+}
+
+// zoomCap drops tiles above maxZoom and forwards the rest.
+type zoomCap struct {
+	TileWriter
+	maxZoom int
+	dropped atomic.Int64
+}
+
+func (w *zoomCap) WriteTile(z, x, y int, data []byte) error {
+	if z > w.maxZoom {
+		w.dropped.Add(1)
+		return nil
+	}
+	return w.TileWriter.WriteTile(z, x, y, data)
+}
+
+// transformLevels runs cfg.Mode over the levels cfg.MinZoom..cfg.MaxZoom.
+func transformLevels(cfg TransformConfig, reader PMTilesReader, writer TileWriter) (Stats, error) {
 	switch cfg.Mode {
 	case TransformPassthrough:
 		return transformPassthrough(cfg, reader, writer)
