@@ -330,15 +330,64 @@ Keep only z10-z14 (tiles are copied, not re-encoded):
 ./pmtransform --min-zoom 10 --max-zoom 14 input.pmtiles output.pmtiles
 ```
 
+## pmmerge
+
+Merge several PMTiles archives into one, e.g. regions tiled to different max zooms
+(z12, z13, z14).
+
+```
+pmmerge [flags] -o <output.pmtiles> <input.pmtiles>...
+```
+
+- The output spans the highest input max zoom. Above its own max zoom an input's tiles are
+  scaled up into the positions they cover (`--upsampling nearest`, exact values and
+  blocky, or `bilinear`, smooth; terrarium is interpolated as elevation): PMTiles has no per-region
+  max zoom, and viewers draw a tile missing inside the zoom range as blank instead of
+  overzooming it.
+- Where inputs overlap, the one with the higher max zoom wins, ties go to the earlier
+  input on the command line, and its transparent pixels show the next input through
+  (terrarium elevation archives: no blending, only fully transparent pixels fall through).
+- A position only one input covers, at its native zoom and in the output format, is copied
+  byte for byte, as is one whose top tile is opaque; everything else is re-encoded.
+- pmmerge warns for every input it scales up, and refuses a `--max-zoom` above every
+  input's max zoom.
+- Zoom range as in geotiff2pmtiles: by default the output goes down to the highest zoom at
+  which the merged extent fits in one tile. Levels below the highest input min zoom (the
+  lowest level every input covers) are downsampled from the merged level there
+  (`--resampling`, default bicubic). The max zoom is the highest input max zoom.
+- All inputs need the same tile size, at most 64 inputs. Differing formats need `--format`.
+  Inputs without tiles are skipped.
+- No temp files: tiles are written straight into the output, so the disk needs room for
+  the output alone (plus the old archive when replacing one).
+- The inputs' name and description carry over when they all agree; each input's own
+  metadata (e.g. provenance keys) is kept under `sources` with its file name and zooms.
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `-o` | | Output file (required) |
+| `--format` | the inputs' | Encoding of re-encoded tiles: `jpeg`, `png`, `webp` |
+| `--quality` | `85` | JPEG/WebP quality |
+| `--min-zoom` | auto (`-1`) | Minimum zoom level, see above |
+| `--max-zoom` | highest input's | Maximum zoom level, at most the highest input max zoom |
+| `--resampling` | `bicubic` | Downsampling of added levels: `lanczos`, `bicubic`, `bilinear`, `nearest`, `mode` |
+| `--upsampling` | `nearest` | Scaling above an input's max zoom: `nearest` or `bilinear` |
+| `--concurrency` | CPUs | Parallel workers |
+| `--attribution` | inputs' joined | Attribution string |
+| `--type` | first input's | `baselayer` or `overlay` |
+
+```bash
+./pmmerge -o switzerland.pmtiles alps-z12.pmtiles plateau-z13.pmtiles cities-z14.pmtiles
+```
+
 ## Disk space, memory and temporary files
 
-- Both tools write their temporary files (`pmtiles-tiles-*.tmp` from the archive writer,
+- The tools write their temporary files (`pmtiles-tiles-*.tmp` from the archive writer,
   `pmtiles-tilestore-*.tmp` spill files) into a per-run `.geotiff2pmtiles-tmp-*` /
-  `.pmtransform-tmp-*` directory next to the output, or under `--tmp-dir`.
+  `.pmtransform-tmp-*` / `.pmmerge-tmp-*` directory next to the output, or under `--tmp-dir`.
 - At the end the archive is assembled as `<output>.partial` next to the output and renamed
   over it only when it is complete, so a failed run never destroys an existing archive.
 - Keep about twice the expected archive size free next to the output; that is the peak
-  while the archive is finalized. Replacing an existing archive needs room for the old one
+  while the archive is finalized (pmmerge: once the size, it writes no temp copy). Replacing an existing archive needs room for the old one
   too. With `--tmp-dir` on another disk, that disk needs about 1.9× the archive size and
   the output disk 1×.
 - The temp directory and the `.partial` file are removed on success, on errors and on
@@ -360,7 +409,7 @@ Keep only z10-z14 (tiles are copied, not re-encoded):
 | `pmheader [flags] <in.pmtiles> [out.pmtiles]` | Patch header fields and metadata without touching tile data (uncompressed or gzip-compressed directories, leaves at any depth); `--rebuild-dirs` fixes an oversized root directory. **Without an output path the input is edited in place** (see below) |
 | `checkpmtiles <file-or-URL>` | Validate a PMTiles v3 archive: header, every directory, zoom range (min ≤ max, every tile inside it) and tile count (exit code 1 on error) |
 
-`make build-all` builds geotiff2pmtiles, pmtransform, checkpmtiles and pmheader into
+`make build-all` builds geotiff2pmtiles, pmtransform, pmmerge, checkpmtiles and pmheader into
 `dist/`; `coginfo` runs with `go run ./cmd/coginfo/` and is also attached to each release.
 
 ### coginfo flags
@@ -424,7 +473,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for tests, integration test data and profil
 
 ## Installation
 
-Prebuilt binaries of geotiff2pmtiles, pmtransform and coginfo for Linux, macOS and Windows
+Prebuilt binaries of geotiff2pmtiles, pmtransform, pmmerge and coginfo for Linux, macOS and Windows
 (amd64 and arm64) are attached to each
 [release](https://github.com/pspoerri/geotiff2pmtiles/releases). All of them support all
 four tile formats; they differ only in the WebP encoder:

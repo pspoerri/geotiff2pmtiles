@@ -11,7 +11,8 @@ cmd/
   geotiff2pmtiles/main.go          CLI: GeoTIFF/COG → PMTiles conversion
   geotiff2pmtiles/sources.go       Per-source CRS and geotransform checks, WGS84 bounds check, coverage holes (single CRS only), finest pixel size
   pmtransform/main.go              CLI: PMTiles → PMTiles transformation
-  checkpmtiles/main.go             PMTiles v3 archive validator (local + HTTP; every directory at any depth)
+  pmmerge/main.go                  CLI: merge PMTiles archives of differing max zooms
+  checkpmtiles/main.go             PMTiles v3 archive validator (local + HTTP; every directory at any depth; sections in any order, no overlaps)
   pmheader/main.go                 Patch PMTiles header/metadata/directories without touching tile data
   coginfo/main.go                  COG metadata inspector; -raw dumps the IFD 0 tags and first tile
 internal/
@@ -27,9 +28,6 @@ internal/
     valuerange.go                   Auto rescale range over the rendered bands (GDAL statistics, else a grid of up to 64 tiles); ErrNoValueRange
     flood.go                        Source-level nodata flood mask (--nodata-flood)
     lzw.go                          LZW decompression (ZSTD via klauspost/compress in reader.go)
-    mmap_unix.go                    mmap/munmap via syscall.Mmap (unix)
-    mmap_windows.go                 mmap via CreateFileMapping/MapViewOfFile (windows)
-    mmap_other.go                   Unsupported-platform stubs
   coord/
     swiss.go                        EPSG:2056 <-> WGS84 transforms
     utm.go                          UTM zones (EPSG:326xx/327xx/258xx) <-> WGS84, Krüger series
@@ -40,6 +38,7 @@ internal/
   tile/
     generator.go                    Parallel tile generation pipeline (GeoTIFF sources)
     transform.go                    PMTiles transform pipeline (passthrough/re-encode/rebuild), SelectTransformMode
+    merge.go                        PMTiles merge (pmmerge): Hilbert-run sweep of the inputs, nearest/bilinear upsampling above an input's max zoom, straight-alpha compositing; SourceTileSize
     resample.go                     Per-source projections (buildSourceInfos), Lanczos/bicubic/bilinear/nearest/mode interpolation + reprojection (LUT-accelerated, alpha-weighted, optional gamma encode)
     downsample.go                   Pyramid downsampling for lower zoom levels (alpha-weighted)
     diskstore.go                    Disk-backed tile store with memory backpressure and a sticky I/O error
@@ -60,9 +59,14 @@ internal/
     webp_stub.go                    Pure-Go WebP for non-CGo builds (x/image/webp decode with libwebp's YUV→RGB arithmetic, nativewebp lossless encode)
     webp_available.go               CGo availability flag for conditional tests
     terrarium.go                    Terrarium encoder for elevation data
+  mmap/
+    mmap_unix.go                    Map/Unmap via syscall.Mmap (unix); shared by cog and pmtiles
+    mmap_windows.go                 Map via CreateFileMapping/MapViewOfFile (windows)
+    mmap_other.go                   Unsupported-platform stubs (pmtiles falls back to ReadAt)
   pmtiles/
     writer.go                       PMTiles v3 writer: temp tile file, small-tile dedup, run merging while writing, clustered Finalize via <output>.partial
-    reader.go                       PMTiles v3 reader: sorted run-length index (binary-search lookup, never expanded per tile), leaf directories at any depth, none/gzip internal compression, metadata
+    streamwriter.go                 StreamWriter: tiles in increasing tile-ID order straight into <output>.partial (tile data at 16 KiB, metadata and leaves after it), no temp copy; used by pmmerge
+    reader.go                       PMTiles v3 reader: archive memory-mapped (ReadTile returns a view, valid until Close; ReadAt fallback), sorted run-length index (binary-search lookup, never expanded per tile), TileRanges (a level's tiles as Hilbert-index runs), leaf directories at any depth, none/gzip internal compression, metadata
     header.go                       Header serialization/deserialization (127 bytes); bounds kept as exact E7 alongside the float32 fields; antimeridian bounds written as -180..180
     directory.go                    Hilbert-curve tile IDs, directory serialization/deserialization, run-length merging, 16 KiB root budget enforcement
 integration/
@@ -224,6 +228,37 @@ format, type, minzoom, maxzoom, bounds, center, attribution, encoding) are passe
 `WriterOptions.Extra`, and the output header keeps the source's exact E7 bounds and its
 centre (`WriterOptions.Center`, with the zoom clamped to the output range).
 
+## Merge Pipeline (pmmerge)
+
+`tile.Merge` takes the inputs as `MergeInput`s (reader, decode format, tile type) and, per
+output zoom from max to min:
+
+1. Takes each input's tiles at that zoom as runs of Hilbert indices
+   (`pmtiles.Reader.TileRanges`), in priority order (higher input max zoom first, then
+   argument order). Above an input's max zoom its max-zoom runs are scaled: the children
+   of index h are 4h..4h+3, so a run [lo, hi) d levels up covers [lo<<2d, hi<<2d).
+2. `sweepRanges` walks the runs together and yields every covered position in Hilbert
+   order with a bit set of the inputs covering it. Nothing per position is stored: memory
+   follows the inputs' directories. Levels go from low to high zoom. Positions go to
+   workers in numbered batches, so the descendants of one scaled-up tile land on one
+   worker, whose one-tile-per-input decode cache decodes each ancestor once; a collector
+   (`mergeLevel`) writes the batches back in order, a token per batch in flight capping how
+   far workers run ahead. The writer thus gets strictly increasing tile IDs, and pmmerge
+   uses `pmtiles.StreamWriter`, which lays them straight into the archive.
+   Levels below the inputs' highest min zoom (the base) are not merged: the base level is
+   merged into memory (`tileCollector`), `transformRebuild` downsamples the added levels
+   from it, and they are written before the base level to keep the tile-ID order.
+3. Per position: a single native candidate of the output tile type, or a native opaque
+   first candidate, is copied as it is — `ReadTile` hands back a view of the memory-mapped
+   input, so a copied tile is never duplicated on the heap. Otherwise candidates are
+   decoded, scaled up where needed (`upsampleCrop`, nearest neighbour, or
+   `upsampleBilinear`, alpha-weighted; terrarium interpolated as elevation) and composited
+   under each other (`compositeUnder`, straight-alpha "over"; terrarium: first pixel with
+   alpha wins) until the tile is opaque, then encoded.
+
+`tile.SourceTileSize` (shared with pmtransform) discovers each input's tile size; the CLI
+requires them to match, unions the header bounds and joins the attributions.
+
 ## Memory Efficiency
 
 - Memory-mapped file access (no full-image decode)
@@ -289,7 +324,7 @@ Details and trade-offs: DESIGN.md, "Nodata and transparency".
 ## Platform Support
 
 Linux, macOS and Windows on amd64 and arm64. Platform differences are confined
-to three groups of build-tagged files — `cog/mmap_*.go` (memory mapping),
+to three groups of build-tagged files — `mmap/mmap_*.go` (memory mapping),
 `tile/sysinfo_*.go` (total RAM) and `encode/webp{,_stub,_available}.go` (CGo
 availability); everything else is portable Go.
 

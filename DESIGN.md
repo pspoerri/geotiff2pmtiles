@@ -88,6 +88,13 @@ For code structure and the conventions code must follow see [ARCHITECTURE.md](AR
   - [Tile size discovery](#tile-size-discovery)
   - [Sparse fill optimization](#sparse-fill-optimization)
   - [Metadata and bounds passthrough](#metadata-and-bounds-passthrough)
+- [pmmerge](#pmmerge)
+  - [Scaling up instead of leaving gaps](#scaling-up-instead-of-leaving-gaps)
+  - [Priority and compositing](#priority-and-compositing)
+  - [Default min zoom](#default-min-zoom)
+  - [Streaming positions from tile runs](#streaming-positions-from-tile-runs)
+  - [Upsampling methods](#upsampling-methods)
+  - [Streaming writer](#streaming-writer)
 - [Command-line tools](#command-line-tools)
   - [Shared CLI helpers](#shared-cli-helpers)
   - [checkpmtiles](#checkpmtiles)
@@ -1237,7 +1244,7 @@ script. Naming both libraries directly is shorter and works on every environment
 
 ### Windows support
 
-Windows has no `mmap(2)`; `mmap_windows.go` uses `CreateFileMapping` +
+Windows has no `mmap(2)`; `internal/mmap/mmap_windows.go` uses `CreateFileMapping` +
 `MapViewOfFile` (`PAGE_READONLY`/`FILE_MAP_READ`) from the standard `syscall`
 package, avoiding a `golang.org/x/sys` dependency. The mapping handle is closed right
 after the view is created — the view holds its own reference to the section —
@@ -1461,6 +1468,17 @@ and debugging.
 
 ## PMTiles reader
 
+### Memory-mapped reads
+
+The reader maps the archive, as `cog.Open` maps COGs (shared `internal/mmap`), and
+`ReadTile` returns a subslice of the mapping instead of a `pread` into a new buffer. A
+passthrough tile then goes from the page cache straight into the writer's temp file.
+The bytes are only valid until `Close` — `readAllTiles` in the integration tests kept them
+past it and faulted — and they are read-only (`PROT_READ`), so a caller that writes to
+them faults instead of corrupting the archive. Where mapping fails (platforms without
+mmap, a file larger than the address space) the reader falls back to `ReadAt`.
+Directories and metadata are still read with `ReadAt`: they are read once at open.
+
 ### Run-length index
 
 `OpenReader` used to expand every run-length entry into a map slot and a slice element per
@@ -1570,7 +1588,8 @@ of erroring — the output is visually usable, just no longer valid elevation da
 ### Tile size discovery
 
 The PMTiles v3 header does not store tile size (only format via `TileType`). When
-`--tile-size` is omitted (default: keep source), pmtransform discovers the source tile
+`--tile-size` is omitted (default: keep source), pmtransform (and pmmerge, via the shared
+`tile.SourceTileSize`) discovers the source tile
 size by reading and decoding one tile from the max zoom level and using its image
 dimensions. If no tile can be decoded (e.g. all empty), it falls back to 256. This
 ensures 512px archives stay 512px when rebuilding with `--resampling lanczos` instead
@@ -1607,6 +1626,88 @@ requires every key the writer emits to be in that list, so it cannot drift silen
 non-terrarium `encoding` is carried forward as `WriterOptions.Encoding`. The output bounds
 come from `Header.Bounds()`, the exact E7 values: a passthrough used to change header
 bytes 102-117.
+
+## pmmerge
+
+### Scaling up instead of leaving gaps
+
+Merging a z12 archive with a z14 one gives an archive with max zoom 14, and the z12 area
+needs z13 and z14 tiles. PMTiles has nothing that could stand in for them: a directory
+entry maps one z/x/y to a byte range, there is no "use the parent" entry, and clients only
+overzoom above the archive-wide max zoom; inside the range a missing tile renders blank.
+Pointing a z14 entry at the z12 tile's bytes would draw the whole z12 tile into a z14
+cell. So pmmerge writes the scaled-up crops. They cost what their encoded size costs,
+except where the ancestor is uniform (nodata, sea): identical crops dedup in the writer.
+Nearest neighbour keeps terrarium elevations and categorical classes exact; imagery looks
+blocky above its native zoom, which is honest about its resolution. Keeping the archives
+separate and layering them in the viewer is the alternative that stores nothing extra.
+
+### Priority and compositing
+
+The finer input wins where inputs overlap, since at every zoom its tiles are at least as
+good as a coarser input's; argument order breaks ties. Tiles are composited per pixel, not
+per tile: edge tiles of adjacent regions are partly transparent, and whole-tile priority
+would cut the coarser region at the finer one's tile grid. Straight-alpha "over" rather
+than the generator's alpha=0 fallthrough, because downsampled edge pixels have partial
+alpha and fallthrough would leave a translucent seam. Terrarium tiles are not blended,
+which would average elevations channel by channel.
+
+### Default min zoom
+
+As geotiff2pmtiles and pmtransform: down to the zoom where the merged extent fits in one
+tile. Below an input's min zoom it contributes nothing, so levels below the highest input
+min zoom (the base) are not merged but downsampled from the merged base level, reusing
+pmtransform's rebuild; an input's own tiles below the base are replaced, as they would
+show only part of the data. A first version stopped at the base and left the extension
+to a pmtransform run, which rewrote the whole archive for a handful of tiles.
+
+The streaming writer needs increasing tile IDs, and the added levels have lower IDs than
+the base they are made from. So the base level is merged into memory first, the added
+levels are downsampled and written, then the base level, then the rest streams as
+before. The base is the inputs' lowest level and usually small (121 tiles for the
+Sentinel-2 merge); an archive whose inputs all start high up would need it spilled.
+
+### Streaming positions from tile runs
+
+A first version collected every output position of a level in a map with its candidate
+list and sorted it along the Hilbert curve. Scaling a z12 archive up to z14 multiplies its
+tiles by 16, so a level of a national merge meant tens of millions of map entries. PMTiles
+tile IDs make this unnecessary: within a level they are Hilbert indices, and the children
+of index h are exactly 4h..4h+3 (checked for every tile up to z9), so an input's coverage at
+any zoom — native or scaled up — is its directory's runs, shifted. A sweep over the run
+lists yields positions already in Hilbert order with a bit set of covering inputs, which
+caps a merge at 64 inputs; more can be merged in steps.
+
+### Upsampling methods
+
+`--upsampling nearest` (default) repeats each source pixel 2^d times: exact for elevations
+and classes, blocky for imagery. `bilinear` is smoother. It weights each corner by its
+alpha, so transparent nodata pixels thin the alpha at data edges instead of darkening the
+colour, and interpolates terrarium pixels as elevations — per channel, a 100 m and a 300 m
+pixel would average to a value with the wrong low byte. Samples past the ancestor tile's
+edge clamp to it, which leaves the outer half source pixel flat along ancestor borders;
+reading the neighbouring ancestors would fix that at the cost of up to four decodes.
+
+### Streaming writer
+
+`Writer` appends tiles to a temp file in whatever order they come and copies them into
+the archive in tile-ID order at Finalize, so the peak disk use is twice the archive. That
+order is what the pyramid builders need (they finish the max zoom first), but a merge can
+produce tiles in tile-ID order itself: levels low to high, Hilbert order within a level,
+with parallel batches written back in sequence. The first real use, 17 Sentinel-2
+archives adding up to 64 GB on a disk with 98 GiB free, did not fit twice.
+
+`StreamWriter` writes the tile data straight into `<output>.partial` from offset 16384
+and appends the metadata and leaf directories after it; Finalize writes the root
+directory and the header into the space before. The spec allows every section but the
+header anywhere, as long as the root directory ends within the first 16 KiB, which
+`BuildDirectory` already guarantees. The zero gap between the root directory and the tile
+data costs at most 16 KiB. Runs are merged as tiles arrive (the IDs are in order), and
+dedup compares candidates against the bytes already in the output. `checkpmtiles`
+required the Writer's contiguous section order and was relaxed to the spec: sections
+after the header, no overlaps, the last one ending the file. pmtransform's passthrough
+and re-encode modes could use it the same way; rebuild and geotiff2pmtiles cannot, as
+they build the pyramid top down.
 
 ## Command-line tools
 
