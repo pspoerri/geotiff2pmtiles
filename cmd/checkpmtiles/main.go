@@ -13,6 +13,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"encoding/binary"
 	"flag"
@@ -20,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/pspoerri/geotiff2pmtiles/internal/pmtiles"
@@ -115,20 +117,18 @@ func check(src dataSource) bool {
 
 	// Consistency checks.
 	fmt.Printf("\nConsistency checks:\n")
-	if end := h.RootDirOffset + h.RootDirLength; end != h.MetadataOffset {
-		fail("root dir end (%d) != metadata offset (%d)", end, h.MetadataOffset)
+	// The spec lets every section but the header sit anywhere (pmmerge puts
+	// tile data first), so check that they follow the header, do not
+	// overlap, and that the last one ends the file.
+	sections := layoutSections(h)
+	expectedSize := uint64(pmtiles.HeaderSize)
+	if overlap := sectionOverlap(sections); overlap != "" {
+		fail("%s", overlap)
 	} else {
-		fmt.Printf("  RootDir end -> MetadataOffset: OK\n")
+		fmt.Printf("  Sections (%s): OK\n", sectionOrder(sections))
 	}
-	if end := h.MetadataOffset + h.MetadataLength; end != h.LeafDirOffset {
-		fail("metadata end (%d) != leaf dir offset (%d)", end, h.LeafDirOffset)
-	} else {
-		fmt.Printf("  Metadata end -> LeafDirOffset: OK\n")
-	}
-	if end := h.LeafDirOffset + h.LeafDirLength; end != h.TileDataOffset {
-		fail("leaf dir end (%d) != tile data offset (%d)", end, h.TileDataOffset)
-	} else {
-		fmt.Printf("  LeafDir end -> TileDataOffset: OK\n")
+	for _, s := range sections {
+		expectedSize = max(expectedSize, s.off+s.len)
 	}
 	if h.MinZoom > h.MaxZoom {
 		fail("min zoom %d is greater than max zoom %d", h.MinZoom, h.MaxZoom)
@@ -137,7 +137,6 @@ func check(src dataSource) bool {
 	}
 
 	// File size check (local files only).
-	expectedSize := h.TileDataOffset + h.TileDataLength
 	if fs, ok := src.(*fileSource); ok {
 		if uint64(fs.size) != expectedSize {
 			fail("file size %d != expected %d", fs.size, expectedSize)
@@ -328,4 +327,48 @@ func trailingBytes(data []byte, compression uint8) (int, error) {
 		}
 	}
 	return r.Len(), nil
+}
+
+// section is one of an archive's sections, by header offset and length.
+type section struct {
+	name     string
+	off, len uint64
+}
+
+// layoutSections returns h's non-empty sections, sorted by offset.
+func layoutSections(h pmtiles.Header) []section {
+	var ss []section
+	for _, s := range []section{
+		{"root dir", h.RootDirOffset, h.RootDirLength},
+		{"metadata", h.MetadataOffset, h.MetadataLength},
+		{"leaf dirs", h.LeafDirOffset, h.LeafDirLength},
+		{"tile data", h.TileDataOffset, h.TileDataLength},
+	} {
+		if s.len > 0 {
+			ss = append(ss, s)
+		}
+	}
+	slices.SortStableFunc(ss, func(a, b section) int { return cmp.Compare(a.off, b.off) })
+	return ss
+}
+
+// sectionOverlap describes the first section that starts inside the header
+// or the section before it, or returns "".
+func sectionOverlap(ss []section) string {
+	prev := section{"header", 0, pmtiles.HeaderSize}
+	for _, s := range ss {
+		if s.off < prev.off+prev.len {
+			return fmt.Sprintf("%s at %d overlaps %s at %d-%d", s.name, s.off, prev.name, prev.off, prev.off+prev.len)
+		}
+		prev = s
+	}
+	return ""
+}
+
+func sectionOrder(ss []section) string {
+	names := make([]string, len(ss))
+	for i, s := range ss {
+		names[i] = s.name
+	}
+	return strings.Join(names, ", ")
 }
