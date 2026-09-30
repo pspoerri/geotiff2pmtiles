@@ -11,7 +11,8 @@ Memory-efficient Go toolset for converting GeoTIFF/COG files to PMTiles v3 archi
 ```bash
 make build              # Build geotiff2pmtiles (requires CGO_ENABLED=1 + libwebp; CGO=0 to skip)
 make build-transform    # Build pmtransform
-make build-all          # geotiff2pmtiles, pmtransform, checkpmtiles, pmheader
+make build-merge        # Build pmmerge
+make build-all          # geotiff2pmtiles, pmtransform, pmmerge, checkpmtiles, pmheader
 make test               # Run all tests
 make test-race          # Tests with race detector (used in CI)
 make bench              # Run benchmarks
@@ -26,9 +27,10 @@ Run a single benchmark: `go test ./internal/tile/ -bench=BenchmarkDownsample -be
 
 ## Architecture
 
-Two main CLI tools in `cmd/`:
+Three main CLI tools in `cmd/`:
 - **geotiff2pmtiles** — COG → PMTiles conversion
 - **pmtransform** — PMTiles → PMTiles transformation (passthrough / re-encode / rebuild pyramid)
+- **pmmerge** — merge PMTiles archives with differing max zooms (`tile.Merge` in `merge.go`)
 
 Plus utilities: **pmheader** (patch header/metadata), **checkpmtiles** (validate an archive), **coginfo** (COG metadata; `-raw` for a low-level IFD/tile dump). Shared CLI helpers live in `internal/cli`.
 
@@ -45,7 +47,7 @@ Core packages in `internal/`:
 
 ## Key Design Patterns
 
-- **Memory-mapped I/O** for COG access — tile-level reads without loading entire file
+- **Memory-mapped I/O** for COG and PMTiles access (`internal/mmap`) — tile-level reads without loading entire file; `pmtiles.Reader.ReadTile` returns a view valid until `Close`
 - **Encoded tiles in memory** (5-25x smaller than raw pixels), with disk spilling via dedicated I/O goroutine
 - **LUT-accelerated resampling** — 1024-entry precomputed tables for Lanczos-3 and bicubic kernels
 - **Precomputed lon/lat arrays** — O(n) trig calls instead of O(n²) in Mercator projection

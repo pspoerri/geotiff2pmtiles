@@ -397,42 +397,52 @@ func (w *Writer) Abort() {
 
 // buildMetadata creates the JSON metadata for the PMTiles archive.
 func (w *Writer) buildMetadata() ([]byte, error) {
-	name := w.opts.Name
+	return buildMetadata(w.opts)
+}
+
+// DerivedMetadataKeys are the metadata keys buildMetadata derives from
+// WriterOptions. A tool copying another archive's metadata into Extra must
+// leave them out: Extra overrides them.
+var DerivedMetadataKeys = []string{"name", "description", "format", "type", "minzoom", "maxzoom", "bounds", "center", "attribution", "encoding"}
+
+// buildMetadata creates the JSON metadata of an archive written with opts.
+func buildMetadata(opts WriterOptions) ([]byte, error) {
+	name := opts.Name
 	if name == "" {
 		name = "geotiff2pmtiles"
 	}
-	description := w.opts.Description
+	description := opts.Description
 	if description == "" {
 		description = "Generated from GeoTIFF files"
 	}
 
-	layerType := w.opts.Type
+	layerType := opts.Type
 	if layerType == "" {
 		layerType = "baselayer"
 	}
 
-	b, _ := archiveBounds(w.opts.Bounds)
-	c := archiveCenter(w.opts)
+	b, _ := archiveBounds(opts.Bounds)
+	c := archiveCenter(opts)
 	meta := map[string]interface{}{
 		"name":        name,
 		"description": description,
-		"format":      TileTypeString(w.opts.TileFormat),
+		"format":      TileTypeString(opts.TileFormat),
 		"type":        layerType,
-		"minzoom":     fmt.Sprintf("%d", w.opts.MinZoom),
-		"maxzoom":     fmt.Sprintf("%d", w.opts.MaxZoom),
+		"minzoom":     fmt.Sprintf("%d", opts.MinZoom),
+		"maxzoom":     fmt.Sprintf("%d", opts.MaxZoom),
 		"bounds":      fmt.Sprintf("%.6f,%.6f,%.6f,%.6f", b.MinLon, b.MinLat, b.MaxLon, b.MaxLat),
 		"center":      fmt.Sprintf("%.6f,%.6f,%d", c.Lon, c.Lat, c.Zoom),
 	}
 
-	if w.opts.Attribution != "" {
-		meta["attribution"] = w.opts.Attribution
+	if opts.Attribution != "" {
+		meta["attribution"] = opts.Attribution
 	}
-	if w.opts.Encoding != "" {
-		meta["encoding"] = w.opts.Encoding
+	if opts.Encoding != "" {
+		meta["encoding"] = opts.Encoding
 	}
 
 	// Caller-supplied keys, merged last so they win over the derived ones.
-	for k, v := range w.opts.Extra {
+	for k, v := range opts.Extra {
 		meta[k] = v
 	}
 

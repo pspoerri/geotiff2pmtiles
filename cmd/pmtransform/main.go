@@ -208,7 +208,7 @@ func main() {
 	if minZoom > maxZoom {
 		log.Fatalf("invalid zoom range %d-%d: --min-zoom must be <= --max-zoom", minZoom, maxZoom)
 	}
-	srcTileSize := discoverSourceTileSize(reader, srcFormat)
+	srcTileSize := tile.SourceTileSize(reader, srcFormat)
 	if tileSize < 0 {
 		tileSize = srcTileSize
 	} else if tileSize != srcTileSize {
@@ -460,29 +460,6 @@ func fillBounds(r *pmtiles.Reader) [4]float32 {
 	return b
 }
 
-// discoverSourceTileSize reads and decodes one tile to infer the source tile size.
-// PMTiles v3 header does not store tile size, so we must decode to discover it.
-// Returns 256 if no tile could be decoded (e.g. all empty).
-func discoverSourceTileSize(reader *pmtiles.Reader, format string) int {
-	tiles := reader.TilesAtZoom(int(reader.Header().MaxZoom))
-	for _, t := range tiles {
-		z, x, y := t[0], t[1], t[2]
-		data, err := reader.ReadTile(z, x, y)
-		if err != nil || data == nil {
-			continue
-		}
-		img, err := encode.DecodeImage(data, format)
-		if err != nil {
-			continue
-		}
-		b := img.Bounds()
-		if b.Dx() > 0 && b.Dy() > 0 {
-			return b.Dx()
-		}
-	}
-	return 256
-}
-
 func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 	mode tile.TransformMode, extendDown bool, srcFormat, targetFormat string, quality int,
 	tileSize, minZoom, maxZoom int, resampling string, nodataFill, missingFill *color.RGBA) string {
@@ -541,10 +518,6 @@ func buildTransformDescription(srcDescription string, srcHeader pmtiles.Header,
 	return b.String()
 }
 
-// derivedMetadataKeys are the metadata keys pmtiles.Writer derives from its
-// options, which pmtransform sets from the source or its flags.
-var derivedMetadataKeys = []string{"name", "description", "format", "type", "minzoom", "maxzoom", "bounds", "center", "attribution", "encoding"}
-
 // passthroughMetadata returns the source metadata keys that the writer does
 // not derive, so that provenance such as a composite's scene list survives
 // the transform. They go to WriterOptions.Extra, which overrides derived
@@ -552,7 +525,7 @@ var derivedMetadataKeys = []string{"name", "description", "format", "type", "min
 func passthroughMetadata(meta map[string]any) map[string]any {
 	extra := map[string]any{}
 	for k, v := range meta {
-		if !slices.Contains(derivedMetadataKeys, k) {
+		if !slices.Contains(pmtiles.DerivedMetadataKeys, k) {
 			extra[k] = v
 		}
 	}
