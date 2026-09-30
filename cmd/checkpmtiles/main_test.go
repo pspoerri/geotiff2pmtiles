@@ -150,6 +150,31 @@ func TestCheck(t *testing.T) {
 		t.Error("an archive with tiles outside its zoom range passed")
 	}
 
+	// Sections may sit anywhere after the header; a StreamWriter puts the
+	// tile data first and metadata and leaves after it.
+	streamed := filepath.Join(t.TempDir(), "streamed.pmtiles")
+	sw, err := pmtiles.NewStreamWriter(streamed, pmtiles.WriterOptions{MinZoom: 1, MaxZoom: 1, TileFormat: pmtiles.TileTypePNG})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, xy := range [][2]int{{0, 0}, {0, 1}, {1, 1}} { // increasing tile IDs
+		if err := sw.WriteTile(1, xy[0], xy[1], []byte("tile")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sw.Finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if !check(openSource(t, streamed)) {
+		t.Error("a StreamWriter archive failed the checks")
+	}
+
+	overlapping := writeArchive(t, 4)
+	patchHeader(t, overlapping, func(h *pmtiles.Header) { h.MetadataOffset = h.RootDirOffset + 1 })
+	if check(openSource(t, overlapping)) {
+		t.Error("an archive whose metadata overlaps the root directory passed")
+	}
+
 	miscounted := writeNestedUncompressed(t)
 	patchHeader(t, miscounted, func(h *pmtiles.Header) { h.NumAddressedTiles = 7 })
 	if check(openSource(t, miscounted)) {
