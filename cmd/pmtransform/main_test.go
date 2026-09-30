@@ -27,14 +27,14 @@ func TestPassthroughMetadata(t *testing.T) {
 			t.Errorf("key %q was dropped", k)
 		}
 	}
-	for _, k := range derivedMetadataKeys {
+	for _, k := range pmtiles.DerivedMetadataKeys {
 		if _, ok := got[k]; ok {
 			t.Errorf("derived key %q passed through; it would override the writer's value", k)
 		}
 	}
 }
 
-// Every key the writer derives must be in derivedMetadataKeys, or a stale
+// Every key the writer derives must be in pmtiles.DerivedMetadataKeys, or a stale
 // source value passed through Extra would override the new one.
 func TestDerivedMetadataKeysCoverTheWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "all.pmtiles")
@@ -62,8 +62,8 @@ func TestDerivedMetadataKeysCoverTheWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	for k := range meta {
-		if !slices.Contains(derivedMetadataKeys, k) {
-			t.Errorf("the writer derives %q, which derivedMetadataKeys lacks", k)
+		if !slices.Contains(pmtiles.DerivedMetadataKeys, k) {
+			t.Errorf("the writer derives %q, which pmtiles.DerivedMetadataKeys lacks", k)
 		}
 	}
 }
