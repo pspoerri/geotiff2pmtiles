@@ -24,7 +24,7 @@ func readAllTiles(t *testing.T, path string) map[[3]int][]byte {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tiles[p] = data
+			tiles[p] = bytes.Clone(data) // ReadTile's bytes are a view of the mapping, gone after Close
 		}
 	}
 	return tiles

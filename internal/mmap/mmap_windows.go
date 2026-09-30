@@ -1,6 +1,6 @@
 //go:build windows
 
-package cog
+package mmap
 
 import (
 	"fmt"
@@ -8,12 +8,12 @@ import (
 	"unsafe"
 )
 
-// mmapFile memory-maps a file read-only. The fd can be closed after mapping:
+// Map memory-maps a file read-only. The fd can be closed after mapping:
 // the mapped view keeps the underlying section object alive.
 //
 // Note that Windows keeps the file locked for as long as a view exists, so the
-// file cannot be renamed or deleted until munmapFile is called (unlike POSIX).
-func mmapFile(fd uintptr, size int) ([]byte, error) {
+// file cannot be renamed or deleted until Unmap is called (unlike POSIX).
+func Map(fd uintptr, size int) ([]byte, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("mmap: invalid size %d", size)
 	}
@@ -40,8 +40,8 @@ func mmapFile(fd uintptr, size int) ([]byte, error) {
 	return *(*[]byte)(unsafe.Pointer(&sh)), nil
 }
 
-// munmapFile releases a memory mapping created by mmapFile.
-func munmapFile(data []byte) error {
+// Unmap releases a memory mapping created by Map.
+func Unmap(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
