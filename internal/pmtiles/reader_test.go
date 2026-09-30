@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -229,5 +230,42 @@ func TestReader_LeafDirectoryCycle(t *testing.T) {
 	_, err := OpenReader(writeTestArchive(t, CompressionGzip, root, nil, leaf, nil))
 	if err == nil || !strings.Contains(err.Error(), "referenced more than once") {
 		t.Errorf("OpenReader = %v, want a leaf cycle error", err)
+	}
+}
+
+// TileRanges lists the same tiles as TilesAtZoom, as joined runs of
+// Hilbert indices, including a run that starts a level lower.
+func TestReader_TileRanges(t *testing.T) {
+	// Tile IDs: z1 = 1..4, z2 = 5..20. The run at ID 4 continues into z2
+	// (indices 0, 1); IDs 7 and 8 are two entries that join into one run.
+	root := testDir(t, CompressionGzip,
+		Entry{TileID: 4, Offset: 0, Length: 1, RunLength: 3},
+		Entry{TileID: 7, Offset: 1, Length: 1, RunLength: 1},
+		Entry{TileID: 8, Offset: 2, Length: 1, RunLength: 1},
+		Entry{TileID: 12, Offset: 3, Length: 1, RunLength: 2},
+	)
+	r := openTestReader(t, writeTestArchive(t, CompressionGzip, root, nil, nil, []byte("abcd")))
+
+	got := r.TileRanges(2)
+	want := [][2]uint64{{0, 4}, {7, 9}} // IDs 5, 6 and 7, 8 join
+	if !slices.Equal(got, want) {
+		t.Fatalf("TileRanges(2) = %v, want %v", got, want)
+	}
+	var fromRanges []uint64
+	for _, rg := range got {
+		for h := rg[0]; h < rg[1]; h++ {
+			fromRanges = append(fromRanges, h)
+		}
+	}
+	var fromTiles []uint64
+	for _, tl := range r.TilesAtZoom(2) {
+		fromTiles = append(fromTiles, ZXYToTileID(tl[0], tl[1], tl[2])-ZXYToTileID(2, 0, 0))
+	}
+	slices.Sort(fromTiles)
+	if !slices.Equal(fromRanges, fromTiles) {
+		t.Errorf("ranges cover %v, TilesAtZoom lists %v", fromRanges, fromTiles)
+	}
+	if b, err := r.ReadTile(2, 0, 0); err != nil || string(b) != "a" {
+		t.Errorf("ReadTile(2, 0, 0) = %q, %v; want \"a\"", b, err)
 	}
 }

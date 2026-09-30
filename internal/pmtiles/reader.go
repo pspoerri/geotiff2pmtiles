@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"sort"
+
+	"github.com/pspoerri/geotiff2pmtiles/internal/mmap"
 )
 
 // Reader provides read access to an existing PMTiles v3 archive.
@@ -14,8 +16,12 @@ import (
 // run-length entries: memory grows with the directory, not with the number
 // of addressed tiles (a global archive addresses tens of millions of tiles,
 // most of them in a few long ocean runs).
+//
+// The archive is memory-mapped where the platform allows, so ReadTile hands
+// back a view of the mapping instead of a copy.
 type Reader struct {
 	file     *os.File
+	data     []byte  // the mapped archive; nil where mapping failed, and reads go through file
 	entries  []Entry // tile entries (RunLength >= 1), sorted by TileID
 	numTiles int     // addressed tiles: the sum of the run lengths
 	header   Header
@@ -58,7 +64,13 @@ func OpenReader(path string) (*Reader, error) {
 		numTiles += int(e.RunLength)
 	}
 
+	var data []byte
+	if fi, err := f.Stat(); err == nil && fi.Size() > 0 && int64(int(fi.Size())) == fi.Size() {
+		data, _ = mmap.Map(f.Fd(), int(fi.Size())) // on failure, reads fall back to ReadAt
+	}
+
 	return &Reader{
+		data:     data,
 		file:     f,
 		header:   header,
 		entries:  allEntries,
@@ -124,14 +136,25 @@ func (r *Reader) Header() Header {
 
 // ReadTile returns the raw encoded bytes for a tile at z/x/y.
 // Returns nil, nil if the tile does not exist.
+//
+// The bytes are a read-only view of the mapped archive, valid until Close:
+// writing to them faults, and a caller keeping them past Close must copy.
 func (r *Reader) ReadTile(z, x, y int) ([]byte, error) {
 	e, ok := r.find(ZXYToTileID(z, x, y))
 	if !ok {
 		return nil, nil
 	}
 
+	off := r.header.TileDataOffset + e.Offset
+	if r.data != nil {
+		end := off + uint64(e.Length)
+		if end > uint64(len(r.data)) || end < off {
+			return nil, fmt.Errorf("reading tile z%d/%d/%d: bytes %d-%d outside the %d byte archive", z, x, y, off, end, len(r.data))
+		}
+		return r.data[off:end:end], nil
+	}
 	data := make([]byte, e.Length)
-	if _, err := r.file.ReadAt(data, int64(r.header.TileDataOffset+e.Offset)); err != nil {
+	if _, err := r.file.ReadAt(data, int64(off)); err != nil {
 		return nil, fmt.Errorf("reading tile z%d/%d/%d: %w", z, x, y, err)
 	}
 	return data, nil
@@ -179,6 +202,35 @@ func (r *Reader) TilesAtZoom(z int) [][3]int {
 	return tiles
 }
 
+// TileRanges returns the tiles at zoom z as sorted, disjoint [lo, hi) runs
+// of Hilbert indices within the level (a tile's ID minus that of z/0/0),
+// adjacent runs joined. The children of index h are 4h..4h+3, so the
+// descendants d levels down of a run [lo, hi) are [lo<<2d, hi<<2d). Memory
+// grows with the directory entries, not with the tiles.
+func (r *Reader) TileRanges(z int) [][2]uint64 {
+	if z < 0 || z > 31 {
+		return nil
+	}
+	minID := ZXYToTileID(z, 0, 0)
+	maxID := minID + uint64(1)<<uint(2*z)
+	start := sort.Search(len(r.entries), func(i int) bool {
+		return r.entries[i].TileID+uint64(r.entries[i].RunLength) > minID
+	})
+	var ranges [][2]uint64
+	for _, e := range r.entries[start:] {
+		if e.TileID >= maxID {
+			break
+		}
+		lo, hi := max(e.TileID, minID)-minID, min(e.TileID+uint64(e.RunLength), maxID)-minID
+		if n := len(ranges); n > 0 && ranges[n-1][1] == lo {
+			ranges[n-1][1] = hi
+		} else {
+			ranges = append(ranges, [2]uint64{lo, hi})
+		}
+	}
+	return ranges
+}
+
 // NumTiles returns the total number of addressed tiles in the archive.
 func (r *Reader) NumTiles() int {
 	return r.numTiles
@@ -209,7 +261,12 @@ func (r *Reader) ReadMetadata() (map[string]interface{}, error) {
 	return meta, nil
 }
 
-// Close closes the underlying file.
+// Close unmaps the archive and closes the file. Tiles ReadTile returned are
+// invalid afterwards.
 func (r *Reader) Close() error {
+	if r.data != nil {
+		mmap.Unmap(r.data)
+		r.data = nil
+	}
 	return r.file.Close()
 }

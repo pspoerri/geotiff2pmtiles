@@ -27,6 +27,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pspoerri/geotiff2pmtiles/internal/coord"
+	"github.com/pspoerri/geotiff2pmtiles/internal/mmap"
 )
 
 // RescaleMode specifies how to rescale sample values to uint8.
@@ -154,7 +155,7 @@ func Open(path string) (*Reader, error) {
 		return nil, fmt.Errorf("%s: empty file", path)
 	}
 
-	data, err := mmapFile(f.Fd(), int(size))
+	data, err := mmap.Map(f.Fd(), int(size))
 	if err != nil {
 		return nil, fmt.Errorf("mmap %s: %w", path, err)
 	}

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/pspoerri/geotiff2pmtiles/internal/mmap"
 )
 
 // ByteSource is the random-access byte store backing a Reader.
@@ -70,7 +72,7 @@ func (m mmapSource) Close() error {
 	if m == nil {
 		return nil
 	}
-	return munmapFile(m)
+	return mmap.Unmap(m)
 }
 
 // readAhead is the block size sourceReadSeeker fetches per Slice call.
