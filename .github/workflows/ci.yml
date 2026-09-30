@@ -109,7 +109,7 @@ jobs:
       # the .exe, so the released binary needs no MSYS2 DLLs alongside it.
       - name: Build binaries
         run: |
-          for cmd in geotiff2pmtiles pmtransform coginfo; do
+          for cmd in geotiff2pmtiles pmtransform pmmerge coginfo; do
             go build \
               -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }} -extldflags=-static" \
               -o dist/$cmd-windows-${{ matrix.goarch }}.exe \
@@ -170,7 +170,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          for cmd in geotiff2pmtiles pmtransform coginfo; do
+          for cmd in geotiff2pmtiles pmtransform pmmerge coginfo; do
             go build \
               -ldflags "-X main.version=${{ steps.meta.outputs.version }} -X main.commit=${{ steps.meta.outputs.commit }} -X main.buildDate=${{ steps.meta.outputs.date }}" \
               -o dist/$cmd-${{ matrix.goos }}-${{ matrix.goarch }} \

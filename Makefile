@@ -4,11 +4,13 @@ BINARY           := geotiff2pmtiles
 BINARY_TRANSFORM := pmtransform
 BINARY_CHECK     := checkpmtiles
 BINARY_HEADER    := pmheader
+BINARY_MERGE     := pmmerge
 MODULE           := github.com/pspoerri/geotiff2pmtiles
 CMD              := ./cmd/geotiff2pmtiles/
 CMD_TRANSFORM    := ./cmd/pmtransform/
 CMD_CHECK        := ./cmd/checkpmtiles/
 CMD_HEADER       := ./cmd/pmheader/
+CMD_MERGE        := ./cmd/pmmerge/
 BUILD_DIR        := dist
 GO               := go
 GOFLAGS          :=
@@ -32,6 +34,7 @@ OUTPUT           := $(BUILD_DIR)/$(BINARY)$(EXE)
 OUTPUT_TRANSFORM := $(BUILD_DIR)/$(BINARY_TRANSFORM)$(EXE)
 OUTPUT_CHECK     := $(BUILD_DIR)/$(BINARY_CHECK)$(EXE)
 OUTPUT_HEADER    := $(BUILD_DIR)/$(BINARY_HEADER)$(EXE)
+OUTPUT_MERGE     := $(BUILD_DIR)/$(BINARY_MERGE)$(EXE)
 
 # Default tile format and quality for example targets
 FORMAT     ?= webp
@@ -55,7 +58,7 @@ ESAWORLDCOVER_GAMMA0_DIR := $(TESTDATA_DIR)/esaworldcover-gamma0
 SWISSIMAGE_DIR           := $(TESTDATA_DIR)/swissimage
 
 .PHONY: \
-  all build build-transform build-check build-header build-all install test test-race \
+  all build build-transform build-check build-header build-merge build-all install test test-race \
   test-cover bench test-integration test-integration-download test-integration-real \
   test-integration-copernicus test-integration-copernicus-zstd \
   test-integration-naturalearth test-integration-esaworldcover \
@@ -96,8 +99,12 @@ build-check: $(BUILD_DIR)
 build-header: $(BUILD_DIR)
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_HEADER) $(CMD_HEADER)
 
-## build-all: Build all four tools into dist/
-build-all: build build-transform build-check build-header
+## build-merge: Build pmmerge
+build-merge: $(BUILD_DIR)
+	CGO_ENABLED=$(CGO) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(OUTPUT_MERGE) $(CMD_MERGE)
+
+## build-all: Build all five tools into dist/
+build-all: build build-transform build-check build-header build-merge
 
 ## install: Install geotiff2pmtiles to GOPATH/bin
 install:
