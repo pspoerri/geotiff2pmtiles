@@ -336,9 +336,11 @@ Merge several PMTiles archives into one, e.g. regions tiled to different max zoo
 (z12, z13, z14).
 
 ```
-pmmerge [flags] -o <output.pmtiles> <input.pmtiles>...
+pmmerge [flags] -o <output.pmtiles> <input.pmtiles|dir>...
 ```
 
+- A directory stands for the `.pmtiles` files directly in it, in name order; the output
+  is skipped if it lies there. Any number of inputs.
 - The output spans the highest input max zoom. Above its own max zoom an input's tiles are
   scaled up into the positions they cover (`--upsampling nearest`, exact values and
   blocky, or `bilinear`, smooth; terrarium is interpolated as elevation): PMTiles has no per-region
@@ -355,7 +357,7 @@ pmmerge [flags] -o <output.pmtiles> <input.pmtiles>...
   which the merged extent fits in one tile. Levels below the highest input min zoom (the
   lowest level every input covers) are downsampled from the merged level there
   (`--resampling`, default bicubic). The max zoom is the highest input max zoom.
-- All inputs need the same tile size, at most 64 inputs. Differing formats need `--format`.
+- All inputs need the same tile size. Differing formats need `--format`.
   Inputs without tiles are skipped.
 - No temp files: tiles are written straight into the output, so the disk needs room for
   the output alone (plus the old archive when replacing one).
@@ -377,6 +379,7 @@ pmmerge [flags] -o <output.pmtiles> <input.pmtiles>...
 
 ```bash
 ./pmmerge -o switzerland.pmtiles alps-z12.pmtiles plateau-z13.pmtiles cities-z14.pmtiles
+./pmmerge -o world.pmtiles world-tiles/   # every .pmtiles in the folder
 ```
 
 ## Disk space, memory and temporary files

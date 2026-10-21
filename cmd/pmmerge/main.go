@@ -6,7 +6,7 @@
 //
 // Usage:
 //
-//	pmmerge [flags] -o <output.pmtiles> <input.pmtiles>...
+//	pmmerge [flags] -o <output.pmtiles> <input.pmtiles|dir>...
 package main
 
 import (
@@ -61,7 +61,8 @@ func main() {
 	flag.StringVar(&upsampling, "upsampling", "nearest", "How an input's tiles are scaled up above its max zoom: nearest (exact values, blocky; for elevation and classes) or bilinear (smooth; terrarium is interpolated as elevation)")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: pmmerge [flags] -o <output.pmtiles> <input.pmtiles>...\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: pmmerge [flags] -o <output.pmtiles> <input.pmtiles|dir>...\n\n")
+		fmt.Fprintf(os.Stderr, "A directory stands for the .pmtiles files in it, by name (the output is skipped).\n")
 		fmt.Fprintf(os.Stderr, "Merge PMTiles archives, which may have different max zooms. Where they\n")
 		fmt.Fprintf(os.Stderr, "overlap, the finer input wins (ties: the earlier one) and its transparent\n")
 		fmt.Fprintf(os.Stderr, "pixels show the next one through. Above its own max zoom an input's tiles\n")
@@ -76,10 +77,16 @@ func main() {
 		fmt.Printf("formats: %s\n", encode.Formats())
 		os.Exit(0)
 	}
-	inputPaths := flag.Args()
-	if output == "" || len(inputPaths) < 2 {
+	if output == "" || flag.NArg() == 0 {
 		flag.Usage()
 		os.Exit(1)
+	}
+	inputPaths, err := expandInputs(flag.Args(), output)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(inputPaths) < 2 {
+		log.Fatalf("Need at least 2 inputs, got %d", len(inputPaths))
 	}
 	if !strings.EqualFold(filepath.Ext(output), ".pmtiles") {
 		log.Fatal("Output file must have .pmtiles extension")
@@ -97,9 +104,6 @@ func main() {
 	resamplingMode, err := tile.ParseResampling(resampling)
 	if err != nil {
 		log.Fatalf("--resampling: %v", err)
-	}
-	if len(inputPaths) > tile.MaxMergeInputs {
-		log.Fatalf("%d inputs; pmmerge takes at most %d (merge in steps)", len(inputPaths), tile.MaxMergeInputs)
 	}
 
 	start := time.Now()
@@ -298,6 +302,31 @@ func main() {
 }
 
 // sameFile reports whether two paths name the same existing file.
+// expandInputs replaces each directory argument with the .pmtiles files in
+// it (not recursive, sorted by name), leaving out the output if it is there.
+func expandInputs(args []string, output string) ([]string, error) {
+	var paths []string
+	for _, a := range args {
+		if fi, err := os.Stat(a); err != nil || !fi.IsDir() {
+			paths = append(paths, a) // a file; errors surface when it is opened
+			continue
+		}
+		matches, err := filepath.Glob(filepath.Join(a, "*.pmtiles"))
+		if err != nil {
+			return nil, err
+		}
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("no .pmtiles files in %s", a)
+		}
+		for _, m := range matches {
+			if !sameFile(m, output) {
+				paths = append(paths, m)
+			}
+		}
+	}
+	return paths, nil
+}
+
 func sameFile(a, b string) bool {
 	fa, err := os.Stat(a)
 	if err != nil {
