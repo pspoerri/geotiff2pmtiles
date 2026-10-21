@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -140,8 +141,8 @@ func TestSweepRanges(t *testing.T) {
 	for p := range sweepRanges(ranges) {
 		got = append(got, p)
 	}
-	want := []mergePos{{0, 0b10}, {2, 0b01}, {3, 0b11}, {4, 0b10}, {5, 0b10}, {10, 0b01}}
-	if !slices.Equal(got, want) {
+	want := []mergePos{{0, []int{1}}, {2, []int{0}}, {3, []int{0, 1}}, {4, []int{1}}, {5, []int{1}}, {10, []int{0}}}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("sweep = %v, want %v", got, want)
 	}
 	if n := unionLength(ranges); n != uint64(len(want)) {

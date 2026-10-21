@@ -7,7 +7,6 @@ import (
 	"image"
 	"image/color"
 	"math"
-	"math/bits"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -29,10 +28,6 @@ type MergeInput struct {
 	Format   string // tile format, for decoding
 	TileType uint8  // pmtiles tile type; tiles of the output's type can be copied as they are
 }
-
-// MaxMergeInputs is the most archives Merge takes: the inputs covering a
-// position are a bit set in a uint64.
-const MaxMergeInputs = 64
 
 // MergeConfig holds configuration for Merge.
 type MergeConfig struct {
@@ -62,10 +57,10 @@ type mergeSource struct {
 }
 
 // mergePos is an output position: its Hilbert index within the level and
-// the inputs covering it, bit j standing for the j-th input by priority.
+// the inputs covering it, as ascending indices into the priority order.
 type mergePos struct {
-	h    uint64
-	mask uint64
+	h  uint64
+	in []int
 }
 
 // Merge writes the union of several archives. Where they overlap, the input
@@ -87,9 +82,6 @@ type mergePos struct {
 // input min zoom): those levels are downsampled with cfg.Resampling from
 // the merged level at that zoom.
 func Merge(cfg MergeConfig, inputs []MergeInput, writer TileWriter) (Stats, error) {
-	if len(inputs) > MaxMergeInputs {
-		return Stats{}, fmt.Errorf("%d inputs; at most %d can be merged at once", len(inputs), MaxMergeInputs)
-	}
 	if cfg.Upsampling != ResamplingNearest && cfg.Upsampling != ResamplingBilinear {
 		return Stats{}, fmt.Errorf("upsampling must be nearest or bilinear")
 	}
@@ -250,7 +242,7 @@ func sweepRanges(ranges [][][2]uint64) func(yield func(mergePos) bool) {
 		cur := make([]int, len(ranges)) // each list's first run not yet passed
 		for h := uint64(0); ; h++ {
 			next := uint64(math.MaxUint64) // the lowest run start above h
-			var mask uint64
+			var in []int
 			for j, rs := range ranges {
 				for cur[j] < len(rs) && rs[cur[j]][1] <= h {
 					cur[j]++
@@ -259,19 +251,19 @@ func sweepRanges(ranges [][][2]uint64) func(yield func(mergePos) bool) {
 					continue
 				}
 				if r := rs[cur[j]]; r[0] <= h {
-					mask |= 1 << j
+					in = append(in, j)
 				} else {
 					next = min(next, r[0])
 				}
 			}
-			if mask == 0 {
+			if in == nil {
 				if next == math.MaxUint64 {
 					return
 				}
 				h = next - 1 // jump the gap
 				continue
 			}
-			if !yield(mergePos{h, mask}) {
+			if !yield(mergePos{h, in}) {
 				return
 			}
 		}
@@ -354,8 +346,8 @@ func mergeLevel(cfg MergeConfig, inputs []MergeInput, order []int, z int, ranges
 					}
 					_, x, y := pmtiles.TileIDToZXY(base + p.h)
 					srcs = srcs[:0]
-					for mask := p.mask; mask != 0; mask &= mask - 1 {
-						i := order[bits.TrailingZeros64(mask)]
+					for _, j := range p.in {
+						i := order[j]
 						mz := min(z, int(inputs[i].Reader.Header().MaxZoom))
 						srcs = append(srcs, mergeSource{i, mz, x >> (z - mz), y >> (z - mz)})
 					}

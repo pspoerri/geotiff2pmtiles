@@ -1675,8 +1675,9 @@ tiles by 16, so a level of a national merge meant tens of millions of map entrie
 tile IDs make this unnecessary: within a level they are Hilbert indices, and the children
 of index h are exactly 4h..4h+3 (checked for every tile up to z9), so an input's coverage at
 any zoom — native or scaled up — is its directory's runs, shifted. A sweep over the run
-lists yields positions already in Hilbert order with a bit set of covering inputs, which
-caps a merge at 64 inputs; more can be merged in steps.
+lists yields positions already in Hilbert order with the list of covering inputs. (A
+`uint64` bit set capped a merge at 64 inputs, too few for a world of z5 tiles; a small
+slice per position costs nothing next to decoding and encoding the tile.)
 
 ### Upsampling methods
 

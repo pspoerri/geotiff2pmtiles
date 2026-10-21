@@ -238,7 +238,7 @@ output zoom from max to min:
    argument order). Above an input's max zoom its max-zoom runs are scaled: the children
    of index h are 4h..4h+3, so a run [lo, hi) d levels up covers [lo<<2d, hi<<2d).
 2. `sweepRanges` walks the runs together and yields every covered position in Hilbert
-   order with a bit set of the inputs covering it. Nothing per position is stored: memory
+   order with the list of inputs covering it. Nothing per position is stored: memory
    follows the inputs' directories. Levels go from low to high zoom. Positions go to
    workers in numbered batches, so the descendants of one scaled-up tile land on one
    worker, whose one-tile-per-input decode cache decodes each ancestor once; a collector
